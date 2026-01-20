@@ -16,10 +16,10 @@ if [ -z "$MATRIX1_INDEX" ] || [ -z "$NODES_FILE" ] || [ -z "$EDGES_FILE" ]; then
 fi
 
 # Output file path
-OUTPUT_FILE="scripts/metapaths/results/results_matrix1_$(printf '%03d' $MATRIX1_INDEX).tsv"
+OUTPUT_FILE="results/results_matrix1_$(printf '%03d' $MATRIX1_INDEX).tsv"
 
 # Build command with optional --no-zeroing flag
-CMD="uv run python scripts/metapaths/analyze_3hop_overlap.py \
+CMD="uv run python scripts/analyze_3hop_overlap.py \
   --matrix1-index $MATRIX1_INDEX \
   --edges $EDGES_FILE \
   --nodes $NODES_FILE \

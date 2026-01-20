@@ -8,9 +8,10 @@ This script:
 3. Initializes manifest.json with all jobs in "pending" status
 
 Usage:
-    uv run python scripts/prepare_analysis.py
+    uv run python scripts/prepare_analysis.py --edges /path/to/edges.jsonl --nodes /path/to/nodes.jsonl
 """
 
+import argparse
 import os
 import json
 from datetime import datetime
@@ -21,15 +22,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from analyze_3hop_overlap import load_node_types, build_matrices, build_matrix_list
 
 
-def prepare_analysis():
+def prepare_analysis(nodes_file: str, edges_file: str):
     """Prepare for parallel analysis run."""
-    # Input data paths - SINGLE SOURCE OF TRUTH
-    #nodes_file = "/projects/sequence_analysis/vol3/bizon/sub/pathfilter/scripts/metapaths/input/nodes.jsonl"
-    #edges_file = "/projects/sequence_analysis/vol3/bizon/sub/pathfilter/scripts/metapaths/input/edges.jsonl"
-
-    nodes_file = "/projects/sequence_analysis/vol3/bizon/graphs/rbn_6f3_human_curated_merged_cliques/nodes.jsonl"
-    edges_file = "/projects/sequence_analysis/vol3/bizon/graphs/rbn_6f3_human_curated_merged_cliques/edges.jsonl"
-
     print("=" * 80)
     print("PREPARING PARALLEL 3-HOP ANALYSIS")
     print("=" * 80)
@@ -106,5 +100,19 @@ def prepare_analysis():
     print()
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description='Initialize manifest and directories for parallel 3-hop metapath analysis'
+    )
+    parser.add_argument('--edges', required=True,
+                        help='Path to edges.jsonl file')
+    parser.add_argument('--nodes', required=True,
+                        help='Path to nodes.jsonl file')
+
+    args = parser.parse_args()
+
+    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges)
+
+
 if __name__ == "__main__":
-    prepare_analysis()
+    main()
