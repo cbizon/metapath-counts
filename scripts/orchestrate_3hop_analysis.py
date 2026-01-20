@@ -10,7 +10,7 @@ This script:
 5. Maintains max 1 pending job to avoid queue hogging
 
 Usage:
-    uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+    uv run python scripts/orchestrate_3hop_analysis.py
 """
 
 import json
@@ -22,8 +22,8 @@ from datetime import datetime
 from collections import defaultdict
 
 
-MANIFEST_PATH = "scripts/metapaths/results/manifest.json"
-WORKER_SCRIPT = "scripts/metapaths/run_single_matrix1.sh"
+MANIFEST_PATH = "results/manifest.json"
+WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
 POLL_INTERVAL = 30  # seconds
 MAX_PENDING_JOBS = 1  # Max jobs in PENDING state at once
 
@@ -174,8 +174,8 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file):
         f'--partition={partition}',
         f'--mem={memory_gb}G',
         f'--job-name=3hop_m1_{matrix1_index:03d}',
-        f'--output=scripts/metapaths/logs/matrix1_{matrix1_index:03d}_mem{memory_gb}.out',
-        f'--error=scripts/metapaths/logs/matrix1_{matrix1_index:03d}_mem{memory_gb}.err',
+        f'--output=logs/matrix1_{matrix1_index:03d}_mem{memory_gb}.out',
+        f'--error=logs/matrix1_{matrix1_index:03d}_mem{memory_gb}.err',
         WORKER_SCRIPT,
         str(matrix1_index),
         nodes_file,
@@ -263,7 +263,7 @@ def orchestrate():
     # Extract input file paths from metadata
     if "_metadata" not in manifest:
         print("ERROR: Manifest missing _metadata with input file paths!")
-        print("Please re-run: uv run python scripts/metapaths/prepare_analysis.py")
+        print("Please re-run: uv run python scripts/prepare_analysis.py")
         sys.exit(1)
 
     nodes_file = manifest["_metadata"]["nodes_file"]
@@ -438,7 +438,7 @@ def orchestrate():
                     print(f"  - {matrix1_id}: {data.get('error_type', 'UNKNOWN')}")
 
             print(f"\nNext step:")
-            print(f"  Run: uv run python scripts/metapaths/merge_results.py")
+            print(f"  Run: uv run python scripts/merge_results.py")
             break
 
         # Sleep before next iteration

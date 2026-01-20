@@ -16,7 +16,7 @@ Metapath format: NodeType|predicate|direction|NodeType|...
   - Symmetric example: Gene|directly_physically_interacts_with|A|Gene
 
 Usage:
-    uv run python scripts/metapaths/analyze_3hop_overlap.py \
+    uv run python analyze_3hop_overlap.py \
         --edges ../SimplePredictions/input_graphs/robokop_base_nonredundant/edges.jsonl \
         --nodes ../SimplePredictions/input_graphs/robokop_base_nonredundant/nodes.jsonl \
         --output 3hop_1hop_overlap.tsv

@@ -8,7 +8,7 @@ This script:
 3. Initializes manifest.json with all jobs in "pending" status
 
 Usage:
-    uv run python scripts/metapaths/prepare_analysis.py
+    uv run python scripts/prepare_analysis.py
 """
 
 import os
@@ -49,8 +49,8 @@ def prepare_analysis():
     print(f"\nTotal Matrix1 jobs to process: {num_matrices}")
 
     # Create output directories
-    results_dir = "scripts/metapaths/results"
-    logs_dir = "scripts/metapaths/logs"
+    results_dir = "results"
+    logs_dir = "logs"
 
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
@@ -102,7 +102,7 @@ def prepare_analysis():
     print(f"Manifest: {manifest_path}")
     print(f"\nNext steps:")
     print(f"  1. Review manifest.json")
-    print(f"  2. Run: uv run python scripts/metapaths/orchestrate_3hop_analysis.py")
+    print(f"  2. Run: uv run python scripts/orchestrate_3hop_analysis.py")
     print()
 
 

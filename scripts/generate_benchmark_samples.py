@@ -12,7 +12,7 @@ Output format (TSV):
   bucket | src_type1 | pred1 | tgt_type1 | dir1 | src_type2 | pred2 | tgt_type2 | dir2 | src_type3 | pred3 | tgt_type3 | dir3 | ab_edges
 
 Usage:
-    uv run python scripts/metapaths/generate_benchmark_samples.py \
+    uv run python generate_benchmark_samples.py \
         --edges ../SimplePredictions/input_graphs/robokop_base_nonredundant/edges.jsonl \
         --nodes ../SimplePredictions/input_graphs/robokop_base_nonredundant/nodes.jsonl \
         --output benchmark_samples.tsv \

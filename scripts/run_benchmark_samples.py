@@ -8,7 +8,7 @@ Output format (TSV):
   bucket | metapath | ab_edges | abc_edges | num_comparisons | ab_time | abc_time | comparison_time | total_time
 
 Usage:
-    uv run python scripts/metapaths/run_benchmark_samples.py \
+    uv run python scripts/run_benchmark_samples.py \
         --edges ../SimplePredictions/input_graphs/robokop_base_nonredundant/edges.jsonl \
         --nodes ../SimplePredictions/input_graphs/robokop_base_nonredundant/nodes.jsonl \
         --samples benchmark_samples.tsv \

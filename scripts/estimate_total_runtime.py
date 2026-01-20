@@ -11,7 +11,7 @@ Strategy:
 Output: Distribution of iteration sizes and estimated total time
 
 Usage:
-    uv run python scripts/metapaths/estimate_total_runtime.py \
+    uv run python estimate_total_runtime.py \
         --edges ../SimplePredictions/input_graphs/robokop_base_nonredundant/edges.jsonl \
         --nodes ../SimplePredictions/input_graphs/robokop_base_nonredundant/nodes.jsonl \
         --benchmark matrix_timing_benchmark.tsv

@@ -9,7 +9,7 @@ This script:
 4. Reports statistics
 
 Usage:
-    uv run python scripts/metapaths/merge_results.py [--output OUTPUT_FILE]
+    uv run python scripts/merge_results.py [--output OUTPUT_FILE]
 """
 
 import argparse
@@ -28,7 +28,7 @@ def extract_index_from_filename(filename):
     return None
 
 
-def merge_results(results_dir="scripts/metapaths/results", output_file=None):
+def merge_results(results_dir="results", output_file=None):
     """Merge all result files into a single output file."""
     print("=" * 80)
     print("MERGING 3-HOP ANALYSIS RESULTS")
@@ -144,8 +144,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Merge individual matrix1 result files into a single output'
     )
-    parser.add_argument('--results-dir', default='scripts/metapaths/results',
-                        help='Directory containing result files (default: scripts/metapaths/results)')
+    parser.add_argument('--results-dir', default='results',
+                        help='Directory containing result files (default: results)')
     parser.add_argument('--output', default=None,
                         help='Output file path (default: results_dir/all_3hop_overlaps.tsv)')
 

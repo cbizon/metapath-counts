@@ -306,11 +306,11 @@ def main():
 
     # Input and output directories
     if args.test:
-        results_dir = Path('scripts/metapaths/test_results')
-        output_dir = Path('scripts/metapaths/test_output')
+        results_dir = Path('test_results')
+        output_dir = Path('test_output')
     else:
-        results_dir = Path('scripts/metapaths/results')
-        output_dir = Path('scripts/metapaths/grouped_by_1hop')
+        results_dir = Path('results')
+        output_dir = Path('grouped_by_1hop')
     output_dir.mkdir(exist_ok=True)
 
     # Get all result files
