@@ -6,28 +6,25 @@
 MATRIX1_INDEX=$1
 NODES_FILE=$2
 EDGES_FILE=$3
-NO_ZEROING=${4:-""}  # Optional 4th argument
+N_HOPS=${4:-3}  # Default to 3 if not provided
 
 # Validate arguments
 if [ -z "$MATRIX1_INDEX" ] || [ -z "$NODES_FILE" ] || [ -z "$EDGES_FILE" ]; then
     echo "ERROR: Missing required arguments"
-    echo "Usage: $0 <matrix1_index> <nodes_file> <edges_file> [no_zeroing]"
+    echo "Usage: $0 <matrix1_index> <nodes_file> <edges_file> [n_hops]"
     exit 1
 fi
 
-# Output file path
-OUTPUT_FILE="results/results_matrix1_$(printf '%03d' $MATRIX1_INDEX).tsv"
+# Output file path (n_hop-specific directory)
+OUTPUT_FILE="results_${N_HOPS}hop/results_matrix1_$(printf '%03d' $MATRIX1_INDEX).tsv"
 
-# Build command with optional --no-zeroing flag
+# Build command
 CMD="uv run python scripts/analyze_3hop_overlap.py \
   --matrix1-index $MATRIX1_INDEX \
   --edges $EDGES_FILE \
   --nodes $NODES_FILE \
+  --n-hops $N_HOPS \
   --output $OUTPUT_FILE"
-
-if [ "$NO_ZEROING" = "no_zeroing" ]; then
-    CMD="$CMD --no-zeroing"
-fi
 
 # Activate environment and run analysis
 source .venv/bin/activate

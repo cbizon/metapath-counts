@@ -9,7 +9,11 @@ This script:
 4. Reports statistics
 
 Usage:
-    uv run python scripts/merge_results.py [--output OUTPUT_FILE]
+    # 3-hop (default)
+    uv run python scripts/merge_results.py
+
+    # Custom N-hop
+    uv run python scripts/merge_results.py --n-hops 2
 """
 
 import argparse
@@ -28,10 +32,19 @@ def extract_index_from_filename(filename):
     return None
 
 
-def merge_results(results_dir="results", output_file=None):
-    """Merge all result files into a single output file."""
+def merge_results(results_dir=None, output_file=None, n_hops=3):
+    """Merge all result files into a single output file.
+
+    Args:
+        results_dir: Directory containing result files (default: results_{n_hops}hop)
+        output_file: Output file path (default: results_dir/all_{n_hops}hop_overlaps.tsv)
+        n_hops: Number of hops analyzed (default: 3)
+    """
+    if results_dir is None:
+        results_dir = f"results_{n_hops}hop"
+
     print("=" * 80)
-    print("MERGING 3-HOP ANALYSIS RESULTS")
+    print(f"MERGING {n_hops}-HOP ANALYSIS RESULTS")
     print("=" * 80)
 
     # Load manifest to get expected count
@@ -91,7 +104,7 @@ def merge_results(results_dir="results", output_file=None):
 
     # Determine output file path
     if output_file is None:
-        output_file = os.path.join(results_dir, "all_3hop_overlaps.tsv")
+        output_file = os.path.join(results_dir, f"all_{n_hops}hop_overlaps.tsv")
 
     print(f"\nMerging {len(file_by_index)} files into: {output_file}")
 
@@ -144,14 +157,16 @@ def main():
     parser = argparse.ArgumentParser(
         description='Merge individual matrix1 result files into a single output'
     )
-    parser.add_argument('--results-dir', default='results',
-                        help='Directory containing result files (default: results)')
+    parser.add_argument('--n-hops', type=int, default=3,
+                        help='Number of hops analyzed (default: 3)')
+    parser.add_argument('--results-dir', default=None,
+                        help='Directory containing result files (default: results_{n_hops}hop)')
     parser.add_argument('--output', default=None,
-                        help='Output file path (default: results_dir/all_3hop_overlaps.tsv)')
+                        help='Output file path (default: results_dir/all_{n_hops}hop_overlaps.tsv)')
 
     args = parser.parse_args()
 
-    merge_results(results_dir=args.results_dir, output_file=args.output)
+    merge_results(results_dir=args.results_dir, output_file=args.output, n_hops=args.n_hops)
 
 
 if __name__ == "__main__":

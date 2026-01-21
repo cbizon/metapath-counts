@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Initialize manifest and directories for parallel 3-hop metapath analysis.
+Initialize manifest and directories for parallel N-hop metapath analysis.
 
 This script:
 1. Loads matrices to determine total count
@@ -8,7 +8,11 @@ This script:
 3. Initializes manifest.json with all jobs in "pending" status
 
 Usage:
+    # 3-hop analysis (default)
     uv run python scripts/prepare_analysis.py --edges /path/to/edges.jsonl --nodes /path/to/nodes.jsonl
+
+    # Custom N-hop analysis
+    uv run python scripts/prepare_analysis.py --edges /path/to/edges.jsonl --nodes /path/to/nodes.jsonl --n-hops 2
 """
 
 import argparse
@@ -22,14 +26,21 @@ sys.path.insert(0, os.path.dirname(__file__))
 from analyze_3hop_overlap import load_node_types, build_matrices, build_matrix_list
 
 
-def prepare_analysis(nodes_file: str, edges_file: str):
-    """Prepare for parallel analysis run."""
+def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
+    """Prepare for parallel analysis run.
+
+    Args:
+        nodes_file: Path to KGX nodes file
+        edges_file: Path to KGX edges file
+        n_hops: Number of hops to analyze (default: 3)
+    """
     print("=" * 80)
-    print("PREPARING PARALLEL 3-HOP ANALYSIS")
+    print(f"PREPARING PARALLEL {n_hops}-HOP ANALYSIS")
     print("=" * 80)
     print(f"\nInput data:")
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
+    print(f"  N-hops: {n_hops}")
 
     # Load matrices using existing infrastructure from analyze_3hop_overlap.py
     print("\nLoading graph data and building matrices...")
@@ -42,9 +53,9 @@ def prepare_analysis(nodes_file: str, edges_file: str):
     num_matrices = len(all_matrices)
     print(f"\nTotal Matrix1 jobs to process: {num_matrices}")
 
-    # Create output directories
-    results_dir = "results"
-    logs_dir = "logs"
+    # Create output directories with n_hops suffix
+    results_dir = f"results_{n_hops}hop"
+    logs_dir = f"logs_{n_hops}hop"
 
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
@@ -60,6 +71,7 @@ def prepare_analysis(nodes_file: str, edges_file: str):
         "_metadata": {
             "nodes_file": nodes_file,
             "edges_file": edges_file,
+            "n_hops": n_hops,
             "created_at": datetime.now().isoformat(),
             "total_jobs": num_matrices
         }
@@ -96,22 +108,24 @@ def prepare_analysis(nodes_file: str, edges_file: str):
     print(f"Manifest: {manifest_path}")
     print(f"\nNext steps:")
     print(f"  1. Review manifest.json")
-    print(f"  2. Run: uv run python scripts/orchestrate_3hop_analysis.py")
+    print(f"  2. Run: uv run python scripts/orchestrate_hop_analysis.py --n-hops {n_hops}")
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Initialize manifest and directories for parallel 3-hop metapath analysis'
+        description='Initialize manifest and directories for parallel N-hop metapath analysis'
     )
     parser.add_argument('--edges', required=True,
                         help='Path to edges.jsonl file')
     parser.add_argument('--nodes', required=True,
                         help='Path to nodes.jsonl file')
+    parser.add_argument('--n-hops', type=int, default=3,
+                        help='Number of hops to analyze (default: 3)')
 
     args = parser.parse_args()
 
-    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges)
+    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops)
 
 
 if __name__ == "__main__":

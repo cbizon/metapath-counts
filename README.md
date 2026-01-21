@@ -6,7 +6,6 @@ Parallel 3-hop metapath analysis for biolink knowledge graphs using GraphBLAS sp
 
 This package calculates metapath overlaps in large knowledge graphs by:
 - Computing all possible 3-hop paths via sparse matrix multiplication
-- Preventing node revisiting through diagonal zeroing
 - Eliminating duplicate paths via directional filtering
 - Running massively parallel jobs on SLURM clusters with automatic memory tiering
 
@@ -16,7 +15,6 @@ The primary output is metapath statistics that can be used for rule mining and p
 
 - **Parallel Processing**: Distributes ~2,879 independent jobs across SLURM cluster
 - **Memory Tiering**: Automatic retry at higher memory (180GB → 250GB → 500GB → 1TB → 1.5TB)
-- **Diagonal Zeroing**: Prevents invalid paths with repeated nodes
 - **Duplicate Elimination**: Each path computed exactly once (~2x speedup)
 - **Performance**: ~50-100x faster than sequential (5 days → 2-4 hours)
 
@@ -109,7 +107,6 @@ uv run pytest --cov=metapath_counts --cov-report=html
 - [docs/README.md](docs/README.md) - Complete workflow guide
 - [docs/WORKFLOW.md](docs/WORKFLOW.md) - Quick reference
 - [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) - Design details
-- [docs/DIAGONAL_ZEROING.md](docs/DIAGONAL_ZEROING.md) - Algorithm explanation
 - [CLAUDE.md](CLAUDE.md) - Development guide for AI assistants
 
 ## Requirements

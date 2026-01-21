@@ -18,11 +18,8 @@ uv run python scripts/metapaths/merge_results.py
 Test with a single matrix before full run:
 
 ```bash
-# Test matrix 0 with default settings (zeroing enabled)
+# Test matrix 0
 sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 0 input/nodes.jsonl input/edges.jsonl
-
-# Test matrix 0 with no zeroing (counts all paths)
-sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 0 input/nodes.jsonl input/edges.jsonl no_zeroing
 
 # Check output
 tail -f scripts/metapaths/logs/matrix1_000_mem250.out
@@ -30,22 +27,6 @@ tail -f scripts/metapaths/logs/matrix1_000_mem250.out
 # View results
 head scripts/metapaths/results/results_matrix1_000.tsv
 ```
-
-## Diagonal Zeroing
-
-The analysis supports two modes:
-
-**With Zeroing (default):**
-- Removes paths that loop back to the starting node
-- Reduces low-quality paths with certain repetitions
-- Counts differ between forward/reverse directions
-
-**Without Zeroing (`--no-zeroing`):**
-- Counts all paths including those with repeated nodes
-- Forward and reverse directions produce identical counts
-- Higher path counts
-
-See `DIAGONAL_ZEROING.md` for detailed explanation of what diagonal zeroing does and doesn't do.
 
 ## Architecture
 

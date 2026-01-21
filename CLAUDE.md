@@ -36,8 +36,7 @@ metapath-counts/
 ├── docs/                        # Documentation
 │   ├── README.md                # Main workflow documentation
 │   ├── WORKFLOW.md              # Quick reference
-│   ├── IMPLEMENTATION_PLAN.md   # Design details
-│   └── DIAGONAL_ZEROING.md      # Algorithm explanation
+│   └── IMPLEMENTATION_PLAN.md   # Design details
 ├── results/                     # Output files (gitignored)
 ├── logs/                        # SLURM logs (gitignored)
 └── grouped_by_1hop/             # Grouped results (gitignored)
@@ -113,30 +112,15 @@ Pipe-separated: `NodeType|predicate|direction|NodeType|...`
 
 ## Key Implementation Details
 
-### Diagonal Zeroing (Node Revisiting Prevention)
+### Node Revisiting
 
-The system prevents nodes from appearing multiple times in 3-hop paths through three-level diagonal zeroing:
+**Note:** The current implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
 
-**Problem:** Without diagonal zeroing, you get invalid paths like:
-- Self-loops: `NodeA → NodeA` (direct self-edge)
-- Revisiting: `NodeA → NodeB → NodeA → NodeC` (node appears twice)
-- Start/end same: `NodeA → NodeB → NodeC → NodeA` (circular path)
+1. Matrix-based diagonal zeroing can only prevent revisiting the **start** node, not intermediate nodes
+2. Properly filtering all repeated nodes would require path enumeration, which is computationally expensive
+3. For rule mining purposes, the statistical signal from repeated-node paths is often still useful
 
-**Solution:** Zero out matrix diagonals at three points:
-
-1. **Input matrices:** Removes self-loops from input edges: `A → A`
-2. **After Matrix1 @ Matrix2:** Prevents `A → B → A` patterns
-3. **After (Matrix1 @ Matrix2) @ Matrix3:** Final safeguard ensuring start ≠ end
-
-**Implementation:**
-```python
-if matrix.nrows == matrix.ncols:
-    matrix = matrix.select(gb.select.offdiag).new()
-```
-
-**Result:** All 3-hop paths guaranteed to have 4 distinct nodes.
-
-See `docs/DIAGONAL_ZEROING.md` for detailed explanation.
+If distinct-node paths are required, post-processing filters can be applied.
 
 ### Duplicate Elimination
 

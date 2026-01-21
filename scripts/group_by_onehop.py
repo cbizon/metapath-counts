@@ -26,26 +26,38 @@ def parse_metapath(metapath: str) -> Tuple[list, list, list]:
     """
     Parse a metapath into node types, predicates, and directions.
 
-    Example: "A|pred1|F|B|pred2|R|C" ->
-        nodes=['A', 'B', 'C'], predicates=['pred1', 'pred2'], directions=['F', 'R']
+    Metapath format: Type1|pred1|dir1|Type2|pred2|dir2|...|TypeN
+    - N-hop path has N+1 node types, N predicates, N directions
+    - Number of parts = 1 + 3*N (for N hops)
+
+    Examples:
+        1-hop: "A|pred1|F|B" -> nodes=['A', 'B'], predicates=['pred1'], directions=['F']
+        2-hop: "A|p1|F|B|p2|R|C" -> nodes=['A', 'B', 'C'], predicates=['p1', 'p2'], directions=['F', 'R']
+        3-hop: "A|p1|F|B|p2|R|C|p3|F|D" -> nodes=['A', 'B', 'C', 'D'], ...
+
+    Returns:
+        Tuple of (nodes, predicates, directions)
     """
     parts = metapath.split('|')
+    num_parts = len(parts)
 
-    # For 1-hop: Type1|predicate|direction|Type2 (4 parts)
-    # For 3-hop: Type1|pred1|dir1|Type2|pred2|dir2|Type3|pred3|dir3|Type4 (10 parts)
+    # Formula: num_parts = 1 + 3*n_hops
+    # So: n_hops = (num_parts - 1) / 3
+    if (num_parts - 1) % 3 != 0 or num_parts < 4:
+        raise ValueError(f"Invalid metapath format: {metapath} (parts: {num_parts}, expected 1+3*N)")
 
-    if len(parts) == 4:
-        # 1-hop: parts[0]|parts[1]|parts[2]|parts[3]
-        return [parts[0], parts[3]], [parts[1]], [parts[2]]
-    elif len(parts) == 10:
-        # 3-hop: parts[0]|parts[1]|parts[2]|parts[3]|parts[4]|parts[5]|parts[6]|parts[7]|parts[8]|parts[9]
-        # Node1|pred1|dir1|Node2|pred2|dir2|Node3|pred3|dir3|Node4
-        nodes = [parts[0], parts[3], parts[6], parts[9]]
-        predicates = [parts[1], parts[4], parts[7]]
-        directions = [parts[2], parts[5], parts[8]]
-        return nodes, predicates, directions
-    else:
-        raise ValueError(f"Unexpected metapath format: {metapath} (parts: {len(parts)})")
+    n_hops = (num_parts - 1) // 3
+
+    # Extract nodes: positions 0, 3, 6, 9, ... (every 3rd starting at 0)
+    nodes = [parts[i * 3] for i in range(n_hops + 1)]
+
+    # Extract predicates: positions 1, 4, 7, 10, ... (every 3rd starting at 1)
+    predicates = [parts[i * 3 + 1] for i in range(n_hops)]
+
+    # Extract directions: positions 2, 5, 8, 11, ... (every 3rd starting at 2)
+    directions = [parts[i * 3 + 2] for i in range(n_hops)]
+
+    return nodes, predicates, directions
 
 
 def build_metapath(nodes: list, predicates: list, directions: list) -> str:
@@ -81,11 +93,25 @@ def normalize_1hop(metapath: str) -> Tuple[str, bool]:
         raise ValueError(f"Unknown direction: {directions[0]} in {metapath}")
 
 
-def reverse_3hop(metapath: str) -> str:
+def reverse_metapath(metapath: str) -> str:
     """
-    Reverse a 3-hop metapath.
+    Reverse an N-hop metapath.
 
-    Example: A|p1|F|B|p2|R|C|p3|F|D -> D|p3|R|C|p2|F|B|p1|R|A
+    Reverses the path direction by:
+    1. Reversing the order of nodes
+    2. Reversing the order of predicates
+    3. Reversing the order of directions and flipping F<->R (A stays A)
+
+    Examples:
+        1-hop: "A|p1|F|B" -> "B|p1|R|A"
+        2-hop: "A|p1|F|B|p2|R|C" -> "C|p2|F|B|p1|R|A"
+        3-hop: "A|p1|F|B|p2|R|C|p3|F|D" -> "D|p3|R|C|p2|F|B|p1|R|A"
+
+    Args:
+        metapath: The metapath string to reverse
+
+    Returns:
+        The reversed metapath string
     """
     nodes, predicates, directions = parse_metapath(metapath)
 
@@ -93,7 +119,7 @@ def reverse_3hop(metapath: str) -> str:
     nodes_rev = nodes[::-1]
     # Reverse predicates
     predicates_rev = predicates[::-1]
-    # Reverse directions and flip F<->R
+    # Reverse directions and flip F<->R (A stays A)
     directions_rev = []
     for d in directions[::-1]:
         if d == 'F':
@@ -106,6 +132,12 @@ def reverse_3hop(metapath: str) -> str:
             raise ValueError(f"Unknown direction: {d}")
 
     return build_metapath(nodes_rev, predicates_rev, directions_rev)
+
+
+# Keep old name for backwards compatibility
+def reverse_3hop(metapath: str) -> str:
+    """Alias for reverse_metapath (backwards compatibility)."""
+    return reverse_metapath(metapath)
 
 
 def get_endpoint_types(metapath: str) -> Tuple[str, str]:
@@ -134,31 +166,36 @@ def get_canonical_direction(type1: str, type2: str) -> Tuple[str, str]:
         return type2, type1
 
 
-def canonicalize_row(threehop: str, onehop: str) -> Tuple[str, str]:
+def canonicalize_row(nhop: str, onehop: str) -> Tuple[str, str]:
     """
     Canonicalize a row by ensuring both metapaths follow canonical type pair direction.
 
     If the row's direction doesn't match canonical, reverse BOTH metapaths.
 
-    Returns: (canonicalized_threehop, canonicalized_onehop)
+    Args:
+        nhop: The N-hop metapath (predictor)
+        onehop: The 1-hop metapath (target)
+
+    Returns:
+        Tuple of (canonicalized_nhop, canonicalized_onehop)
     """
     # Get endpoint types
-    threehop_start, threehop_end = get_endpoint_types(threehop)
+    nhop_start, nhop_end = get_endpoint_types(nhop)
     onehop_start, onehop_end = get_endpoint_types(onehop)
 
     # They should match
-    assert threehop_start == onehop_start and threehop_end == onehop_end, \
-        f"Metapath endpoints don't match: 3-hop ({threehop_start}->{threehop_end}) vs 1-hop ({onehop_start}->{onehop_end})"
+    assert nhop_start == onehop_start and nhop_end == onehop_end, \
+        f"Metapath endpoints don't match: N-hop ({nhop_start}->{nhop_end}) vs 1-hop ({onehop_start}->{onehop_end})"
 
     # Determine canonical direction
-    canonical_start, canonical_end = get_canonical_direction(threehop_start, threehop_end)
+    canonical_start, canonical_end = get_canonical_direction(nhop_start, nhop_end)
 
     # If current direction matches canonical, keep as-is
-    if threehop_start == canonical_start:
-        return threehop, onehop
+    if nhop_start == canonical_start:
+        return nhop, onehop
 
     # Otherwise, reverse both
-    return reverse_3hop(threehop), reverse_3hop(onehop)
+    return reverse_metapath(nhop), reverse_metapath(onehop)
 
 
 def safe_filename(metapath: str) -> str:
@@ -296,8 +333,14 @@ def main():
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Group 3-hop metapaths by normalized 1-hop metapath with metric calculations'
+        description='Group N-hop metapaths by normalized 1-hop metapath with metric calculations'
     )
+    parser.add_argument('--n-hops', type=int, default=3,
+                        help='Number of hops analyzed (default: 3)')
+    parser.add_argument('--input', type=str, default=None,
+                        help='Input directory or file (default: results_{n_hops}hop/all_{n_hops}hop_overlaps.tsv)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Output directory for grouped files (default: grouped_by_results_{n_hops}hop)')
     parser.add_argument('--test', action='store_true',
                         help='Run in test mode with test_results directory')
     parser.add_argument('--max-open-files', type=int, default=500,
@@ -309,19 +352,40 @@ def main():
         results_dir = Path('test_results')
         output_dir = Path('test_output')
     else:
-        results_dir = Path('results')
-        output_dir = Path('grouped_by_1hop')
+        # Use n_hops to determine defaults
+        if args.input:
+            input_path = Path(args.input)
+            # If it's a directory, look for result files
+            if input_path.is_dir():
+                results_dir = input_path
+            else:
+                # It's a single merged file
+                results_dir = input_path.parent
+        else:
+            results_dir = Path(f'results_{args.n_hops}hop')
+
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+        else:
+            output_dir = Path(f'grouped_by_results_{args.n_hops}hop')
+
     output_dir.mkdir(exist_ok=True)
 
-    # Get all result files
-    result_files = sorted(results_dir.glob('results_matrix1_*.tsv'))
-    print(f"Found {len(result_files)} result files to process")
+    # Get all result files or single merged file
+    if args.input and Path(args.input).is_file():
+        # Single merged file
+        result_files = [Path(args.input)]
+    else:
+        # Directory of individual result files
+        result_files = sorted(results_dir.glob('results_matrix1_*.tsv'))
+
+    print(f"Found {len(result_files)} result file(s) to process")
 
     # Enhanced header with calculated metrics
-    # Original: 3hop_metapath, 3hop_count, 1hop_metapath, 1hop_count, overlap, total_possible
+    # Original: Nhop_metapath, Nhop_count, 1hop_metapath, 1hop_count, overlap, total_possible
     enhanced_header = '\t'.join([
-        '3hop_metapath',
-        '3hop_count',
+        f'{args.n_hops}hop_metapath',
+        f'{args.n_hops}hop_count',
         '1hop_metapath',
         '1hop_count',
         'overlap',

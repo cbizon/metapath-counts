@@ -54,6 +54,53 @@ def get_memory_mb():
     return process.memory_info().rss / 1024 / 1024
 
 
+def is_canonical_direction(src_type: str, tgt_type: str) -> bool:
+    """
+    Check if a 1-hop path is in canonical direction.
+
+    For 1-hop paths, we can't use size-based duplicate elimination (there's only
+    one matrix). Instead, we use alphabetical ordering of node types.
+
+    Returns True if src_type <= tgt_type (alphabetically), meaning this is the
+    canonical direction to process.
+
+    Args:
+        src_type: Source node type
+        tgt_type: Target node type
+
+    Returns:
+        True if this is the canonical direction to process
+    """
+    return src_type <= tgt_type
+
+
+def should_process_path(n_hops: int, first_matrix_nvals: int, last_matrix_nvals: int,
+                        src_type: str, tgt_type: str) -> bool:
+    """
+    Determine whether to process a path to avoid duplicate computation.
+
+    Each N-hop path can be computed from either direction (A→...→Z or Z→...→A).
+    This function determines which direction to process:
+
+    - For N=1: Use canonical direction (alphabetical ordering of node types)
+    - For N>1: Use size-based rule (last_matrix.nvals >= first_matrix.nvals)
+
+    Args:
+        n_hops: Number of hops in the path
+        first_matrix_nvals: Number of values in the first matrix
+        last_matrix_nvals: Number of values in the last matrix
+        src_type: Source node type (start of path)
+        tgt_type: Target node type (end of path)
+
+    Returns:
+        True if this path should be processed (not a duplicate)
+    """
+    if n_hops == 1:
+        return is_canonical_direction(src_type, tgt_type)
+    else:
+        return last_matrix_nvals >= first_matrix_nvals
+
+
 def format_metapath(node_types, predicates, directions):
     """
     Format metapath as parsable string.
@@ -108,7 +155,7 @@ def load_node_types(nodes_file: str) -> dict:
     return node_types
 
 
-def build_matrices(edges_file: str, node_types: dict, enable_zeroing: bool = True):
+def build_matrices(edges_file: str, node_types: dict):
     """Build sparse matrices for each (source_type, predicate, target_type) triple."""
     print(f"\nCollecting edge types from {edges_file}...", flush=True)
 
@@ -190,11 +237,6 @@ def build_matrices(edges_file: str, node_types: dict, enable_zeroing: bool = Tru
             dup_op=gb.binary.any
         )
 
-        # DIAGONAL ZEROING #1: Remove self-loops from input edges (A→A)
-        # This prevents paths like: NodeA -treats-> NodeA
-        if enable_zeroing and nrows == ncols:  # Only square matrices have diagonals
-            matrix = matrix.select(gb.select.offdiag).new()
-
         matrices[triple] = matrix
 
     print(f"Built {len(matrices):,} matrices", flush=True)
@@ -223,30 +265,24 @@ def build_matrix_list(matrices):
     return all_matrices, matrix_metadata
 
 
-def analyze_3hop_overlap(matrices, output_file, matrix1_index=None, enable_zeroing=True):
-    """Compute 3-hop metapaths and calculate overlap with 1-hop edges.
+def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
+    """Compute N-hop metapaths and calculate overlap with 1-hop edges.
 
-    IMPORTANT: This function can optionally implement three-level diagonal zeroing
-    to reduce paths that loop back to the starting node:
-      1. Input matrices: removes self-loops from edges.jsonl (A→A)
-      2. After A @ B: prevents paths where start node reappears at position 2
-      3. After (A @ B) @ C: prevents paths where start node == end node (if same type)
+    This is a generalized version that handles any number of hops (1, 2, 3, ..., N).
 
-    NOTE: Diagonal zeroing does NOT prevent all repeated nodes, only those that
-    loop back to the start. See DIAGONAL_ZEROING.md for details.
+    NOTE: This function does NOT filter out paths with repeated nodes. The counts
+    include all paths regardless of whether nodes are revisited. Filtering for
+    distinct node paths should be done in post-processing if needed.
 
     Args:
         matrices: Dict of (src_type, pred, tgt_type) -> GraphBLAS matrix
         output_file: Path to output TSV file
+        n_hops: Number of hops for the metapath (default: 3)
         matrix1_index: Optional index to process only a single Matrix1 (for parallelization)
-        enable_zeroing: If True, apply diagonal zeroing (default). If False, count all paths.
     """
     print(f"\n{'=' * 80}", flush=True)
-    print("ANALYZING 3-HOP TO 1-HOP OVERLAP", flush=True)
+    print(f"ANALYZING {n_hops}-HOP TO 1-HOP OVERLAP", flush=True)
     print(f"{'=' * 80}", flush=True)
-    print(f"Diagonal zeroing: {'ENABLED' if enable_zeroing else 'DISABLED'}", flush=True)
-    if not enable_zeroing:
-        print("  WARNING: All paths will be counted, including those with repeated nodes", flush=True)
 
     start_time = time.time()
 
@@ -259,7 +295,7 @@ def analyze_3hop_overlap(matrices, output_file, matrix1_index=None, enable_zeroi
     if matrix1_index is not None:
         print(f"Processing ONLY Matrix1 index: {matrix1_index}", flush=True)
 
-    # Build aggregated 1-hop matrices (sum all predicates AND directions per node type pair)
+    # Build aggregated 1-hop matrices
     print(f"\nBuilding aggregated 1-hop matrices...", flush=True)
     aggregated_1hop = {}
     for src_type, pred, tgt_type, matrix, direction in all_matrices:
@@ -267,43 +303,21 @@ def analyze_3hop_overlap(matrices, output_file, matrix1_index=None, enable_zeroi
         if key not in aggregated_1hop:
             aggregated_1hop[key] = matrix.dup()
         else:
-            # Element-wise OR (union of edges)
             aggregated_1hop[key] = aggregated_1hop[key].ewise_add(matrix, gb.binary.any).new()
 
-    print(f"Created {len(aggregated_1hop):,} aggregated type-pair matrices (both F and R)", flush=True)
-    for (src_type, tgt_type), agg_matrix in list(aggregated_1hop.items())[:5]:
-        print(f"  {src_type} -> {tgt_type}: {agg_matrix.nvals:,} edges", flush=True)
+    print(f"Created {len(aggregated_1hop):,} aggregated type-pair matrices", flush=True)
 
-    # Group by source type
+    # Group by source type for efficient lookup
     by_source_type = defaultdict(list)
     for src_type, pred, tgt_type, matrix, direction in all_matrices:
         by_source_type[src_type].append((src_type, pred, tgt_type, matrix, direction))
 
     # Open output file
     with open(output_file, 'w') as f:
-        f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+        f.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
 
-        total_comparisons = 0
         rows_written = 0
-        matrix2_count = 0
-        matrix3_count = 0
-        total_matrix2_needed = sum(
-            len(by_source_type.get(tgt_type1, []))
-            for _, _, tgt_type1, _, _ in all_matrices
-        )
-
-        # Estimate total Matrix3 iterations
-        total_matrix3_needed = 0
-        for src_type1, pred1, tgt_type1, matrix1, dir1 in all_matrices:
-            if tgt_type1 in by_source_type:
-                for src_type2, pred2, tgt_type2, matrix2, dir2 in by_source_type[tgt_type1]:
-                    if tgt_type2 in by_source_type:
-                        total_matrix3_needed += len(by_source_type[tgt_type2])
-
-        # Generate 3-hop metapaths
-        print(f"\nProcessing 3-hop metapaths...", flush=True)
-        print(f"Total Matrix2 iterations needed: ~{total_matrix2_needed:,}", flush=True)
-        print(f"Total Matrix3 iterations needed: ~{total_matrix3_needed:,}", flush=True)
+        paths_computed = 0
 
         # Determine which Matrix1 indices to process
         if matrix1_index is not None:
@@ -313,193 +327,172 @@ def analyze_3hop_overlap(matrices, output_file, matrix1_index=None, enable_zeroi
         else:
             matrix1_list = list(enumerate(all_matrices))
 
-        for idx1, (src_type1, pred1, tgt_type1, matrix1, dir1) in matrix1_list:
-            if tgt_type1 not in by_source_type:
-                continue
+        # Recursive function to build N-hop paths
+        def process_path(depth, accumulated_matrix, node_types, predicates, directions, first_matrix_nvals):
+            """
+            Recursively build N-hop paths by matrix multiplication.
 
-            m1_nvals = matrix1.nvals  # Store for filtering
+            Args:
+                depth: Current hop depth (1 to n_hops)
+                accumulated_matrix: Result of multiplying matrices so far
+                node_types: List of node types in the path so far
+                predicates: List of predicates in the path so far
+                directions: List of directions in the path so far
+                first_matrix_nvals: Number of values in the first matrix (for duplicate elimination)
+            """
+            nonlocal rows_written, paths_computed
 
-            for idx2, (src_type2, pred2, tgt_type2, matrix2, dir2) in enumerate(by_source_type[tgt_type1]):
-                # Filter Matrix3 candidates: only process if M3.nvals >= M1.nvals
-                # This eliminates duplicate computation (path computed from both ends)
-                if tgt_type2 in by_source_type:
-                    valid_matrix3s = [
-                        (src_type3, pred3, tgt_type3, matrix3, dir3)
-                        for src_type3, pred3, tgt_type3, matrix3, dir3 in by_source_type[tgt_type2]
-                        if matrix3.nvals >= m1_nvals
-                    ]
-                else:
-                    valid_matrix3s = []
+            if depth == n_hops:
+                # We've completed an N-hop path, now compare with 1-hop matrices
+                src_type_final = node_types[0]
+                tgt_type_final = node_types[-1]
 
-                # Skip this M2 if no valid M3s remain after filtering
-                if not valid_matrix3s:
-                    continue
+                # Check if we should process this path (duplicate elimination)
+                if not should_process_path(n_hops, first_matrix_nvals, accumulated_matrix.nvals,
+                                          src_type_final, tgt_type_final):
+                    return
 
-                matrix2_count += 1
+                # Format N-hop metapath
+                nhop_metapath = format_metapath(node_types, predicates, directions)
+                nhop_count = accumulated_matrix.nvals
+                total_possible = accumulated_matrix.nrows * accumulated_matrix.ncols
 
-                # Progress after each Matrix2
-                elapsed = time.time() - start_time
-                rate = matrix2_count / elapsed if elapsed > 0 else 0
-                eta_sec = (total_matrix2_needed - matrix2_count) / rate if rate > 0 else 0
-                eta_min = eta_sec / 60
-                eta_hr = eta_min / 60
+                paths_computed += 1
+                if paths_computed % 100 == 0:
+                    elapsed = time.time() - start_time
+                    print(f"  Paths computed: {paths_computed:,} | Rows written: {rows_written:,} | "
+                          f"Elapsed: {elapsed/60:.1f}min | Mem: {get_memory_mb():.0f}MB", flush=True)
 
-                print(f"  Matrix2: {matrix2_count:,}/{total_matrix2_needed:,} | Elapsed: {elapsed/60:.1f}min | ETA: {eta_hr:.1f}hr | Rows: {rows_written:,} | Mem: {get_memory_mb():.0f}MB", flush=True)
-                if matrix1.ncols != matrix2.nrows:
-                    continue
-
-                # Compute A @ B
-                result_AB = matrix1.mxm(matrix2, gb.semiring.any_pair).new()
-
-                # DIAGONAL ZEROING #2: Prevent paths where start node reappears at position 2
-                # This prevents paths like: NodeA -affects-> NodeB -regulates-> NodeA -treats-> NodeC
-                if enable_zeroing and result_AB.nrows == result_AB.ncols:
-                    result_AB = result_AB.select(gb.select.offdiag).new()
-
-                if result_AB.nvals == 0:
-                    del result_AB  # Clean up before continuing to next Matrix2
-                    continue
-
-                for src_type3, pred3, tgt_type3, matrix3, dir3 in valid_matrix3s:
-                    matrix3_count += 1
-                    iter_start = time.time()
-
-                    if result_AB.ncols != matrix3.nrows:
+                # Compare with all 1-hop matrices
+                for (onehop_src, onehop_pred, onehop_tgt), (onehop_matrix, onehop_dir) in matrix_metadata.items():
+                    if onehop_src != src_type_final or onehop_tgt != tgt_type_final:
                         continue
 
-                    # TIMING: Compute (A @ B) @ C
-                    mult_start = time.time()
-                    result_ABC = result_AB.mxm(matrix3, gb.semiring.any_pair).new()
-
-                    # DIAGONAL ZEROING #3: Prevent paths where start node == end node (if same type)
-                    # Only applies when start and end node types match (square matrix)
-                    if enable_zeroing and result_ABC.nrows == result_ABC.ncols:
-                        result_ABC = result_ABC.select(gb.select.offdiag).new()
-
-                    mult_time = time.time() - mult_start
-
-                    if result_ABC.nvals == 0:
-                        del result_ABC  # Clean up even when empty
+                    if accumulated_matrix.nrows != onehop_matrix.nrows or accumulated_matrix.ncols != onehop_matrix.ncols:
                         continue
 
-                    # Format 3-hop metapath
-                    threehop_metapath = format_metapath(
-                        [src_type1, tgt_type1, tgt_type2, tgt_type3],
-                        [pred1, pred2, pred3],
-                        [dir1, dir2, dir3]
-                    )
-                    threehop_count = result_ABC.nvals
-                    total_possible = result_ABC.nrows * result_ABC.ncols
+                    # Calculate overlap
+                    overlap_matrix = accumulated_matrix.ewise_mult(onehop_matrix, gb.binary.pair).new()
+                    overlap_count = overlap_matrix.nvals
+                    onehop_count = onehop_matrix.nvals
+                    del overlap_matrix
 
-                    # TIMING: Compare with all 1-hop matrices
-                    overlap_start = time.time()
-                    overlap_comparisons = 0
-                    for (onehop_src, onehop_pred, onehop_tgt), (onehop_matrix, onehop_dir) in matrix_metadata.items():
-                        # Check dimension compatibility
-                        if onehop_src != src_type1 or onehop_tgt != tgt_type3:
-                            continue
+                    # Format 1-hop metapath
+                    onehop_metapath = format_metapath([onehop_src, onehop_tgt], [onehop_pred], [onehop_dir])
 
-                        if result_ABC.nrows != onehop_matrix.nrows or result_ABC.ncols != onehop_matrix.ncols:
-                            continue
+                    # Write row
+                    f.write(f"{nhop_metapath}\t{nhop_count}\t{onehop_metapath}\t{onehop_count}\t{overlap_count}\t{total_possible}\n")
+                    rows_written += 1
 
-                        # Calculate overlap
-                        overlap_matrix = result_ABC.ewise_mult(onehop_matrix, gb.binary.pair).new()
+                    if rows_written % 10000 == 0:
+                        f.flush()
+
+                # Also compare with aggregated 1-hop
+                agg_key = (src_type_final, tgt_type_final)
+                if agg_key in aggregated_1hop:
+                    agg_matrix = aggregated_1hop[agg_key]
+
+                    if accumulated_matrix.nrows == agg_matrix.nrows and accumulated_matrix.ncols == agg_matrix.ncols:
+                        overlap_matrix = accumulated_matrix.ewise_mult(agg_matrix, gb.binary.pair).new()
                         overlap_count = overlap_matrix.nvals
-                        onehop_count = onehop_matrix.nvals
-                        overlap_comparisons += 1
-
-                        # Explicitly delete overlap matrix to free memory
+                        agg_count = agg_matrix.nvals
                         del overlap_matrix
 
-                        # Format 1-hop metapath
-                        onehop_metapath = format_metapath(
-                            [onehop_src, onehop_tgt],
-                            [onehop_pred],
-                            [onehop_dir]
-                        )
+                        agg_metapath = f"{src_type_final}|ANY|A|{tgt_type_final}"
 
-                        # Write row
-                        f.write(f"{threehop_metapath}\t{threehop_count}\t{onehop_metapath}\t{onehop_count}\t{overlap_count}\t{total_possible}\n")
+                        f.write(f"{nhop_metapath}\t{nhop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
                         rows_written += 1
-                        total_comparisons += 1
 
                         if rows_written % 10000 == 0:
                             f.flush()
 
-                    overlap_time = time.time() - overlap_start
+                return
 
-                    # TIMING: Aggregated comparison
-                    agg_start = time.time()
-                    agg_key = (src_type1, tgt_type3)
-                    if agg_key in aggregated_1hop:
-                        agg_matrix = aggregated_1hop[agg_key]
+            # Recursive case: continue building the path
+            current_target_type = node_types[-1]
 
-                        if result_ABC.nrows == agg_matrix.nrows and result_ABC.ncols == agg_matrix.ncols:
-                            # Calculate overlap with aggregated
-                            overlap_matrix = result_ABC.ewise_mult(agg_matrix, gb.binary.pair).new()
-                            overlap_count = overlap_matrix.nvals
-                            agg_count = agg_matrix.nvals
+            if current_target_type not in by_source_type:
+                return
 
-                            # Explicitly delete overlap matrix to free memory
-                            del overlap_matrix
+            for src_type, pred, tgt_type, matrix, direction in by_source_type[current_target_type]:
+                # Check dimension compatibility
+                if accumulated_matrix.ncols != matrix.nrows:
+                    continue
 
-                            # Format aggregated 1-hop metapath
-                            agg_metapath = f"{src_type1}|ANY|A|{tgt_type3}"
+                # Multiply matrices
+                next_result = accumulated_matrix.mxm(matrix, gb.semiring.any_pair).new()
 
-                            # Write row
-                            f.write(f"{threehop_metapath}\t{threehop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
-                            rows_written += 1
+                if next_result.nvals == 0:
+                    del next_result
+                    continue
 
-                            if rows_written % 10000 == 0:
-                                f.flush()
-                    agg_time = time.time() - agg_start
+                # Recurse to next depth
+                process_path(
+                    depth + 1,
+                    next_result,
+                    node_types + [tgt_type],
+                    predicates + [pred],
+                    directions + [direction],
+                    first_matrix_nvals
+                )
 
-                    # Explicitly delete result_ABC to free memory before next iteration
-                    del result_ABC
+                # Clean up
+                del next_result
+                if depth % 2 == 0:  # Periodic garbage collection
+                    gc.collect()
 
-                    # Print timing breakdown
-                    iter_time = time.time() - iter_start
-                    elapsed = time.time() - start_time
-                    rate = matrix3_count / elapsed if elapsed > 0 else 0
-                    eta_sec = (total_matrix3_needed - matrix3_count) / rate if rate > 0 else 0
-                    eta_hr = eta_sec / 3600
+        # Main loop: iterate over first matrices
+        for idx1, (src_type1, pred1, tgt_type1, matrix1, dir1) in matrix1_list:
+            print(f"\nProcessing Matrix1 {idx1}/{len(all_matrices)}: {src_type1}|{pred1}|{dir1}|{tgt_type1}", flush=True)
 
-                    print(f"    Matrix3: {matrix3_count:,}/{total_matrix3_needed:,} | {threehop_metapath} | "
-                          f"Total: {iter_time:.1f}s (Mult: {mult_time:.1f}s, Overlap: {overlap_time:.1f}s [{overlap_comparisons} comps], Agg: {agg_time:.1f}s) | "
-                          f"ETA: {eta_hr:.1f}hr | Mem: {get_memory_mb():.0f}MB", flush=True)
-
-                    # Force garbage collection to free C memory from GraphBLAS matrices
-                    # More aggressive: collect every 2 iterations instead of every 5
-                    if matrix3_count % 2 == 0:
-                        gc.collect()
-
-                # Explicitly delete result_AB after processing all Matrix3s for this Matrix2
-                del result_AB
-                gc.collect()
+            # Start recursive path building
+            process_path(
+                depth=1,
+                accumulated_matrix=matrix1,
+                node_types=[src_type1, tgt_type1],
+                predicates=[pred1],
+                directions=[dir1],
+                first_matrix_nvals=matrix1.nvals
+            )
 
     print(f"\nDone! Wrote {rows_written:,} rows to {output_file}", flush=True)
+    print(f"Total {n_hops}-hop paths computed: {paths_computed:,}", flush=True)
+
+
+def analyze_3hop_overlap(matrices, output_file, matrix1_index=None):
+    """Compute 3-hop metapaths and calculate overlap with 1-hop edges.
+
+    This is a convenience wrapper around analyze_nhop_overlap with n_hops=3.
+    Kept for backwards compatibility.
+
+    Args:
+        matrices: Dict of (src_type, pred, tgt_type) -> GraphBLAS matrix
+        output_file: Path to output TSV file
+        matrix1_index: Optional index to process only a single Matrix1 (for parallelization)
+    """
+    return analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=matrix1_index)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Analyze overlap between 3-hop metapaths and 1-hop edges'
+        description='Analyze overlap between N-hop metapaths and 1-hop edges'
     )
     parser.add_argument('--edges', required=True, help='Path to edges.jsonl')
     parser.add_argument('--nodes', required=True, help='Path to nodes.jsonl')
     parser.add_argument('--output', required=True, help='Output TSV file path')
+    parser.add_argument('--n-hops', type=int, default=3,
+                        help='Number of hops for metapath analysis (default: 3)')
     parser.add_argument('--matrix1-index', type=int, default=None,
                         help='Process only this Matrix1 index (for parallelization)')
-    parser.add_argument('--no-zeroing', action='store_true',
-                        help='Disable diagonal zeroing (count all paths including those with repeated nodes)')
 
     args = parser.parse_args()
 
     # Load data and build matrices
     node_types = load_node_types(args.nodes)
-    matrices = build_matrices(args.edges, node_types, enable_zeroing=not args.no_zeroing)
+    matrices = build_matrices(args.edges, node_types)
 
     # Analyze overlap
-    analyze_3hop_overlap(matrices, args.output, matrix1_index=args.matrix1_index, enable_zeroing=not args.no_zeroing)
+    analyze_nhop_overlap(matrices, args.output, n_hops=args.n_hops, matrix1_index=args.matrix1_index)
 
     print(f"\nFinal memory: {get_memory_mb():.0f} MB", flush=True)
 

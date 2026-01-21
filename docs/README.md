@@ -23,9 +23,8 @@ uv run python scripts/metapaths/group_by_onehop.py
 ### What This System Does
 
 1. **Splits work** across ~2,879 independent jobs (one per Matrix1)
-2. **Prevents node revisiting** via three-level diagonal zeroing (no A→B→A→C paths)
-3. **Eliminates duplicates** via M3 filtering (M3.nvals >= M1.nvals rule)
-4. **Auto-retries OOM failures** at higher memory tiers: 180GB → 250GB → 500GB → 1TB → 1.5TB
+2. **Eliminates duplicates** via M3 filtering (M3.nvals >= M1.nvals rule)
+3. **Auto-retries OOM failures** at higher memory tiers: 180GB → 250GB → 500GB → 1TB → 1.5TB
 5. **Manages queue** to avoid overwhelming cluster (max 1 pending job)
 6. **Tracks progress** via manifest.json
 7. **Merges and groups results** for analysis
@@ -152,7 +151,7 @@ uv run python scripts/metapaths/group_by_onehop.py --test
 
 ## Complete Rerun from Scratch
 
-If you need to regenerate all results (e.g., after code changes like diagonal zeroing), follow these steps:
+If you need to regenerate all results (e.g., after algorithm changes), follow these steps:
 
 ### Step 1: Clean Old Results
 
@@ -393,7 +392,7 @@ scripts/metapaths/
 ├── merge_results.py                 # Step 3: Merge results
 ├── group_by_onehop.py               # Step 4: Group by 1-hop metapath
 ├── run_single_matrix1.sh            # SLURM worker script
-├── analyze_3hop_overlap.py          # Core analysis (with diagonal zeroing)
+├── analyze_3hop_overlap.py          # Core analysis
 │
 ├── results/                         # Raw output files (6.9 GB)
 │   ├── manifest.json                # Job tracking (live updates)
@@ -449,36 +448,15 @@ NODES_FILE="/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/
 
 ## Architecture Details
 
-### Diagonal Zeroing (Node Revisiting Prevention)
+### Node Revisiting
 
-The system prevents nodes from appearing multiple times in 3-hop paths through three-level diagonal zeroing:
+**Note:** The current implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
 
-**Problem:** Without diagonal zeroing, you get invalid paths like:
-- Self-loops: `NodeA → NodeA` (direct self-edge)
-- Revisiting: `NodeA → NodeB → NodeA → NodeC` (node appears twice)
-- Start/end same: `NodeA → NodeB → NodeC → NodeA` (circular path)
+1. Matrix-based diagonal zeroing can only prevent revisiting the **start** node, not intermediate nodes
+2. Properly filtering all repeated nodes would require path enumeration, which is computationally expensive
+3. For rule mining purposes, the statistical signal from repeated-node paths is often still useful
 
-**Solution:** Zero out matrix diagonals at three points:
-
-1. **Input matrices (build_matrices):**
-   - Removes self-loops from input edges: `A → A`
-   - Applied to all square matrices after construction
-
-2. **After Matrix1 @ Matrix2:**
-   - Prevents `A → B → A` patterns in intermediate result
-   - Blocks paths like `NodeA → NodeB → NodeA → NodeC`
-
-3. **After (Matrix1 @ Matrix2) @ Matrix3:**
-   - Final safeguard ensuring start ≠ end
-   - Removes any remaining circular paths: `A → B → C → A`
-
-**Implementation:**
-```python
-if matrix.nrows == matrix.ncols:
-    matrix = matrix.select(gb.select.offdiag).new()
-```
-
-**Result:** All 3-hop paths guaranteed to have 4 distinct nodes.
+If distinct-node paths are required, post-processing filters can be applied.
 
 ### Duplicate Elimination
 
