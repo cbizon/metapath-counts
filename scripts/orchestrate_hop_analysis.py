@@ -458,7 +458,7 @@ def orchestrate(n_hops=3):
             pending_jobs_to_submit.sort(key=lambda x: (x[1]["attempts"], -x[1]["memory_tier"]))
 
             slots_available = max_concurrent - num_pending_in_queue
-            to_submit = pending_jobs_to_submit[:min(slots_available * 10, len(pending_jobs_to_submit))]
+            to_submit = pending_jobs_to_submit[:slots_available]
 
             for matrix1_id, data in to_submit:
                 matrix1_index = int(matrix1_id.split('_')[1])
