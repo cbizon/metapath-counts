@@ -28,7 +28,26 @@ from collections import defaultdict
 
 WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
 POLL_INTERVAL = 30  # seconds
-MAX_PENDING_JOBS = 1  # Max jobs in PENDING state at once
+
+
+def get_max_concurrent_jobs(n_hops):
+    """Get max concurrent jobs based on n_hops.
+
+    Lower hop counts complete faster with pre-built matrices,
+    so we can run more in parallel without overwhelming the queue.
+
+    Args:
+        n_hops: Number of hops being analyzed
+
+    Returns:
+        Max number of concurrent PENDING jobs
+    """
+    if n_hops == 1:
+        return 100
+    elif n_hops == 2:
+        return 30
+    else:  # n_hops >= 3
+        return 10
 
 
 def get_manifest_path(n_hops):
@@ -279,13 +298,15 @@ def orchestrate(n_hops=3):
     """
     manifest_path = get_manifest_path(n_hops)
 
+    max_concurrent = get_max_concurrent_jobs(n_hops)
+
     print("=" * 80)
     print(f"STARTING {n_hops}-HOP METAPATH ANALYSIS ORCHESTRATOR")
     print("=" * 80)
     print(f"Manifest: {manifest_path}")
     print(f"Worker script: {WORKER_SCRIPT}")
     print(f"Poll interval: {POLL_INTERVAL}s")
-    print(f"Max pending jobs: {MAX_PENDING_JOBS}")
+    print(f"Max concurrent jobs: {max_concurrent}")
     print(f"N-hops: {n_hops}")
     print()
 
@@ -430,13 +451,13 @@ def orchestrate(n_hops=3):
         # Submit new jobs if queue space available
         num_pending_in_queue = len(pending_jobs)
 
-        if num_pending_in_queue < MAX_PENDING_JOBS:
+        if num_pending_in_queue < max_concurrent:
             pending_jobs_to_submit = get_jobs_by_status(manifest, "pending")
 
             # Sort by attempts (retry failed jobs first) and memory tier (smaller first)
             pending_jobs_to_submit.sort(key=lambda x: (x[1]["attempts"], -x[1]["memory_tier"]))
 
-            slots_available = MAX_PENDING_JOBS - num_pending_in_queue
+            slots_available = max_concurrent - num_pending_in_queue
             to_submit = pending_jobs_to_submit[:min(slots_available * 10, len(pending_jobs_to_submit))]
 
             for matrix1_id, data in to_submit:
