@@ -4,7 +4,7 @@
 from metapath_counts import get_symmetric_predicates
 import sys
 sys.path.insert(0, '.')
-from analyze_3hop_overlap import format_metapath
+from analyze_hop_overlap import format_metapath
 
 # Test 1: Check symmetric predicates loaded
 sym_preds = get_symmetric_predicates()

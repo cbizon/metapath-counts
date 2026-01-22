@@ -1,7 +1,7 @@
 # Plan: Parallelized 3-Hop Metapath Analysis with Auto-Retry
 
 ## Overview
-Transform `analyze_3hop_overlap.py` from sequential (5 days) to parallel (few hours) execution with automatic memory-tiered retry system.
+Transform `analyze_hop_overlap.py` from sequential (5 days) to parallel (few hours) execution with automatic memory-tiered retry system.
 
 ## Key Design Decisions
 - **Direction filtering:** Each M1 job only computes paths where M3.nvals >= M1.nvals (eliminates duplicate computation)
@@ -13,7 +13,7 @@ Transform `analyze_3hop_overlap.py` from sequential (5 days) to parallel (few ho
 
 ## Implementation Steps
 
-### 1. Modify `analyze_3hop_overlap.py`
+### 1. Modify `analyze_hop_overlap.py`
 
 Add `--matrix1-index` CLI argument to process a single Matrix1. The core logic changes:
 
@@ -85,7 +85,7 @@ OUTPUT_FILE="scripts/metapaths/results/results_matrix1_${MATRIX1_INDEX}.tsv"
 
 # Activate environment and run analysis
 source .venv/bin/activate
-uv run python scripts/metapaths/analyze_3hop_overlap.py \
+uv run python scripts/metapaths/analyze_hop_overlap.py \
   --matrix1-index $MATRIX1_INDEX \
   --edges $EDGES_FILE \
   --nodes $NODES_FILE \
@@ -255,7 +255,7 @@ def prepare_analysis():
     nodes_file = "/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/49e5e5585f7685b4/nodes.jsonl"
     edges_file = "/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/49e5e5585f7685b4/edges.jsonl"
 
-    # Load matrices using existing infrastructure from analyze_3hop_overlap.py
+    # Load matrices using existing infrastructure from analyze_hop_overlap.py
     node_types = load_node_types(nodes_file)
     matrices = build_matrices(edges_file, node_types)
 
@@ -317,7 +317,7 @@ def prepare_analysis():
 ## File Structure
 ```
 scripts/metapaths/
-├── analyze_3hop_overlap.py          # Modified (add --matrix1-index)
+├── analyze_hop_overlap.py          # Modified (add --matrix1-index)
 ├── prepare_analysis.py               # NEW: Initialize manifest
 ├── orchestrate_3hop_analysis.py     # NEW: Master control script
 ├── run_single_matrix1.sh            # NEW: SLURM worker script template

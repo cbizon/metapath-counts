@@ -21,9 +21,9 @@ import json
 from datetime import datetime
 import sys
 
-# Add parent directory to path to import from analyze_3hop_overlap
+# Add parent directory to path to import from analyze_hop_overlap
 sys.path.insert(0, os.path.dirname(__file__))
-from analyze_3hop_overlap import load_node_types, build_matrices, build_matrix_list
+from analyze_hop_overlap import load_node_types, build_matrices, build_matrix_list
 
 
 def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
@@ -42,7 +42,7 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
 
-    # Load matrices using existing infrastructure from analyze_3hop_overlap.py
+    # Load matrices using existing infrastructure from analyze_hop_overlap.py
     print("\nLoading graph data and building matrices...")
     node_types = load_node_types(nodes_file)
     matrices = build_matrices(edges_file, node_types)

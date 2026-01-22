@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Analyze overlap between 3-hop metapaths and 1-hop edges.
+Analyze overlap between N-hop metapaths and 1-hop edges.
 
-Computes all 3-hop metapaths via matrix multiplication, then calculates
-overlap with 1-hop edges to identify which 1-hop edges appear in 3-hop paths.
+Computes all N-hop metapaths via matrix multiplication, then calculates
+overlap with 1-hop edges to identify which 1-hop edges appear in N-hop paths.
 
 Output format (TSV):
-  3hop_metapath          | 3hop_count | 1hop_metapath    | 1hop_count | overlap | total_possible
+  Nhop_metapath          | Nhop_count | 1hop_metapath    | 1hop_count | overlap | total_possible
   SmallMolecule|affects|F|Gene|affects|R|SmallMolecule|affects|F|Gene | 6170000000 | SmallMolecule|regulates|F|Gene | 500000 | 450000 | 201000000000
 
 Metapath format: NodeType|predicate|direction|NodeType|...
@@ -16,10 +16,18 @@ Metapath format: NodeType|predicate|direction|NodeType|...
   - Symmetric example: Gene|directly_physically_interacts_with|A|Gene
 
 Usage:
-    uv run python analyze_3hop_overlap.py \
-        --edges ../SimplePredictions/input_graphs/robokop_base_nonredundant/edges.jsonl \
-        --nodes ../SimplePredictions/input_graphs/robokop_base_nonredundant/nodes.jsonl \
-        --output 3hop_1hop_overlap.tsv
+    # 3-hop analysis (default)
+    uv run python analyze_hop_overlap.py \
+        --edges edges.jsonl \
+        --nodes nodes.jsonl \
+        --output results_3hop/results.tsv
+
+    # 2-hop analysis
+    uv run python analyze_hop_overlap.py \
+        --edges edges.jsonl \
+        --nodes nodes.jsonl \
+        --n-hops 2 \
+        --output results_2hop/results.tsv
 """
 
 import argparse

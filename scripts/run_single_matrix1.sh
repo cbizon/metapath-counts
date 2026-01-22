@@ -19,7 +19,7 @@ fi
 OUTPUT_FILE="results_${N_HOPS}hop/results_matrix1_$(printf '%03d' $MATRIX1_INDEX).tsv"
 
 # Build command
-CMD="uv run python scripts/analyze_3hop_overlap.py \
+CMD="uv run python scripts/analyze_hop_overlap.py \
   --matrix1-index $MATRIX1_INDEX \
   --edges $EDGES_FILE \
   --nodes $NODES_FILE \
