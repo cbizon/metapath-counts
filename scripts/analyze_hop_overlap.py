@@ -37,6 +37,8 @@ import psutil
 import os
 import time
 import gc
+import numpy as np
+from pathlib import Path
 import graphblas as gb
 from metapath_counts import get_most_specific_type, get_symmetric_predicates
 
@@ -251,6 +253,67 @@ def build_matrices(edges_file: str, node_types: dict):
     return matrices
 
 
+def load_prebuilt_matrices(matrices_dir: str):
+    """
+    Load pre-built matrices from disk.
+
+    Args:
+        matrices_dir: Directory containing serialized matrices
+
+    Returns:
+        Dict of (src_type, pred, tgt_type) -> GraphBLAS matrix
+    """
+    print(f"Loading pre-built matrices from {matrices_dir}...", flush=True)
+    start_time = time.time()
+
+    matrices_path = Path(matrices_dir)
+    manifest_path = matrices_path / 'manifest.json'
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Matrix manifest not found: {manifest_path}")
+
+    # Load manifest
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
+
+    print(f"Found {manifest['num_matrices']} pre-built matrices ({manifest['total_size_bytes']/1e9:.2f} GB)", flush=True)
+
+    # Load each matrix
+    matrices = {}
+    for i, mat_info in enumerate(manifest['matrices'], 1):
+        src_type = mat_info['src_type']
+        pred = mat_info['predicate']
+        tgt_type = mat_info['tgt_type']
+        filename = mat_info['filename']
+
+        # Load npz file
+        npz_path = matrices_path / filename
+        data = np.load(npz_path)
+
+        # Reconstruct GraphBLAS matrix
+        matrix = gb.Matrix.from_coo(
+            data['rows'],
+            data['cols'],
+            data['vals'],
+            nrows=int(data['nrows']),
+            ncols=int(data['ncols']),
+            dtype=gb.dtypes.BOOL,
+            dup_op=gb.binary.any
+        )
+
+        matrices[(src_type, pred, tgt_type)] = matrix
+
+        if i % 20 == 0:
+            print(f"  Loaded {i}/{len(manifest['matrices'])} matrices", flush=True)
+
+    load_time = time.time() - start_time
+    print(f"Loaded {len(matrices):,} matrices in {load_time:.1f}s", flush=True)
+    print(f"Memory: {get_memory_mb():.0f} MB", flush=True)
+    print()
+
+    return matrices
+
+
 def build_matrix_list(matrices):
     """Build extended matrix list with forward and reverse directions."""
     all_matrices = []
@@ -295,8 +358,12 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
     start_time = time.time()
 
     # Build extended matrix list with inverses
+    print(f"[TIMING] Building matrix list...", flush=True)
+    list_build_start = time.time()
     all_matrices, matrix_metadata = build_matrix_list(matrices)
+    list_build_time = time.time() - list_build_start
 
+    print(f"[TIMING] Matrix list built in {list_build_time:.1f}s", flush=True)
     print(f"Total matrices (with inverses): {len(all_matrices):,}", flush=True)
     print(f"Memory: {get_memory_mb():.0f} MB", flush=True)
 
@@ -304,7 +371,8 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
         print(f"Processing ONLY Matrix1 index: {matrix1_index}", flush=True)
 
     # Build aggregated 1-hop matrices
-    print(f"\nBuilding aggregated 1-hop matrices...", flush=True)
+    print(f"\n[TIMING] Building aggregated 1-hop matrices...", flush=True)
+    agg_start = time.time()
     aggregated_1hop = {}
     for src_type, pred, tgt_type, matrix, direction in all_matrices:
         key = (src_type, tgt_type)
@@ -312,7 +380,9 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
             aggregated_1hop[key] = matrix.dup()
         else:
             aggregated_1hop[key] = aggregated_1hop[key].ewise_add(matrix, gb.binary.any).new()
+    agg_time = time.time() - agg_start
 
+    print(f"[TIMING] Aggregated matrices built in {agg_time:.1f}s", flush=True)
     print(f"Created {len(aggregated_1hop):,} aggregated type-pair matrices", flush=True)
 
     # Group by source type for efficient lookup
@@ -334,6 +404,9 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
             matrix1_list = [(matrix1_index, all_matrices[matrix1_index])]
         else:
             matrix1_list = list(enumerate(all_matrices))
+
+        print(f"\n[TIMING] Starting main computation loop for {len(matrix1_list)} starting matrices...", flush=True)
+        computation_start = time.time()
 
         # Recursive function to build N-hop paths
         def process_path(depth, accumulated_matrix, node_types, predicates, directions, first_matrix_nvals):
@@ -463,8 +536,18 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None):
                 first_matrix_nvals=matrix1.nvals
             )
 
+        computation_time = time.time() - computation_start
+        print(f"\n[TIMING] Main computation loop completed in {computation_time:.1f}s ({computation_time/60:.1f}min)", flush=True)
+
     print(f"\nDone! Wrote {rows_written:,} rows to {output_file}", flush=True)
     print(f"Total {n_hops}-hop paths computed: {paths_computed:,}", flush=True)
+
+    total_analysis_time = time.time() - start_time
+    print(f"\n[TIMING] Total analysis function time: {total_analysis_time:.1f}s ({total_analysis_time/60:.1f}min)", flush=True)
+    print(f"[TIMING] Breakdown:", flush=True)
+    print(f"  Matrix list build:  {list_build_time:7.1f}s ({list_build_time/total_analysis_time*100:5.1f}%)", flush=True)
+    print(f"  Aggregation:        {agg_time:7.1f}s ({agg_time/total_analysis_time*100:5.1f}%)", flush=True)
+    print(f"  Main computation:   {computation_time:7.1f}s ({computation_time/total_analysis_time*100:5.1f}%)", flush=True)
 
 
 def analyze_3hop_overlap(matrices, output_file, matrix1_index=None):
@@ -485,8 +568,9 @@ def main():
     parser = argparse.ArgumentParser(
         description='Analyze overlap between N-hop metapaths and 1-hop edges'
     )
-    parser.add_argument('--edges', required=True, help='Path to edges.jsonl')
-    parser.add_argument('--nodes', required=True, help='Path to nodes.jsonl')
+    parser.add_argument('--edges', help='Path to edges.jsonl (required if --matrices-dir not provided)')
+    parser.add_argument('--nodes', help='Path to nodes.jsonl (required if --matrices-dir not provided)')
+    parser.add_argument('--matrices-dir', help='Directory with pre-built matrices (faster startup)')
     parser.add_argument('--output', required=True, help='Output TSV file path')
     parser.add_argument('--n-hops', type=int, default=3,
                         help='Number of hops for metapath analysis (default: 3)')
@@ -495,12 +579,59 @@ def main():
 
     args = parser.parse_args()
 
-    # Load data and build matrices
-    node_types = load_node_types(args.nodes)
-    matrices = build_matrices(args.edges, node_types)
+    # Validate arguments
+    if not args.matrices_dir and (not args.edges or not args.nodes):
+        parser.error("Either --matrices-dir OR (--edges AND --nodes) must be provided")
+
+    print(f"\n{'=' * 80}", flush=True)
+    print(f"STARTING {args.n_hops}-HOP ANALYSIS", flush=True)
+    print(f"{'=' * 80}", flush=True)
+    overall_start = time.time()
+
+    # Load matrices (either prebuilt or from edges)
+    if args.matrices_dir:
+        print(f"\n[TIMING] Using pre-built matrices from {args.matrices_dir}...", flush=True)
+        load_start = time.time()
+        matrices = load_prebuilt_matrices(args.matrices_dir)
+        load_time = time.time() - load_start
+
+        node_load_time = 0
+        matrix_build_time = load_time
+
+        print(f"[TIMING] Pre-built matrix loading completed in {load_time:.1f}s ({load_time/60:.1f}min)", flush=True)
+        print(f"[TIMING] Memory after loading: {get_memory_mb():.0f} MB", flush=True)
+    else:
+        print(f"\n[TIMING] Loading node types...", flush=True)
+        node_load_start = time.time()
+        node_types = load_node_types(args.nodes)
+        node_load_time = time.time() - node_load_start
+        print(f"[TIMING] Node loading completed in {node_load_time:.1f}s ({node_load_time/60:.1f}min)", flush=True)
+        print(f"[TIMING] Memory after node loading: {get_memory_mb():.0f} MB", flush=True)
+
+        print(f"\n[TIMING] Building matrices from edges...", flush=True)
+        matrix_build_start = time.time()
+        matrices = build_matrices(args.edges, node_types)
+        matrix_build_time = time.time() - matrix_build_start
+        print(f"[TIMING] Matrix building completed in {matrix_build_time:.1f}s ({matrix_build_time/60:.1f}min)", flush=True)
+        print(f"[TIMING] Memory after matrix building: {get_memory_mb():.0f} MB", flush=True)
 
     # Analyze overlap
+    print(f"\n[TIMING] Starting overlap analysis...", flush=True)
+    analysis_start = time.time()
     analyze_nhop_overlap(matrices, args.output, n_hops=args.n_hops, matrix1_index=args.matrix1_index)
+    analysis_time = time.time() - analysis_start
+    print(f"\n[TIMING] Overlap analysis completed in {analysis_time:.1f}s ({analysis_time/60:.1f}min)", flush=True)
+
+    overall_time = time.time() - overall_start
+    print(f"\n{'=' * 80}", flush=True)
+    print(f"TIMING SUMMARY", flush=True)
+    print(f"{'=' * 80}", flush=True)
+    print(f"Node loading:      {node_load_time:8.1f}s ({node_load_time/overall_time*100:5.1f}%)", flush=True)
+    print(f"Matrix building:   {matrix_build_time:8.1f}s ({matrix_build_time/overall_time*100:5.1f}%)", flush=True)
+    print(f"Overlap analysis:  {analysis_time:8.1f}s ({analysis_time/overall_time*100:5.1f}%)", flush=True)
+    print(f"{'-' * 80}", flush=True)
+    print(f"Total:             {overall_time:8.1f}s ({overall_time/60:.1f}min)", flush=True)
+    print(f"{'=' * 80}", flush=True)
 
     print(f"\nFinal memory: {get_memory_mb():.0f} MB", flush=True)
 

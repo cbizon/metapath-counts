@@ -171,7 +171,7 @@ def get_completed_jobs_since(job_ids, since_time):
         return {}
 
 
-def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
+def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matrices_dir=None):
     """Submit a single matrix1 job to SLURM with specified memory.
 
     Args:
@@ -180,6 +180,7 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
         nodes_file: Path to KGX nodes file
         edges_file: Path to KGX edges file
         n_hops: Number of hops to analyze (default: 3)
+        matrices_dir: Optional directory with pre-built matrices (for faster startup)
 
     Returns: job_id (str) or None on failure
     """
@@ -201,6 +202,10 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
         edges_file,
         str(n_hops)
     ]
+
+    # Add matrices_dir if provided
+    if matrices_dir:
+        cmd.append(matrices_dir)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -295,6 +300,7 @@ def orchestrate(n_hops=3):
 
     nodes_file = manifest["_metadata"]["nodes_file"]
     edges_file = manifest["_metadata"]["edges_file"]
+    matrices_dir = manifest["_metadata"].get("matrices_dir", None)
 
     # Get n_hops from manifest if not explicitly provided
     if "_metadata" in manifest and "n_hops" in manifest["_metadata"]:
@@ -308,6 +314,8 @@ def orchestrate(n_hops=3):
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
+    if matrices_dir:
+        print(f"  Pre-built matrices: {matrices_dir}")
 
     total_jobs = len(manifest) - 1  # Subtract 1 for _metadata entry
     print(f"\nLoaded manifest with {total_jobs} jobs")
@@ -436,7 +444,7 @@ def orchestrate(n_hops=3):
                 memory_tier = data["memory_tier"]
 
                 print(f"Submitting {matrix1_id} with {memory_tier}GB memory (attempt {data['attempts'] + 1})...")
-                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops)
+                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops, matrices_dir)
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")
