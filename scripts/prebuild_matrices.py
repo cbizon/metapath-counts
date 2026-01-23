@@ -24,6 +24,7 @@ import sys
 import time
 from pathlib import Path
 import numpy as np
+import yaml
 
 # Add scripts directory to path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -78,6 +79,22 @@ def save_node_indexing(node_to_idx, output_dir):
     print(f"Saved node indexing metadata to {metadata_path}")
 
 
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file."""
+    if config_path is None:
+        config_path = 'config/type_expansion.yaml'
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        print(f"Warning: Config file not found at {config_path}, using defaults")
+        return None
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    return config.get('type_expansion', {})
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Pre-build and serialize matrices for fast loading'
@@ -85,11 +102,19 @@ def main():
     parser.add_argument('--edges', required=True, help='Path to edges.jsonl')
     parser.add_argument('--nodes', required=True, help='Path to nodes.jsonl')
     parser.add_argument('--output', required=True, help='Output directory for matrices')
+    parser.add_argument(
+        '--config',
+        default='config/type_expansion.yaml',
+        help='Path to configuration YAML file (default: config/type_expansion.yaml)'
+    )
 
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load configuration
+    type_config = load_config(args.config)
 
     print("=" * 80)
     print("PRE-BUILDING MATRICES")
@@ -97,12 +122,16 @@ def main():
     print(f"Nodes file: {args.nodes}")
     print(f"Edges file: {args.edges}")
     print(f"Output dir: {args.output}")
+    print(f"Config file: {args.config}")
+    if type_config:
+        print(f"Type expansion enabled: {type_config.get('enabled', True)}")
+        print(f"Excluded types: {len(type_config.get('exclude_types', []))}")
     print()
 
     # Load node types
     print("[1/3] Loading node types...")
     start_time = time.time()
-    node_types = load_node_types(args.nodes)
+    node_types = load_node_types(args.nodes, config=type_config)
     node_load_time = time.time() - start_time
     print(f"Loaded {len(node_types):,} nodes in {node_load_time:.1f}s")
     print()
@@ -146,6 +175,11 @@ def main():
         'num_matrices': len(matrices),
         'total_size_bytes': total_bytes,
         'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'type_expansion': {
+            'enabled': True,
+            'config_file': args.config,
+            'exclude_types': list(type_config.get('exclude_types', [])) if type_config else []
+        },
         'matrices': []
     }
 

@@ -1,0 +1,128 @@
+{
+  "type_frequencies": {
+    "OrganismTaxon": 204,
+    "NamedThing": 1000,
+    "BiologicalEntity": 502,
+    "ThingWithTaxon": 503,
+    "ClinicalAttribute": 6,
+    "Attribute": 6,
+    "OntologyClass": 322,
+    "Phenomenon": 6,
+    "Occurrent": 88,
+    "PhysicalEssenceOrOccurrent": 534,
+    "Disease": 48,
+    "DiseaseOrPhenotypicFeature": 82,
+    "PhenotypicFeature": 34,
+    "GeneFamily": 78,
+    "GeneGroupingMixin": 78,
+    "ChemicalEntityOrGeneOrGeneProduct": 603,
+    "ChemicalEntity": 282,
+    "PhysicalEssence": 446,
+    "ChemicalOrDrugOrTreatment": 282,
+    "ChemicalEntityOrProteinOrPolypeptide": 448,
+    "BiologicalProcess": 19,
+    "BiologicalProcessOrActivity": 82,
+    "MolecularActivity": 63,
+    "AnatomicalEntity": 7,
+    "SubjectOfInvestigation": 7,
+    "OrganismalEntity": 7,
+    "SmallMolecule": 203,
+    "MolecularEntity": 204,
+    "MolecularMixture": 77,
+    "ChemicalMixture": 77,
+    "GrossAnatomicalStructure": 1,
+    "Protein": 166,
+    "GeneProductMixin": 166,
+    "Polypeptide": 166,
+    "GeneOrGeneProduct": 243,
+    "MacromolecularMachineMixin": 243,
+    "Gene": 157,
+    "GenomicEntity": 158,
+    "NucleicAcidEntity": 1,
+    "Drug": 76,
+    "Pathway": 3
+  },
+  "total_types": 41,
+  "most_common_types": [
+    [
+      "NamedThing",
+      1000
+    ],
+    [
+      "ChemicalEntityOrGeneOrGeneProduct",
+      603
+    ],
+    [
+      "PhysicalEssenceOrOccurrent",
+      534
+    ],
+    [
+      "ThingWithTaxon",
+      503
+    ],
+    [
+      "BiologicalEntity",
+      502
+    ],
+    [
+      "ChemicalEntityOrProteinOrPolypeptide",
+      448
+    ],
+    [
+      "PhysicalEssence",
+      446
+    ],
+    [
+      "OntologyClass",
+      322
+    ],
+    [
+      "ChemicalEntity",
+      282
+    ],
+    [
+      "ChemicalOrDrugOrTreatment",
+      282
+    ],
+    [
+      "GeneOrGeneProduct",
+      243
+    ],
+    [
+      "MacromolecularMachineMixin",
+      243
+    ],
+    [
+      "OrganismTaxon",
+      204
+    ],
+    [
+      "MolecularEntity",
+      204
+    ],
+    [
+      "SmallMolecule",
+      203
+    ],
+    [
+      "Protein",
+      166
+    ],
+    [
+      "GeneProductMixin",
+      166
+    ],
+    [
+      "Polypeptide",
+      166
+    ],
+    [
+      "GenomicEntity",
+      158
+    ],
+    [
+      "Gene",
+      157
+    ]
+  ]
+}

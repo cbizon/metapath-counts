@@ -52,6 +52,9 @@ grouped_by_results_*hop/
 input/
 *.tsv
 *.json
+!tests/fixtures/*.jsonl
+!tests/fixtures/*.json
+!config/*.yaml
 
 # Notebooks
 .ipynb_checkpoints/
