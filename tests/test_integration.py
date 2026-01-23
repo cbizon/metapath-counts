@@ -12,7 +12,7 @@ import sys
 # Add scripts to path for importing
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from analyze_3hop_overlap import (
+from analyze_hop_overlap import (
     load_node_types,
     build_matrices,
     build_matrix_list,

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Group 3-hop metapath results by their corresponding 1-hop metapath.
+Group N-hop metapath results by their corresponding 1-hop metapath.
 
 This script:
 1. Reads all results_matrix1_*.tsv files
 2. Normalizes 1-hop metapaths to forward (F) direction
-3. When reversing a 1-hop, also reverses the corresponding 3-hop metapath
+3. When reversing a 1-hop, also reverses the corresponding N-hop metapath
 4. Groups results by normalized 1-hop metapath
 5. Writes each group to a separate output file
 
 Example normalization:
 - 1-hop: Disease|has_adverse_event|R|Drug -> Drug|has_adverse_event|F|Disease
-- 3-hop: A|p1|F|B|p2|R|C|p3|F|D -> D|p3|R|C|p2|F|B|p1|R|A (reversed)
+- N-hop: A|p1|F|B|p2|R|C|p3|F|D -> D|p3|R|C|p2|F|B|p1|R|A (reversed)
 """
 
 import os
@@ -262,17 +262,23 @@ class FileHandleManager:
 
 def calculate_metrics(threehop_count: int, onehop_count: int, overlap: int, total_possible: int) -> dict:
     """
-    Calculate prediction metrics from 3-hop and 1-hop metapath overlap.
+    Calculate prediction metrics from N-hop and 1-hop metapath overlap.
 
-    Following the notebook's approach:
+    Args:
+        threehop_count: Number of N-hop paths (parameter name kept for backwards compat)
+        onehop_count: Number of 1-hop paths
+        overlap: Number of node pairs with both N-hop and 1-hop paths
+        total_possible: Total possible node pairs
+
+    Confusion matrix:
     - TP (True Positives): overlap
-    - FP (False Positives): 3hop_count - overlap
+    - FP (False Positives): nhop_count - overlap
     - FN (False Negatives): 1hop_count - overlap
-    - TN (True Negatives): total_possible - 3hop_count - 1hop_count + overlap
+    - TN (True Negatives): total_possible - nhop_count - 1hop_count + overlap
 
     Returns dict with all calculated metrics.
     """
-    # Confusion matrix
+    # Confusion matrix (threehop_count is actually nhop_count)
     TP = overlap
     FP = threehop_count - overlap
     FN = onehop_count - overlap

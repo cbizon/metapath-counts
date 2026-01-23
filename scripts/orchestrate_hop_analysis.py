@@ -28,7 +28,26 @@ from collections import defaultdict
 
 WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
 POLL_INTERVAL = 30  # seconds
-MAX_PENDING_JOBS = 1  # Max jobs in PENDING state at once
+
+
+def get_max_concurrent_jobs(n_hops):
+    """Get max concurrent jobs based on n_hops.
+
+    Lower hop counts complete faster with pre-built matrices,
+    so we can run more in parallel without overwhelming the queue.
+
+    Args:
+        n_hops: Number of hops being analyzed
+
+    Returns:
+        Max number of concurrent PENDING jobs
+    """
+    if n_hops == 1:
+        return 100
+    elif n_hops == 2:
+        return 30
+    else:  # n_hops >= 3
+        return 10
 
 
 def get_manifest_path(n_hops):
@@ -171,7 +190,7 @@ def get_completed_jobs_since(job_ids, since_time):
         return {}
 
 
-def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
+def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matrices_dir=None):
     """Submit a single matrix1 job to SLURM with specified memory.
 
     Args:
@@ -180,6 +199,7 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
         nodes_file: Path to KGX nodes file
         edges_file: Path to KGX edges file
         n_hops: Number of hops to analyze (default: 3)
+        matrices_dir: Optional directory with pre-built matrices (for faster startup)
 
     Returns: job_id (str) or None on failure
     """
@@ -201,6 +221,10 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3):
         edges_file,
         str(n_hops)
     ]
+
+    # Add matrices_dir if provided
+    if matrices_dir:
+        cmd.append(matrices_dir)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -274,13 +298,15 @@ def orchestrate(n_hops=3):
     """
     manifest_path = get_manifest_path(n_hops)
 
+    max_concurrent = get_max_concurrent_jobs(n_hops)
+
     print("=" * 80)
     print(f"STARTING {n_hops}-HOP METAPATH ANALYSIS ORCHESTRATOR")
     print("=" * 80)
     print(f"Manifest: {manifest_path}")
     print(f"Worker script: {WORKER_SCRIPT}")
     print(f"Poll interval: {POLL_INTERVAL}s")
-    print(f"Max pending jobs: {MAX_PENDING_JOBS}")
+    print(f"Max concurrent jobs: {max_concurrent}")
     print(f"N-hops: {n_hops}")
     print()
 
@@ -295,6 +321,7 @@ def orchestrate(n_hops=3):
 
     nodes_file = manifest["_metadata"]["nodes_file"]
     edges_file = manifest["_metadata"]["edges_file"]
+    matrices_dir = manifest["_metadata"].get("matrices_dir", None)
 
     # Get n_hops from manifest if not explicitly provided
     if "_metadata" in manifest and "n_hops" in manifest["_metadata"]:
@@ -308,6 +335,8 @@ def orchestrate(n_hops=3):
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
+    if matrices_dir:
+        print(f"  Pre-built matrices: {matrices_dir}")
 
     total_jobs = len(manifest) - 1  # Subtract 1 for _metadata entry
     print(f"\nLoaded manifest with {total_jobs} jobs")
@@ -422,21 +451,21 @@ def orchestrate(n_hops=3):
         # Submit new jobs if queue space available
         num_pending_in_queue = len(pending_jobs)
 
-        if num_pending_in_queue < MAX_PENDING_JOBS:
+        if num_pending_in_queue < max_concurrent:
             pending_jobs_to_submit = get_jobs_by_status(manifest, "pending")
 
             # Sort by attempts (retry failed jobs first) and memory tier (smaller first)
             pending_jobs_to_submit.sort(key=lambda x: (x[1]["attempts"], -x[1]["memory_tier"]))
 
-            slots_available = MAX_PENDING_JOBS - num_pending_in_queue
-            to_submit = pending_jobs_to_submit[:min(slots_available * 10, len(pending_jobs_to_submit))]
+            slots_available = max_concurrent - num_pending_in_queue
+            to_submit = pending_jobs_to_submit[:slots_available]
 
             for matrix1_id, data in to_submit:
                 matrix1_index = int(matrix1_id.split('_')[1])
                 memory_tier = data["memory_tier"]
 
                 print(f"Submitting {matrix1_id} with {memory_tier}GB memory (attempt {data['attempts'] + 1})...")
-                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops)
+                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops, matrices_dir)
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")

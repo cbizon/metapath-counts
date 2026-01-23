@@ -26,7 +26,7 @@ metapath-counts/
 │   ├── __init__.py
 │   └── type_utils.py            # Biolink type utilities
 ├── scripts/                     # Analysis scripts (CLI)
-│   ├── analyze_3hop_overlap.py  # Core analysis engine
+│   ├── analyze_hop_overlap.py  # Core analysis engine
 │   ├── prepare_analysis.py      # Initialize SLURM job manifest
 │   ├── orchestrate_3hop_analysis.py # SLURM orchestrator
 │   ├── merge_results.py         # Combine result files

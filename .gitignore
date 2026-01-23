@@ -44,8 +44,11 @@ slurm-*.out
 
 # Results (large data files)
 results/
+results_*hop/
 logs/
+logs_*hop/
 grouped_by_1hop/
+grouped_by_results_*hop/
 input/
 *.tsv
 *.json

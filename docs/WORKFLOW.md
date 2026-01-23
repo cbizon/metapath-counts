@@ -75,7 +75,7 @@ scripts/metapaths/
 ├── orchestrate_3hop_analysis.py # Master orchestrator
 ├── run_single_matrix1.sh        # SLURM worker
 ├── merge_results.py             # Results merger
-├── analyze_3hop_overlap.py      # Modified core analysis (--matrix1-index)
+├── analyze_hop_overlap.py      # Modified core analysis (--matrix1-index)
 ├── logs/                        # SLURM stdout/stderr
 │   └── matrix1_000_mem250.out
 └── results/                     # Output files

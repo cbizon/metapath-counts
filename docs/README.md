@@ -324,7 +324,7 @@ jq '.matrix1_042' scripts/metapaths/results/manifest.json
 ```
 
 **Solution:**
-- If code error: Fix analyze_3hop_overlap.py and manually rerun
+- If code error: Fix analyze_hop_overlap.py and manually rerun
 - If cluster issue: Manually resubmit: `sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 42`
 
 ### Problem: Orchestrator crashed
@@ -392,7 +392,7 @@ scripts/metapaths/
 ├── merge_results.py                 # Step 3: Merge results
 ├── group_by_onehop.py               # Step 4: Group by 1-hop metapath
 ├── run_single_matrix1.sh            # SLURM worker script
-├── analyze_3hop_overlap.py          # Core analysis
+├── analyze_hop_overlap.py          # Core analysis
 │
 ├── results/                         # Raw output files (6.9 GB)
 │   ├── manifest.json                # Job tracking (live updates)

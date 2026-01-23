@@ -21,18 +21,19 @@ import json
 from datetime import datetime
 import sys
 
-# Add parent directory to path to import from analyze_3hop_overlap
+# Add parent directory to path to import from analyze_hop_overlap
 sys.path.insert(0, os.path.dirname(__file__))
-from analyze_3hop_overlap import load_node_types, build_matrices, build_matrix_list
+from analyze_hop_overlap import load_node_types, build_matrices, build_matrix_list, load_prebuilt_matrices
 
 
-def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
+def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices_dir: str = None):
     """Prepare for parallel analysis run.
 
     Args:
         nodes_file: Path to KGX nodes file
         edges_file: Path to KGX edges file
         n_hops: Number of hops to analyze (default: 3)
+        matrices_dir: Optional directory with pre-built matrices (faster)
     """
     print("=" * 80)
     print(f"PREPARING PARALLEL {n_hops}-HOP ANALYSIS")
@@ -41,11 +42,17 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
+    if matrices_dir:
+        print(f"  Pre-built matrices: {matrices_dir}")
 
-    # Load matrices using existing infrastructure from analyze_3hop_overlap.py
-    print("\nLoading graph data and building matrices...")
-    node_types = load_node_types(nodes_file)
-    matrices = build_matrices(edges_file, node_types)
+    # Load matrices (either prebuilt or from edges)
+    if matrices_dir:
+        print("\nLoading pre-built matrices...")
+        matrices = load_prebuilt_matrices(matrices_dir)
+    else:
+        print("\nLoading graph data and building matrices...")
+        node_types = load_node_types(nodes_file)
+        matrices = build_matrices(edges_file, node_types)
 
     # Build extended matrix list with forward and reverse directions
     all_matrices, _ = build_matrix_list(matrices)
@@ -76,6 +83,10 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3):
             "total_jobs": num_matrices
         }
     }
+
+    # Add matrices_dir to metadata if provided
+    if matrices_dir:
+        manifest["_metadata"]["matrices_dir"] = matrices_dir
 
     for i in range(num_matrices):
         src_type, pred, tgt_type, matrix, direction = all_matrices[i]
@@ -122,10 +133,12 @@ def main():
                         help='Path to nodes.jsonl file')
     parser.add_argument('--n-hops', type=int, default=3,
                         help='Number of hops to analyze (default: 3)')
+    parser.add_argument('--matrices-dir', default=None,
+                        help='Directory with pre-built matrices (for faster preparation)')
 
     args = parser.parse_args()
 
-    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops)
+    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops, matrices_dir=args.matrices_dir)
 
 
 if __name__ == "__main__":
