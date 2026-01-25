@@ -121,13 +121,14 @@ class TestEndToEnd:
     """End-to-end integration tests."""
 
     def test_load_tiny_graph(self, tiny_graph):
-        """Test loading nodes and edges from tiny graph."""
+        """Test loading nodes and edges from tiny graph (hierarchical types)."""
         node_types = load_node_types(tiny_graph['nodes_file'])
 
         assert len(node_types) == 5
-        assert node_types['DRUG:1'] == 'Drug'
-        assert node_types['GENE:1'] == 'Gene'
-        assert node_types['DISEASE:1'] == 'Disease'
+        # With hierarchical types, returns lists
+        assert 'Drug' in node_types['DRUG:1']
+        assert 'Gene' in node_types['GENE:1']
+        assert 'Disease' in node_types['DISEASE:1']
 
     def test_build_matrices_tiny_graph(self, tiny_graph):
         """Test building matrices from tiny graph."""

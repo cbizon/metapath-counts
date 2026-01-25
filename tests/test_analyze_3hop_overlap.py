@@ -178,7 +178,7 @@ class TestLoadNodeTypes:
     """Tests for load_node_types function."""
 
     def test_load_basic_nodes(self):
-        """Test loading nodes from a basic KGX file."""
+        """Test loading nodes from a basic KGX file (hierarchical types)."""
         nodes_data = [
             {"id": "PUBCHEM:123", "category": ["biolink:SmallMolecule", "biolink:ChemicalEntity"], "name": "Aspirin"},
             {"id": "MONDO:456", "category": ["biolink:Disease"], "name": "Headache"},
@@ -194,10 +194,10 @@ class TestLoadNodeTypes:
             node_types = load_node_types(temp_path)
 
             assert len(node_types) == 3
-            # Should get most specific type (SmallMolecule, not ChemicalEntity)
-            assert node_types['PUBCHEM:123'] == 'SmallMolecule'
-            assert node_types['MONDO:456'] == 'Disease'
-            assert node_types['HGNC:789'] == 'Gene'
+            # With hierarchical types, returns list of types (most specific first)
+            assert node_types['PUBCHEM:123'] == ['SmallMolecule', 'ChemicalEntity']
+            assert node_types['MONDO:456'] == ['Disease']
+            assert node_types['HGNC:789'] == ['Gene']
         finally:
             Path(temp_path).unlink()
 
@@ -230,14 +230,14 @@ class TestBuildMatrices:
     """Tests for build_matrices function."""
 
     def test_build_simple_matrices(self):
-        """Test building matrices from simple edge data."""
-        # Create test node types
+        """Test building matrices from simple edge data (hierarchical types)."""
+        # Create test node types (now as lists for hierarchical types)
         node_types = {
-            'DRUG:1': 'Drug',
-            'DRUG:2': 'Drug',
-            'GENE:1': 'Gene',
-            'GENE:2': 'Gene',
-            'DISEASE:1': 'Disease',
+            'DRUG:1': ['Drug'],
+            'DRUG:2': ['Drug'],
+            'GENE:1': ['Gene'],
+            'GENE:2': ['Gene'],
+            'DISEASE:1': ['Disease'],
         }
 
         # Create test edges
@@ -275,8 +275,8 @@ class TestBuildMatrices:
     def test_build_matrices_skips_subclass(self):
         """Test that subclass_of edges are skipped."""
         node_types = {
-            'NODE:1': 'Gene',
-            'NODE:2': 'Gene',
+            'NODE:1': ['Gene'],
+            'NODE:2': ['Gene'],
         }
 
         edges_data = [
@@ -296,10 +296,10 @@ class TestBuildMatrices:
             Path(temp_path).unlink()
 
     def test_build_matrices_symmetric_predicate(self):
-        """Test that symmetric predicates create edges in both directions."""
+        """Test that symmetric predicates create edges in both directions (hierarchical types)."""
         node_types = {
-            'GENE:1': 'Gene',
-            'GENE:2': 'Gene',
+            'GENE:1': ['Gene'],
+            'GENE:2': ['Gene'],
         }
 
         edges_data = [
@@ -329,10 +329,10 @@ class TestBuildMatrixList:
     """Tests for build_matrix_list function."""
 
     def test_build_matrix_list_forward_reverse(self):
-        """Test that matrix list includes forward and reverse directions."""
+        """Test that matrix list includes forward and reverse directions (hierarchical types)."""
         node_types = {
-            'DRUG:1': 'Drug',
-            'GENE:1': 'Gene',
+            'DRUG:1': ['Drug'],
+            'GENE:1': ['Gene'],
         }
 
         edges_data = [
@@ -364,10 +364,10 @@ class TestBuildMatrixList:
             Path(temp_path).unlink()
 
     def test_build_matrix_list_symmetric_no_reverse(self):
-        """Test that symmetric predicates don't create separate reverse entries."""
+        """Test that symmetric predicates don't create separate reverse entries (hierarchical types)."""
         node_types = {
-            'GENE:1': 'Gene',
-            'GENE:2': 'Gene',
+            'GENE:1': ['Gene'],
+            'GENE:2': ['Gene'],
         }
 
         edges_data = [
