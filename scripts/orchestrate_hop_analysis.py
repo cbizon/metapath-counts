@@ -25,6 +25,10 @@ import sys
 from datetime import datetime
 from collections import defaultdict
 
+# Import path tracking functions
+sys.path.insert(0, os.path.dirname(__file__))
+from path_tracker import get_path_statistics as get_path_stats_from_tracker
+
 
 WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
 POLL_INTERVAL = 30  # seconds
@@ -190,7 +194,7 @@ def get_completed_jobs_since(job_ids, since_time):
         return {}
 
 
-def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matrices_dir=None):
+def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matrices_dir=None, config_file=None):
     """Submit a single matrix1 job to SLURM with specified memory.
 
     Args:
@@ -200,6 +204,7 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matri
         edges_file: Path to KGX edges file
         n_hops: Number of hops to analyze (default: 3)
         matrices_dir: Optional directory with pre-built matrices (for faster startup)
+        config_file: Optional path to configuration file (default: config/type_expansion.yaml)
 
     Returns: job_id (str) or None on failure
     """
@@ -225,6 +230,15 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matri
     # Add matrices_dir if provided
     if matrices_dir:
         cmd.append(matrices_dir)
+    else:
+        # Need to provide empty string for positional arg if using config_file
+        cmd.append("")
+
+    # Add config_file
+    if config_file:
+        cmd.append(config_file)
+    else:
+        cmd.append("config/type_expansion.yaml")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -245,6 +259,39 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matri
     except Exception as e:
         print(f"ERROR: Failed to submit job for matrix1_{matrix1_index:03d}: {e}")
         return None
+
+
+def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
+    """Get path completion statistics for a Matrix1 job.
+
+    Returns dict with:
+        - completed_count: Number of completed paths
+        - failed_at_current_tier: Number of paths that failed at current memory tier
+        - failed_at_lower_tiers: Number of paths that failed at lower memory tiers
+        - total_failed: Total failed paths across all tiers
+    """
+    results_dir = f"results_{n_hops}hop"
+
+    # Get stats from path_tracker
+    stats = get_path_stats_from_tracker(results_dir, matrix1_index)
+
+    completed_count = stats['completed']
+    failed_by_tier = stats['failed_by_tier']
+    total_failed = stats['total_failed']
+
+    # Count failed paths by tier category
+    failed_at_current_tier = failed_by_tier.get(current_memory_gb, 0)
+    failed_at_lower_tiers = sum(
+        count for tier, count in failed_by_tier.items()
+        if tier < current_memory_gb
+    )
+
+    return {
+        'completed_count': completed_count,
+        'failed_at_current_tier': failed_at_current_tier,
+        'failed_at_lower_tiers': failed_at_lower_tiers,
+        'total_failed': total_failed
+    }
 
 
 def increment_memory_tier(current_memory):
@@ -271,9 +318,15 @@ def increment_memory_tier(current_memory):
 def print_status_summary(manifest, running_jobs):
     """Print current status summary."""
     status_counts = defaultdict(int)
+    total_paths_completed = 0
+    total_paths_failed = 0
+
     for key, data in manifest.items():
         if key != "_metadata":
             status_counts[data["status"]] += 1
+            # Accumulate path-level stats if available
+            total_paths_completed += data.get("paths_completed", 0)
+            total_paths_failed += data.get("paths_failed", 0)
 
     total = len(manifest) - 1  # Exclude _metadata
     pending = status_counts["pending"]
@@ -284,17 +337,25 @@ def print_status_summary(manifest, running_jobs):
     pct_complete = (completed / total * 100) if total > 0 else 0
 
     print(f"\n{'=' * 80}")
-    print(f"STATUS: {completed}/{total} completed ({pct_complete:.1f}%) | "
+    print(f"STATUS: {completed}/{total} jobs completed ({pct_complete:.1f}%) | "
           f"Running: {running} | Pending: {pending} | Failed: {failed}")
     print(f"SLURM queue: {len(running_jobs)} running jobs")
+
+    # Show path-level progress if available
+    if total_paths_completed > 0 or total_paths_failed > 0:
+        total_paths = total_paths_completed + total_paths_failed
+        pct_paths = (total_paths_completed / total_paths * 100) if total_paths > 0 else 0
+        print(f"PATHS: {total_paths_completed:,} completed, {total_paths_failed:,} failed ({pct_paths:.1f}% success)")
+
     print(f"{'=' * 80}\n")
 
 
-def orchestrate(n_hops=3):
+def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
     """Main orchestration loop.
 
     Args:
         n_hops: Number of hops to analyze (default: 3)
+        config_file: Path to configuration file (default: config/type_expansion.yaml)
     """
     manifest_path = get_manifest_path(n_hops)
 
@@ -308,6 +369,7 @@ def orchestrate(n_hops=3):
     print(f"Poll interval: {POLL_INTERVAL}s")
     print(f"Max concurrent jobs: {max_concurrent}")
     print(f"N-hops: {n_hops}")
+    print(f"Config: {config_file}")
     print()
 
     # Load manifest
@@ -335,6 +397,7 @@ def orchestrate(n_hops=3):
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
+    print(f"  Config: {config_file}")
     if matrices_dir:
         print(f"  Pre-built matrices: {matrices_dir}")
 
@@ -401,36 +464,101 @@ def orchestrate(n_hops=3):
 
                 matrix1_id = submitted_jobs[job_id]
                 matrix1_index = int(matrix1_id.split('_')[1])
+                current_memory = manifest[matrix1_id]["memory_tier"]
 
                 print(f"Job {job_id} ({matrix1_id}) completed: State={state}, ExitCode={exit_code}")
 
+                # Get path statistics for this job
+                path_stats = get_path_statistics(matrix1_index, n_hops, current_memory)
+                completed_paths = path_stats['completed_count']
+                failed_current = path_stats['failed_at_current_tier']
+                failed_lower = path_stats['failed_at_lower_tiers']
+                total_failed = path_stats['total_failed']
+
+                print(f"  Path stats: {completed_paths} completed, {failed_current} failed at {current_memory}GB, {failed_lower} failed at lower tiers")
+
                 if state == "COMPLETED" and exit_code == 0:
-                    # Success!
-                    update_job_status(manifest, matrix1_id, n_hops, status="completed")
-                    print(f"  ✓ {matrix1_id} completed successfully")
+                    # Job completed successfully - check if all paths are done
+                    if total_failed == 0:
+                        # All paths completed successfully
+                        update_job_status(
+                            manifest, matrix1_id, n_hops,
+                            status="completed",
+                            paths_completed=completed_paths,
+                            paths_failed=0
+                        )
+                        print(f"  ✓ {matrix1_id} completed successfully ({completed_paths} paths)")
+                    else:
+                        # Job completed but some paths failed - need retry at higher tier
+                        next_memory = increment_memory_tier(current_memory)
+                        if next_memory:
+                            print(f"  ⚠ {matrix1_id} has {total_failed} failed paths, retrying at {next_memory}GB")
+                            update_job_status(
+                                manifest, matrix1_id, n_hops,
+                                status="pending",
+                                memory_tier=next_memory,
+                                attempts=manifest[matrix1_id]["attempts"] + 1,
+                                job_id=None,
+                                paths_completed=completed_paths,
+                                paths_failed=total_failed
+                            )
+                        else:
+                            # Already at max tier, mark as completed with partial results
+                            print(f"  ✓ {matrix1_id} completed with {total_failed} failed paths (max memory reached)")
+                            update_job_status(
+                                manifest, matrix1_id, n_hops,
+                                status="completed",
+                                paths_completed=completed_paths,
+                                paths_failed=total_failed,
+                                error_type="PARTIAL_MAX_MEMORY"
+                            )
+
                     del submitted_jobs[job_id]
 
                 elif state == "OUT_OF_MEMORY" or exit_code == 137 or state == "FAILED":
-                    # OOM failure - retry at higher memory
+                    # OOM failure - check path stats to decide retry strategy
                     # Treat FAILED as OOM since GraphBLAS internal OOM doesn't trigger SLURM OOM
-                    current_memory = manifest[matrix1_id]["memory_tier"]
-                    next_memory = increment_memory_tier(current_memory)
 
-                    if next_memory:
-                        print(f"  ⚠ {matrix1_id} OOM at {current_memory}GB (state={state}), retrying at {next_memory}GB")
-                        update_job_status(
-                            manifest, matrix1_id, n_hops,
-                            status="pending",
-                            memory_tier=next_memory,
-                            attempts=manifest[matrix1_id]["attempts"] + 1,
-                            job_id=None
-                        )
+                    # Decision logic:
+                    # 1. If we have failed paths at current tier OR lower tiers -> retry at higher tier
+                    # 2. If we have completed some paths -> we made progress, retry at higher tier for failed paths
+
+                    if failed_current > 0 or failed_lower > 0 or completed_paths > 0:
+                        # We have failed paths or made some progress
+                        next_memory = increment_memory_tier(current_memory)
+
+                        if next_memory:
+                            print(f"  ⚠ {matrix1_id} OOM at {current_memory}GB (state={state})")
+                            print(f"      Progress: {completed_paths} completed, {total_failed} failed")
+                            print(f"      Retrying at {next_memory}GB for failed paths")
+                            update_job_status(
+                                manifest, matrix1_id, n_hops,
+                                status="pending",
+                                memory_tier=next_memory,
+                                attempts=manifest[matrix1_id]["attempts"] + 1,
+                                job_id=None,
+                                paths_completed=completed_paths,
+                                paths_failed=total_failed
+                            )
+                        else:
+                            print(f"  ✗ {matrix1_id} failed OOM at {current_memory}GB (max memory reached)")
+                            print(f"      Final: {completed_paths} completed, {total_failed} failed")
+                            update_job_status(
+                                manifest, matrix1_id, n_hops,
+                                status="completed",
+                                paths_completed=completed_paths,
+                                paths_failed=total_failed,
+                                error_type="PARTIAL_MAX_MEMORY"
+                            )
                     else:
-                        print(f"  ✗ {matrix1_id} failed OOM at {current_memory}GB (max memory reached)")
+                        # No progress at all - this is a true failure
+                        print(f"  ✗ {matrix1_id} failed immediately at {current_memory}GB (no paths computed)")
                         update_job_status(
                             manifest, matrix1_id, n_hops,
                             status="failed",
-                            error_type="OOM_MAX_MEMORY"
+                            error_type=f"FAILED_IMMEDIATE_{state}",
+                            paths_completed=0,
+                            paths_failed=0
                         )
 
                     del submitted_jobs[job_id]
@@ -438,10 +566,13 @@ def orchestrate(n_hops=3):
                 else:
                     # Other failure (CANCELLED, TIMEOUT, NODE_FAIL)
                     print(f"  ✗ {matrix1_id} failed: {state}")
+                    print(f"      Progress: {completed_paths} completed, {total_failed} failed")
                     update_job_status(
                         manifest, matrix1_id, n_hops,
                         status="failed",
-                        error_type=state
+                        error_type=state,
+                        paths_completed=completed_paths,
+                        paths_failed=total_failed
                     )
                     del submitted_jobs[job_id]
 
@@ -465,7 +596,7 @@ def orchestrate(n_hops=3):
                 memory_tier = data["memory_tier"]
 
                 print(f"Submitting {matrix1_id} with {memory_tier}GB memory (attempt {data['attempts'] + 1})...")
-                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops, matrices_dir)
+                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops, matrices_dir, config_file)
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")
@@ -493,9 +624,30 @@ def orchestrate(n_hops=3):
             completed_count = len(get_jobs_by_status(manifest, "completed"))
             failed_count = len(get_jobs_by_status(manifest, "failed"))
 
+            # Calculate path-level statistics
+            total_paths_completed = 0
+            total_paths_failed = 0
+            jobs_with_partial_results = 0
+
+            for matrix1_id, data in get_jobs_by_status(manifest, "completed"):
+                paths_completed = data.get("paths_completed", 0)
+                paths_failed = data.get("paths_failed", 0)
+                total_paths_completed += paths_completed
+                total_paths_failed += paths_failed
+
+                if paths_failed > 0:
+                    jobs_with_partial_results += 1
+
             print(f"\nFinal status:")
-            print(f"  Completed: {completed_count}/{total_jobs}")
-            print(f"  Failed: {failed_count}/{total_jobs}")
+            print(f"  Jobs: {completed_count}/{total_jobs} completed, {failed_count}/{total_jobs} failed")
+
+            if total_paths_completed > 0 or total_paths_failed > 0:
+                total_paths = total_paths_completed + total_paths_failed
+                pct_success = (total_paths_completed / total_paths * 100) if total_paths > 0 else 0
+                print(f"  Paths: {total_paths_completed:,} completed, {total_paths_failed:,} failed ({pct_success:.1f}% success)")
+
+                if jobs_with_partial_results > 0:
+                    print(f"  Note: {jobs_with_partial_results} jobs completed with some failed paths (OOM at max tier)")
 
             if failed_count > 0:
                 print(f"\nFailed jobs:")
@@ -522,10 +674,15 @@ if __name__ == "__main__":
         default=3,
         help="Number of hops to analyze (default: 3)"
     )
+    parser.add_argument(
+        "--config",
+        default="config/type_expansion.yaml",
+        help="Path to configuration YAML file (default: config/type_expansion.yaml)"
+    )
     args = parser.parse_args()
 
     try:
-        orchestrate(n_hops=args.n_hops)
+        orchestrate(n_hops=args.n_hops, config_file=args.config)
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")
         sys.exit(0)

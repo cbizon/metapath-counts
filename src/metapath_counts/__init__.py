@@ -7,6 +7,16 @@ using GraphBLAS sparse matrices and SLURM-based parallel processing.
 
 __version__ = "0.1.0"
 
-from .type_utils import get_most_specific_type, get_symmetric_predicates
+from .type_utils import (
+    get_most_specific_type,
+    get_symmetric_predicates,
+    get_all_types,
+    filter_abstract_types
+)
 
-__all__ = ["get_most_specific_type", "get_symmetric_predicates"]
+__all__ = [
+    "get_most_specific_type",
+    "get_symmetric_predicates",
+    "get_all_types",
+    "filter_abstract_types"
+]

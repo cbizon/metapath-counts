@@ -112,6 +112,61 @@ Pipe-separated: `NodeType|predicate|direction|NodeType|...`
 
 ## Key Implementation Details
 
+### Hierarchical Type Expansion
+
+**Default behavior:** Nodes participate in metapaths as ALL their types in the Biolink hierarchy, not just the most specific type.
+
+**Example:**
+- Node with categories: `["SmallMolecule", "ChemicalEntity", "MolecularEntity"]`
+- Participates as: `SmallMolecule`, `ChemicalEntity`, AND `MolecularEntity`
+- Creates paths like:
+  - `SmallMolecule → affects → Gene`
+  - `ChemicalEntity → affects → Gene`
+  - `MolecularEntity → affects → Gene`
+
+**Configuration** (`config/type_expansion.yaml`):
+```yaml
+type_expansion:
+  enabled: true
+  exclude_types: [ThingWithTaxon, SubjectOfInvestigation, ...]  # 8 abstract types excluded by default
+  max_depth: null  # Unlimited depth
+  include_most_specific: true  # Always include most specific type
+```
+
+**Impact:**
+- Matrix count: ~15-20x more matrices (depends on type diversity)
+- More comprehensive rule mining (captures patterns at multiple abstraction levels)
+- Slight memory increase per job (handled by tiering)
+
+**CLI Usage:**
+```bash
+# Use default config
+uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl
+
+# Use custom config
+uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl --config custom.yaml
+```
+
+All scripts (`prepare_analysis.py`, `orchestrate_hop_analysis.py`, `analyze_hop_overlap.py`, `prebuild_matrices.py`) support `--config` option.
+
+### Per-Path OOM Recovery
+
+The system tracks completion at **individual path granularity**, not just job-level:
+
+**Tracking:**
+- `results_Nhop/matrix1_XXX/.tracking/completed_paths.txt` - Successfully computed paths
+- `results_Nhop/matrix1_XXX/.tracking/failed_paths.jsonl` - Failed paths with memory tier info
+- `results_Nhop/matrix1_XXX/.tracking/path_in_progress.txt` - Currently computing path
+
+**Retry Logic:**
+1. Job completes some paths at 180GB, some OOM
+2. Orchestrator detects partial completion via path tracking
+3. Job retries at 250GB
+4. Only failed paths attempted, completed paths skipped
+5. Continues escalating tiers (250GB → 500GB → 1TB → 1.5TB)
+
+**Result:** Maximum path completion despite memory constraints. Jobs can complete with partial results at max tier.
+
 ### Node Revisiting
 
 **Note:** The current implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:

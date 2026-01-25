@@ -4,14 +4,46 @@
 
 ```bash
 # 1. Initialize (creates manifest and directories)
-uv run python scripts/metapaths/prepare_analysis.py
+uv run python scripts/prepare_analysis.py \
+  --edges /path/to/edges.jsonl \
+  --nodes /path/to/nodes.jsonl \
+  --config config/type_expansion.yaml  # Optional, uses default if omitted
 
 # 2. Run orchestrator (submit and monitor jobs)
-uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+uv run python scripts/orchestrate_hop_analysis.py \
+  --config config/type_expansion.yaml  # Optional
 
 # 3. Merge results (after all jobs complete)
-uv run python scripts/metapaths/merge_results.py
+uv run python scripts/merge_results.py --n-hops 3
+
+# 4. Group by 1-hop metapath with performance metrics
+uv run python scripts/group_by_onehop.py
 ```
+
+## Configuration
+
+The system uses hierarchical type expansion by default. Configure via `config/type_expansion.yaml`:
+
+```yaml
+type_expansion:
+  enabled: true
+  max_depth: null  # Unlimited hierarchy depth
+  exclude_types:   # Abstract types to skip
+    - ThingWithTaxon
+    - SubjectOfInvestigation
+    - PhysicalEssenceOrOccurrent
+    - PhysicalEssence
+    - OntologyClass
+    - Occurrent
+    - InformationContentEntity
+    - Attribute
+  include_most_specific: true  # Always include most specific type
+```
+
+**Key features:**
+- **Hierarchical types**: Nodes participate as ALL their types, not just most specific
+- **Type filtering**: Exclude overly abstract types
+- **Configurable**: Pass `--config` to any script to use custom config
 
 ## Manual Testing (Small Scale)
 
@@ -19,13 +51,13 @@ Test with a single matrix before full run:
 
 ```bash
 # Test matrix 0
-sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 0 input/nodes.jsonl input/edges.jsonl
+sbatch --mem=250G scripts/run_single_matrix1.sh 0 /path/to/nodes.jsonl /path/to/edges.jsonl 3 "" config/type_expansion.yaml
 
 # Check output
-tail -f scripts/metapaths/logs/matrix1_000_mem250.out
+tail -f logs_3hop/matrix1_000_mem250.out
 
 # View results
-head scripts/metapaths/results/results_matrix1_000.tsv
+head results_3hop/results_matrix1_000.tsv
 ```
 
 ## Architecture
