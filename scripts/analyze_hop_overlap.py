@@ -40,6 +40,7 @@ import time
 import gc
 import numpy as np
 from pathlib import Path
+import yaml
 import graphblas as gb
 from metapath_counts import get_most_specific_type, get_symmetric_predicates, get_all_types
 
@@ -55,6 +56,29 @@ from path_tracker import (
     clear_path_in_progress,
     enumerate_downstream_paths
 )
+
+
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file.
+
+    Args:
+        config_path: Path to YAML config file (default: config/type_expansion.yaml)
+
+    Returns:
+        dict: Type expansion config or None if file not found
+    """
+    if config_path is None:
+        config_path = 'config/type_expansion.yaml'
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        print(f"Warning: Config file not found at {config_path}, using defaults")
+        return None
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    return config.get('type_expansion', {})
 
 
 def get_memory_mb():
@@ -773,6 +797,8 @@ def main():
     parser.add_argument('--nodes', help='Path to nodes.jsonl (required if --matrices-dir not provided)')
     parser.add_argument('--matrices-dir', help='Directory with pre-built matrices (faster startup)')
     parser.add_argument('--output', required=True, help='Output TSV file path')
+    parser.add_argument('--config', default='config/type_expansion.yaml',
+                        help='Path to configuration YAML file (default: config/type_expansion.yaml)')
     parser.add_argument('--n-hops', type=int, default=3,
                         help='Number of hops for metapath analysis (default: 3)')
     parser.add_argument('--matrix1-index', type=int, default=None,
@@ -788,9 +814,14 @@ def main():
     if not args.matrices_dir and (not args.edges or not args.nodes):
         parser.error("Either --matrices-dir OR (--edges AND --nodes) must be provided")
 
+    # Load configuration
+    type_config = load_config(args.config)
+
     print(f"\n{'=' * 80}", flush=True)
     print(f"STARTING {args.n_hops}-HOP ANALYSIS", flush=True)
     print(f"{'=' * 80}", flush=True)
+    if type_config:
+        print(f"Type expansion enabled: exclude {len(type_config.get('exclude_types', []))} types", flush=True)
     overall_start = time.time()
 
     # Load matrices (either prebuilt or from edges)
@@ -808,7 +839,7 @@ def main():
     else:
         print(f"\n[TIMING] Loading node types...", flush=True)
         node_load_start = time.time()
-        node_types = load_node_types(args.nodes)
+        node_types = load_node_types(args.nodes, config=type_config)
         node_load_time = time.time() - node_load_start
         print(f"[TIMING] Node loading completed in {node_load_time:.1f}s ({node_load_time/60:.1f}min)", flush=True)
         print(f"[TIMING] Memory after node loading: {get_memory_mb():.0f} MB", flush=True)

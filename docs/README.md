@@ -503,6 +503,90 @@ Test run with 3 matrices:
 
 Most jobs complete in 3-5 minutes with <10GB memory. Small percentage need higher tiers.
 
+## Hierarchical Type Expansion
+
+By default, the system uses **hierarchical type expansion** to maximize rule mining coverage. This means nodes participate in metapaths as ALL their types in the Biolink hierarchy, not just their most specific type.
+
+### What It Does
+
+**Old behavior (single type):**
+- Node with categories `["SmallMolecule", "ChemicalEntity"]`
+- Used only as `SmallMolecule` in metapaths
+- Missing paths like `ChemicalEntity → predicate → Gene`
+
+**New behavior (hierarchical):**
+- Same node used as BOTH `SmallMolecule` AND `ChemicalEntity`
+- Captures paths at multiple abstraction levels
+- More robust rule mining
+
+### Configuration
+
+Configure via `config/type_expansion.yaml`:
+
+```yaml
+type_expansion:
+  enabled: true
+  max_depth: null  # Use all types (unlimited)
+
+  # Exclude abstract types from hierarchy
+  exclude_types:
+    - ThingWithTaxon
+    - SubjectOfInvestigation
+    - PhysicalEssenceOrOccurrent
+    - PhysicalEssence
+    - OntologyClass
+    - Occurrent
+    - InformationContentEntity
+    - Attribute
+
+  include_most_specific: true  # Always include most specific type
+```
+
+### Impact
+
+- **Matrix count**: ~15-20x more matrices (depends on type diversity)
+- **Path count**: More paths discovered (especially at abstract levels)
+- **Memory**: Slightly higher per job (but still within tiering)
+- **Runtime**: Similar due to parallelization
+
+### CLI Usage
+
+All scripts accept `--config` option:
+
+```bash
+# Use default config
+uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl
+
+# Use custom config
+uv run python scripts/prepare_analysis.py \
+  --edges edges.jsonl \
+  --nodes nodes.jsonl \
+  --config custom_config.yaml
+```
+
+The orchestrator automatically passes config to all worker jobs.
+
+### Per-Path OOM Recovery
+
+The system tracks completion at **individual path granularity**, not just job-level:
+
+**How it works:**
+1. Each 3-hop path computed is recorded to `completed_paths.txt`
+2. Failed paths recorded to `failed_paths.jsonl` with memory tier
+3. Jobs can complete partially (some paths succeed, some fail)
+4. Retry attempts skip completed paths, only retry failed ones
+5. Multi-tier retry: 180GB → 250GB → 500GB → 1TB → 1.5TB
+
+**Example:**
+- Job computes 100 paths at 180GB
+- 80 paths succeed, 20 fail with OOM
+- Job retries at 250GB
+- 80 completed paths skipped, only 20 attempted
+- 15 of 20 succeed at 250GB, 5 still fail
+- Job retries at 500GB for remaining 5
+
+**Result:** Maximum path completion even with memory constraints.
+
 ## FAQ
 
 **Q: Can I run multiple orchestrators?**

@@ -8,11 +8,12 @@ NODES_FILE=$2
 EDGES_FILE=$3
 N_HOPS=${4:-3}  # Default to 3 if not provided
 MATRICES_DIR=${5:-""}  # Optional pre-built matrices directory
+CONFIG_FILE=${6:-"config/type_expansion.yaml"}  # Optional config file
 
 # Validate arguments
 if [ -z "$MATRIX1_INDEX" ]; then
     echo "ERROR: Missing matrix1_index argument"
-    echo "Usage: $0 <matrix1_index> <nodes_file> <edges_file> [n_hops] [matrices_dir]"
+    echo "Usage: $0 <matrix1_index> <nodes_file> <edges_file> [n_hops] [matrices_dir] [config]"
     exit 1
 fi
 
@@ -26,6 +27,7 @@ if [ -n "$MATRICES_DIR" ] && [ -d "$MATRICES_DIR" ]; then
       --matrix1-index $MATRIX1_INDEX \
       --matrices-dir $MATRICES_DIR \
       --n-hops $N_HOPS \
+      --config $CONFIG_FILE \
       --output $OUTPUT_FILE"
 else
     # Fall back to loading from edges
@@ -39,6 +41,7 @@ else
       --edges $EDGES_FILE \
       --nodes $NODES_FILE \
       --n-hops $N_HOPS \
+      --config $CONFIG_FILE \
       --output $OUTPUT_FILE"
 fi
 

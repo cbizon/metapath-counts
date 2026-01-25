@@ -19,14 +19,32 @@ import argparse
 import os
 import json
 from datetime import datetime
+from pathlib import Path
 import sys
+import yaml
 
 # Add parent directory to path to import from analyze_hop_overlap
 sys.path.insert(0, os.path.dirname(__file__))
 from analyze_hop_overlap import load_node_types, build_matrices, build_matrix_list, load_prebuilt_matrices
 
 
-def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices_dir: str = None):
+def load_config(config_path: str = None) -> dict:
+    """Load configuration from YAML file."""
+    if config_path is None:
+        config_path = 'config/type_expansion.yaml'
+
+    config_path = Path(config_path)
+    if not config_path.exists():
+        print(f"Warning: Config file not found at {config_path}, using defaults")
+        return None
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    return config.get('type_expansion', {})
+
+
+def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices_dir: str = None, config_path: str = None):
     """Prepare for parallel analysis run.
 
     Args:
@@ -34,7 +52,11 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices
         edges_file: Path to KGX edges file
         n_hops: Number of hops to analyze (default: 3)
         matrices_dir: Optional directory with pre-built matrices (faster)
+        config_path: Optional path to configuration YAML file
     """
+    # Load configuration
+    type_config = load_config(config_path)
+
     print("=" * 80)
     print(f"PREPARING PARALLEL {n_hops}-HOP ANALYSIS")
     print("=" * 80)
@@ -42,8 +64,11 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices
     print(f"  Nodes: {nodes_file}")
     print(f"  Edges: {edges_file}")
     print(f"  N-hops: {n_hops}")
+    print(f"  Config: {config_path or 'config/type_expansion.yaml'}")
     if matrices_dir:
         print(f"  Pre-built matrices: {matrices_dir}")
+    if type_config:
+        print(f"  Type expansion: exclude {len(type_config.get('exclude_types', []))} types")
 
     # Load matrices (either prebuilt or from edges)
     if matrices_dir:
@@ -51,7 +76,7 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices
         matrices = load_prebuilt_matrices(matrices_dir)
     else:
         print("\nLoading graph data and building matrices...")
-        node_types = load_node_types(nodes_file)
+        node_types = load_node_types(nodes_file, config=type_config)
         matrices = build_matrices(edges_file, node_types)
 
     # Build extended matrix list with forward and reverse directions
@@ -137,10 +162,13 @@ def main():
                         help='Number of hops to analyze (default: 3)')
     parser.add_argument('--matrices-dir', default=None,
                         help='Directory with pre-built matrices (for faster preparation)')
+    parser.add_argument('--config', default='config/type_expansion.yaml',
+                        help='Path to configuration YAML file (default: config/type_expansion.yaml)')
 
     args = parser.parse_args()
 
-    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops, matrices_dir=args.matrices_dir)
+    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops,
+                    matrices_dir=args.matrices_dir, config_path=args.config)
 
 
 if __name__ == "__main__":
