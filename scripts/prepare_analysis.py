@@ -103,7 +103,9 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices
             "src_type": src_type,
             "pred": pred,
             "tgt_type": tgt_type,
-            "direction": direction
+            "direction": direction,
+            "paths_completed": 0,
+            "paths_failed": 0
         }
 
     with open(manifest_path, 'w') as f:
