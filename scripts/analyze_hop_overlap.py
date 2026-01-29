@@ -18,14 +18,12 @@ Metapath format: NodeType|predicate|direction|NodeType|...
 Usage:
     # 3-hop analysis (default)
     uv run python analyze_hop_overlap.py \
-        --edges edges.jsonl \
-        --nodes nodes.jsonl \
+        --matrices-dir matrices \
         --output results_3hop/results.tsv
 
     # 2-hop analysis
     uv run python analyze_hop_overlap.py \
-        --edges edges.jsonl \
-        --nodes nodes.jsonl \
+        --matrices-dir matrices \
         --n-hops 2 \
         --output results_2hop/results.tsv
 """
@@ -40,9 +38,8 @@ import time
 import gc
 import numpy as np
 from pathlib import Path
-import yaml
 import graphblas as gb
-from metapath_counts import get_most_specific_type, get_symmetric_predicates, get_all_types
+from metapath_counts import get_symmetric_predicates
 
 # Add path_tracker module
 sys.path.insert(0, os.path.dirname(__file__))
@@ -56,29 +53,6 @@ from path_tracker import (
     clear_path_in_progress,
     enumerate_downstream_paths
 )
-
-
-def load_config(config_path: str = None) -> dict:
-    """Load configuration from YAML file.
-
-    Args:
-        config_path: Path to YAML config file (default: config/type_expansion.yaml)
-
-    Returns:
-        dict: Type expansion config or None if file not found
-    """
-    if config_path is None:
-        config_path = 'config/type_expansion.yaml'
-
-    config_path = Path(config_path)
-    if not config_path.exists():
-        print(f"Warning: Config file not found at {config_path}, using defaults")
-        return None
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    return config.get('type_expansion', {})
 
 
 def get_memory_mb():
@@ -180,222 +154,140 @@ def format_metapath(node_types, predicates, directions):
     return '|'.join(parts)
 
 
-def load_node_types(nodes_file: str, config: dict = None) -> dict:
+def determine_needed_matrices(manifest_path: Path, n_hops: int, matrix1_spec: tuple = None):
     """
-    Load node types from KGX nodes file.
+    Determine which matrices are needed for N-hop analysis by simulating path enumeration.
 
-    Returns dict mapping node_id -> list[str] of types (without biolink: prefix).
-    Uses hierarchical type expansion if configured.
+    This uses the same chain-forming logic as the analysis, but on metadata only
+    (without loading actual matrices) to determine which triples will participate.
 
     Args:
-        nodes_file: Path to KGX nodes.jsonl file
-        config: Configuration dict with type_expansion settings:
-                - exclude_types: set/list of types to exclude
-                - max_depth: max hierarchy depth (None = unlimited)
-                - include_most_specific: always include most specific type
+        manifest_path: Path to manifest.json
+        n_hops: Number of hops
+        matrix1_spec: If provided, (src_type, pred, direction, tgt_type) tuple for single starting matrix
 
     Returns:
-        dict: Mapping of node_id -> list of type names (without biolink: prefix)
+        Set of (src_type, pred, tgt_type) tuples to load
     """
-    print(f"Loading node types from {nodes_file}...", flush=True)
+    print(f"Analyzing manifest to determine needed matrices for {n_hops}-hop...", flush=True)
 
-    # Default config if none provided
-    if config is None:
-        config = {
-            'exclude_types': {
-                'ThingWithTaxon',
-                'SubjectOfInvestigation',
-                'PhysicalEssenceOrOccurrent',
-                'PhysicalEssence',
-                'OntologyClass',
-                'Occurrent',
-                'InformationContentEntity',
-                'Attribute'
-            },
-            'max_depth': None,
-            'include_most_specific': True
-        }
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
 
-    node_types = {}
-    type_count_distribution = {}  # Track how many nodes have N types
-
-    with open(nodes_file, 'r') as f:
-        for line_num, line in enumerate(f, 1):
-            if line_num % 1_000_000 == 0:
-                print(f"  Loaded {line_num:,} nodes", flush=True)
-
-            node = json.loads(line)
-            node_id = node['id']
-            categories = node.get('category', [])
-
-            if categories:
-                # Get all types (hierarchical expansion)
-                all_types = get_all_types(
-                    categories,
-                    exclude_types=config.get('exclude_types', set()),
-                    max_depth=config.get('max_depth'),
-                    include_most_specific=config.get('include_most_specific', True)
-                )
-
-                if all_types:
-                    node_types[node_id] = all_types
-
-                    # Track distribution
-                    num_types = len(all_types)
-                    type_count_distribution[num_types] = type_count_distribution.get(num_types, 0) + 1
-
-    print(f"Loaded {len(node_types):,} nodes with hierarchical types", flush=True)
-
-    # Print type distribution statistics
-    if type_count_distribution:
-        print(f"\nType count distribution:", flush=True)
-        total_nodes = len(node_types)
-        for count in sorted(type_count_distribution.keys()):
-            num_nodes = type_count_distribution[count]
-            pct = 100 * num_nodes / total_nodes
-            print(f"  {count} types: {num_nodes:,} nodes ({pct:.1f}%)", flush=True)
-
-        # Calculate average
-        total_type_assignments = sum(k * v for k, v in type_count_distribution.items())
-        avg_types = total_type_assignments / total_nodes
-        print(f"  Average types per node: {avg_types:.2f}", flush=True)
-
-    return node_types
-
-
-def build_matrices(edges_file: str, node_types: dict):
-    """
-    Build sparse matrices for each (source_type, predicate, target_type) triple.
-
-    With hierarchical types, each edge may appear in multiple matrices
-    (one for each type combination).
-
-    Args:
-        edges_file: Path to KGX edges.jsonl file
-        node_types: dict mapping node_id -> list[str] of types
-
-    Returns:
-        dict: Mapping of (src_type, pred, tgt_type) -> GraphBLAS Matrix
-    """
-    print(f"\nCollecting edge types from {edges_file}...", flush=True)
-
-    # Get symmetric predicates from biolink model
     symmetric_predicates = get_symmetric_predicates()
-    print(f"Loaded {len(symmetric_predicates)} symmetric predicates from Biolink Model", flush=True)
 
-    edge_triples = defaultdict(list)
-    node_to_idx = defaultdict(dict)
+    # Build directed matrix list (same as build_matrix_list but metadata only)
+    all_directed = []
+    for mat_info in manifest['matrices']:
+        src_type = mat_info['src_type']
+        pred = mat_info['predicate']
+        tgt_type = mat_info['tgt_type']
 
-    skipped_subclass = 0
-    skipped_no_types = 0
-    edges_processed = 0
-    total_matrix_entries = 0  # Track explosion factor
+        # Forward
+        all_directed.append((src_type, pred, 'F', tgt_type))
 
-    with open(edges_file, 'r') as f:
-        for line_num, line in enumerate(f, 1):
-            if line_num % 1_000_000 == 0:
-                print(f"  Processed {line_num:,} edges, {total_matrix_entries:,} matrix entries", flush=True)
+        # Reverse (if not symmetric)
+        if pred not in symmetric_predicates:
+            all_directed.append((tgt_type, pred, 'R', src_type))
 
-            edge = json.loads(line)
-            predicate = edge.get('predicate', '')
+    print(f"Total directed matrices: {len(all_directed):,}", flush=True)
 
-            if predicate == 'biolink:subclass_of':
-                skipped_subclass += 1
-                continue
+    # Group by source type (same as analysis code)
+    by_source_type = defaultdict(list)
+    for src_type, pred, direction, tgt_type in all_directed:
+        by_source_type[src_type].append((src_type, pred, direction, tgt_type))
 
-            subject = edge['subject']
-            obj = edge['object']
-            src_types = node_types.get(subject)  # Now returns list[str]
-            tgt_types = node_types.get(obj)      # Now returns list[str]
+    # Track which base triples are needed
+    needed_base_triples = set()
+    final_type_pairs = set()  # Track (src_type, tgt_type) pairs for comparison matrices
 
-            if not src_types or not tgt_types:
-                skipped_no_types += 1
-                continue
+    # Determine which matrix1s to process
+    if matrix1_spec is not None:
+        matrix1_list = [matrix1_spec]
+        print(f"Processing single Matrix1: {matrix1_spec[0]}|{matrix1_spec[1]}|{matrix1_spec[2]}|{matrix1_spec[3]}", flush=True)
+    else:
+        matrix1_list = all_directed
+        print(f"Processing all {len(matrix1_list):,} starting matrices", flush=True)
 
-            pred = predicate.replace('biolink:', '')
+    # Recursive enumeration of paths (metadata only)
+    def enumerate_paths(depth, node_types, predicates, directions):
+        """Recursively enumerate N-hop paths without loading matrices."""
+        nonlocal needed_base_triples, final_type_pairs
 
-            # For symmetric predicates, add edge in both directions
-            is_symmetric = pred in symmetric_predicates
+        if depth == n_hops:
+            # Record final type pair for 1-hop comparison matrices
+            src_type_final = node_types[0]
+            tgt_type_final = node_types[-1]
+            final_type_pairs.add((src_type_final, tgt_type_final))
+            return
 
-            # Iterate over all type combinations (Cartesian product)
-            for src_type in src_types:
-                for tgt_type in tgt_types:
-                    # Add forward direction
-                    triple = (src_type, pred, tgt_type)
-                    edge_triples[triple].append((subject, obj))
-                    total_matrix_entries += 1
+        # Continue building path
+        current_target_type = node_types[-1]
 
-                    # Track node indices for both types
-                    if subject not in node_to_idx[src_type]:
-                        idx = len(node_to_idx[src_type])
-                        node_to_idx[src_type][subject] = idx
+        if current_target_type not in by_source_type:
+            return
 
-                    if obj not in node_to_idx[tgt_type]:
-                        idx = len(node_to_idx[tgt_type])
-                        node_to_idx[tgt_type][obj] = idx
+        for src_type, pred, direction, tgt_type in by_source_type[current_target_type]:
+            # Record that we need this base triple
+            if direction == 'F':
+                needed_base_triples.add((src_type, pred, tgt_type))
+            else:  # 'R'
+                needed_base_triples.add((tgt_type, pred, src_type))
 
-                    # Add reverse direction for symmetric predicates
-                    if is_symmetric:
-                        reverse_triple = (tgt_type, pred, src_type)
-                        edge_triples[reverse_triple].append((obj, subject))
-                        total_matrix_entries += 1
+            # Recurse
+            enumerate_paths(
+                depth + 1,
+                node_types + [tgt_type],
+                predicates + [pred],
+                directions + [direction]
+            )
 
-            edges_processed += 1
+    # Enumerate all paths starting from each matrix1
+    paths_enumerated = 0
+    for src_type1, pred1, dir1, tgt_type1 in matrix1_list:
+        # Record matrix1 itself
+        if dir1 == 'F':
+            needed_base_triples.add((src_type1, pred1, tgt_type1))
+        else:
+            needed_base_triples.add((tgt_type1, pred1, src_type1))
 
-    print(f"\nEdge statistics:", flush=True)
-    print(f"  Processed: {edges_processed:,} edges", flush=True)
-    print(f"  Skipped (no types): {skipped_no_types:,}", flush=True)
-    print(f"  Total matrix entries: {total_matrix_entries:,}", flush=True)
-    print(f"  Unique edge type triples: {len(edge_triples):,}", flush=True)
-    if edges_processed > 0:
-        expansion_factor = total_matrix_entries / edges_processed
-        print(f"  Type expansion factor: {expansion_factor:.2f}x", flush=True)
-
-    # Build matrices
-    print(f"\nBuilding GraphBLAS matrices...", flush=True)
-    matrices = {}
-
-    # Track matrix size distribution
-    matrix_sizes = []
-
-    for triple, edges in edge_triples.items():
-        src_type, pred, tgt_type = triple
-        rows = [node_to_idx[src_type][src_id] for src_id, _ in edges]
-        cols = [node_to_idx[tgt_type][tgt_id] for _, tgt_id in edges]
-
-        nrows = len(node_to_idx[src_type])
-        ncols = len(node_to_idx[tgt_type])
-
-        matrix = gb.Matrix.from_coo(
-            rows, cols, [1] * len(rows),
-            nrows=nrows, ncols=ncols,
-            dtype=gb.dtypes.BOOL,
-            dup_op=gb.binary.any
+        # Enumerate downstream paths
+        enumerate_paths(
+            depth=1,
+            node_types=[src_type1, tgt_type1],
+            predicates=[pred1],
+            directions=[dir1]
         )
 
-        matrices[triple] = matrix
-        matrix_sizes.append((nrows * ncols, len(edges)))
+        paths_enumerated += 1
+        if paths_enumerated % 1000 == 0:
+            print(f"  Enumerated paths from {paths_enumerated}/{len(matrix1_list)} starting matrices...", flush=True)
 
-    print(f"Built {len(matrices):,} matrices", flush=True)
+    # Add 1-hop comparison matrices
+    print(f"Found {len(final_type_pairs):,} final (src_type, tgt_type) pairs for comparison", flush=True)
+    for src_type, tgt_type in final_type_pairs:
+        # Add all 1-hop matrices with this type pair
+        for mat_src, mat_pred, mat_dir, mat_tgt in all_directed:
+            if mat_src == src_type and mat_tgt == tgt_type:
+                if mat_dir == 'F':
+                    needed_base_triples.add((mat_src, mat_pred, mat_tgt))
+                else:
+                    needed_base_triples.add((mat_tgt, mat_pred, mat_src))
 
-    # Print matrix size statistics
-    if matrix_sizes:
-        total_dims = sum(size for size, _ in matrix_sizes)
-        total_entries = sum(entries for _, entries in matrix_sizes)
-        avg_dim = total_dims / len(matrix_sizes)
-        avg_entries = total_entries / len(matrix_sizes)
-        print(f"  Average matrix dimensions: {avg_dim:.0f}", flush=True)
-        print(f"  Average entries per matrix: {avg_entries:.0f}", flush=True)
+    print(f"Need to load {len(needed_base_triples)}/{manifest['num_matrices']} matrices", flush=True)
+    print(f"Reduction: {100*(1 - len(needed_base_triples)/manifest['num_matrices']):.1f}% fewer matrices", flush=True)
 
-    return matrices
+    return needed_base_triples
 
 
-def load_prebuilt_matrices(matrices_dir: str):
+def load_prebuilt_matrices(matrices_dir: str, needed_triples: set = None):
     """
     Load pre-built matrices from disk.
 
     Args:
         matrices_dir: Directory containing serialized matrices
+        needed_triples: Optional set of (src_type, pred, tgt_type) to load.
+                       If None, loads all matrices.
 
     Returns:
         Dict of (src_type, pred, tgt_type) -> GraphBLAS matrix
@@ -413,11 +305,22 @@ def load_prebuilt_matrices(matrices_dir: str):
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
 
-    print(f"Found {manifest['num_matrices']} pre-built matrices ({manifest['total_size_bytes']/1e9:.2f} GB)", flush=True)
+    if needed_triples is None:
+        print(f"Loading ALL {manifest['num_matrices']} matrices ({manifest['total_size_bytes']/1e9:.2f} GB)", flush=True)
+        to_load = manifest['matrices']
+    else:
+        print(f"Loading {len(needed_triples)} of {manifest['num_matrices']} matrices", flush=True)
+        # Filter manifest to only needed matrices
+        to_load = [m for m in manifest['matrices']
+                   if (m['src_type'], m['predicate'], m['tgt_type']) in needed_triples]
+
+        # Print reduction percentage
+        reduction_pct = 100 * (1 - len(to_load) / manifest['num_matrices'])
+        print(f"Reduction: {reduction_pct:.1f}% fewer matrices to load ({len(to_load)}/{manifest['num_matrices']})", flush=True)
 
     # Load each matrix
     matrices = {}
-    for i, mat_info in enumerate(manifest['matrices'], 1):
+    for i, mat_info in enumerate(to_load, 1):
         src_type = mat_info['src_type']
         pred = mat_info['predicate']
         tgt_type = mat_info['tgt_type']
@@ -441,7 +344,7 @@ def load_prebuilt_matrices(matrices_dir: str):
         matrices[(src_type, pred, tgt_type)] = matrix
 
         if i % 20 == 0:
-            print(f"  Loaded {i}/{len(manifest['matrices'])} matrices", flush=True)
+            print(f"  Loaded {i}/{len(to_load)} matrices", flush=True)
 
     load_time = time.time() - start_time
     print(f"Loaded {len(matrices):,} matrices in {load_time:.1f}s", flush=True)
@@ -454,7 +357,7 @@ def load_prebuilt_matrices(matrices_dir: str):
 def build_matrix_list(matrices):
     """Build extended matrix list with forward and reverse directions."""
     all_matrices = []
-    matrix_metadata = {}  # (src_type, pred, tgt_type) -> (matrix, direction)
+    matrix_metadata = {}  # (src_type, pred, tgt_type, direction) -> matrix
 
     # Get symmetric predicates from biolink model
     symmetric_predicates = get_symmetric_predicates()
@@ -462,18 +365,18 @@ def build_matrix_list(matrices):
     for (src_type, pred, tgt_type), matrix in matrices.items():
         # Forward
         all_matrices.append((src_type, pred, tgt_type, matrix, 'F'))
-        matrix_metadata[(src_type, pred, tgt_type)] = (matrix, 'F')
+        matrix_metadata[(src_type, pred, tgt_type, 'F')] = matrix
 
         # Reverse (if not symmetric)
         is_symmetric = pred in symmetric_predicates
         if not is_symmetric:
             all_matrices.append((tgt_type, pred, src_type, matrix.T, 'R'))
-            matrix_metadata[(tgt_type, pred, src_type)] = (matrix.T, 'R')
+            matrix_metadata[(tgt_type, pred, src_type, 'R')] = matrix.T
 
     return all_matrices, matrix_metadata
 
 
-def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None,
+def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, matrix1_spec=None,
                          current_memory_gb=180, enable_path_tracking=True):
     """Compute N-hop metapaths and calculate overlap with 1-hop edges.
 
@@ -487,7 +390,8 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None,
         matrices: Dict of (src_type, pred, tgt_type) -> GraphBLAS matrix
         output_file: Path to output TSV file
         n_hops: Number of hops for the metapath (default: 3)
-        matrix1_index: Optional index to process only a single Matrix1 (for parallelization)
+        matrix1_index: Optional index for path tracking (legacy, use matrix1_spec instead)
+        matrix1_spec: Optional (src_type, pred, direction, tgt_type) tuple to process single Matrix1
         current_memory_gb: Current memory tier (for path tracking)
         enable_path_tracking: Enable per-path completion tracking (default: True)
     """
@@ -507,7 +411,9 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None,
     print(f"Total matrices (with inverses): {len(all_matrices):,}", flush=True)
     print(f"Memory: {get_memory_mb():.0f} MB", flush=True)
 
-    if matrix1_index is not None:
+    if matrix1_spec is not None:
+        print(f"Processing ONLY Matrix1: {matrix1_spec[0]}|{matrix1_spec[1]}|{matrix1_spec[2]}|{matrix1_spec[3]}", flush=True)
+    elif matrix1_index is not None:
         print(f"Processing ONLY Matrix1 index: {matrix1_index}", flush=True)
 
     # Build aggregated 1-hop matrices
@@ -556,7 +462,24 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None,
         paths_computed = 0
 
         # Determine which Matrix1 indices to process
-        if matrix1_index is not None:
+        if matrix1_spec is not None:
+            # Find the matrix matching the spec
+            src_spec, pred_spec, dir_spec, tgt_spec = matrix1_spec
+            found_idx = None
+            for idx, (src, pred, tgt, mat, direction) in enumerate(all_matrices):
+                if src == src_spec and pred == pred_spec and tgt == tgt_spec and direction == dir_spec:
+                    found_idx = idx
+                    break
+
+            if found_idx is None:
+                raise ValueError(f"Matrix1 spec {matrix1_spec} not found in loaded matrices")
+
+            # Use matrix1_index for tracking if provided, otherwise use found_idx
+            tracking_idx = matrix1_index if matrix1_index is not None else found_idx
+            matrix1_list = [(tracking_idx, all_matrices[found_idx])]
+            print(f"Found Matrix1 at index {found_idx} in loaded matrices (tracking as job {tracking_idx})", flush=True)
+        elif matrix1_index is not None:
+            # Legacy: using direct index (only works if all matrices are loaded)
             if matrix1_index < 0 or matrix1_index >= len(all_matrices):
                 raise ValueError(f"matrix1_index {matrix1_index} out of range [0, {len(all_matrices)})")
             matrix1_list = [(matrix1_index, all_matrices[matrix1_index])]
@@ -618,7 +541,7 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None,
                           f"Elapsed: {elapsed/60:.1f}min | Mem: {get_memory_mb():.0f}MB", flush=True)
 
                 # Compare with all 1-hop matrices
-                for (onehop_src, onehop_pred, onehop_tgt), (onehop_matrix, onehop_dir) in matrix_metadata.items():
+                for (onehop_src, onehop_pred, onehop_tgt, onehop_dir), onehop_matrix in matrix_metadata.items():
                     if onehop_src != src_type_final or onehop_tgt != tgt_type_final:
                         continue
 
@@ -793,16 +716,21 @@ def main():
     parser = argparse.ArgumentParser(
         description='Analyze overlap between N-hop metapaths and 1-hop edges'
     )
-    parser.add_argument('--edges', help='Path to edges.jsonl (required if --matrices-dir not provided)')
-    parser.add_argument('--nodes', help='Path to nodes.jsonl (required if --matrices-dir not provided)')
-    parser.add_argument('--matrices-dir', help='Directory with pre-built matrices (faster startup)')
+    parser.add_argument('--matrices-dir', required=True,
+                        help='Directory with pre-built matrices')
     parser.add_argument('--output', required=True, help='Output TSV file path')
-    parser.add_argument('--config', default='config/type_expansion.yaml',
-                        help='Path to configuration YAML file (default: config/type_expansion.yaml)')
     parser.add_argument('--n-hops', type=int, default=3,
                         help='Number of hops for metapath analysis (default: 3)')
     parser.add_argument('--matrix1-index', type=int, default=None,
                         help='Process only this Matrix1 index (for parallelization)')
+    parser.add_argument('--src-type', type=str, default=None,
+                        help='Source node type for matrix1 (required with --matrix1-index)')
+    parser.add_argument('--pred', type=str, default=None,
+                        help='Predicate for matrix1 (required with --matrix1-index)')
+    parser.add_argument('--direction', type=str, default=None,
+                        help='Direction for matrix1: F, R, or A (required with --matrix1-index)')
+    parser.add_argument('--tgt-type', type=str, default=None,
+                        help='Target node type for matrix1 (required with --matrix1-index)')
     parser.add_argument('--memory-gb', type=int, default=180,
                         help='Current SLURM memory tier in GB (for path tracking, default: 180)')
     parser.add_argument('--disable-path-tracking', action='store_true',
@@ -810,46 +738,40 @@ def main():
 
     args = parser.parse_args()
 
-    # Validate arguments
-    if not args.matrices_dir and (not args.edges or not args.nodes):
-        parser.error("Either --matrices-dir OR (--edges AND --nodes) must be provided")
-
-    # Load configuration
-    type_config = load_config(args.config)
+    # Validate matrix1 spec arguments
+    if args.matrix1_index is not None:
+        if not all([args.src_type, args.pred, args.direction, args.tgt_type]):
+            parser.error("--matrix1-index requires --src-type, --pred, --direction, and --tgt-type")
 
     print(f"\n{'=' * 80}", flush=True)
     print(f"STARTING {args.n_hops}-HOP ANALYSIS", flush=True)
     print(f"{'=' * 80}", flush=True)
-    if type_config:
-        print(f"Type expansion enabled: exclude {len(type_config.get('exclude_types', []))} types", flush=True)
     overall_start = time.time()
 
-    # Load matrices (either prebuilt or from edges)
-    if args.matrices_dir:
-        print(f"\n[TIMING] Using pre-built matrices from {args.matrices_dir}...", flush=True)
-        load_start = time.time()
-        matrices = load_prebuilt_matrices(args.matrices_dir)
-        load_time = time.time() - load_start
+    # Determine which matrices are actually needed
+    print(f"\n[TIMING] Using pre-built matrices from {args.matrices_dir}...", flush=True)
+    matrices_path = Path(args.matrices_dir)
+    manifest_path = matrices_path / 'manifest.json'
 
-        node_load_time = 0
-        matrix_build_time = load_time
+    # Build matrix1_spec from CLI arguments if processing a specific matrix
+    matrix1_spec = None
+    if args.matrix1_index is not None:
+        matrix1_spec = (args.src_type, args.pred, args.direction, args.tgt_type)
+        print(f"Matrix1 spec: {matrix1_spec}", flush=True)
 
-        print(f"[TIMING] Pre-built matrix loading completed in {load_time:.1f}s ({load_time/60:.1f}min)", flush=True)
-        print(f"[TIMING] Memory after loading: {get_memory_mb():.0f} MB", flush=True)
-    else:
-        print(f"\n[TIMING] Loading node types...", flush=True)
-        node_load_start = time.time()
-        node_types = load_node_types(args.nodes, config=type_config)
-        node_load_time = time.time() - node_load_start
-        print(f"[TIMING] Node loading completed in {node_load_time:.1f}s ({node_load_time/60:.1f}min)", flush=True)
-        print(f"[TIMING] Memory after node loading: {get_memory_mb():.0f} MB", flush=True)
+    print(f"\n[TIMING] Determining needed matrices...", flush=True)
+    filter_start = time.time()
+    needed_triples = determine_needed_matrices(manifest_path, args.n_hops, matrix1_spec)
+    filter_time = time.time() - filter_start
+    print(f"[TIMING] Matrix filtering completed in {filter_time:.1f}s", flush=True)
 
-        print(f"\n[TIMING] Building matrices from edges...", flush=True)
-        matrix_build_start = time.time()
-        matrices = build_matrices(args.edges, node_types)
-        matrix_build_time = time.time() - matrix_build_start
-        print(f"[TIMING] Matrix building completed in {matrix_build_time:.1f}s ({matrix_build_time/60:.1f}min)", flush=True)
-        print(f"[TIMING] Memory after matrix building: {get_memory_mb():.0f} MB", flush=True)
+    # Load only needed matrices
+    load_start = time.time()
+    matrices = load_prebuilt_matrices(args.matrices_dir, needed_triples=needed_triples)
+    load_time = time.time() - load_start
+
+    print(f"[TIMING] Matrix loading completed in {load_time:.1f}s ({load_time/60:.1f}min)", flush=True)
+    print(f"[TIMING] Memory after loading: {get_memory_mb():.0f} MB", flush=True)
 
     # Analyze overlap
     print(f"\n[TIMING] Starting overlap analysis...", flush=True)
@@ -857,8 +779,14 @@ def main():
     enable_path_tracking = not args.disable_path_tracking
     if enable_path_tracking and args.matrix1_index is not None:
         print(f"[TRACKING] Path tracking ENABLED (memory tier: {args.memory_gb}GB)", flush=True)
-    analyze_nhop_overlap(matrices, args.output, n_hops=args.n_hops, matrix1_index=args.matrix1_index,
-                        current_memory_gb=args.memory_gb, enable_path_tracking=enable_path_tracking)
+
+    analyze_nhop_overlap(
+        matrices, args.output, n_hops=args.n_hops,
+        matrix1_index=args.matrix1_index,
+        matrix1_spec=matrix1_spec,
+        current_memory_gb=args.memory_gb,
+        enable_path_tracking=enable_path_tracking
+    )
     analysis_time = time.time() - analysis_start
     print(f"\n[TIMING] Overlap analysis completed in {analysis_time:.1f}s ({analysis_time/60:.1f}min)", flush=True)
 
@@ -866,8 +794,7 @@ def main():
     print(f"\n{'=' * 80}", flush=True)
     print(f"TIMING SUMMARY", flush=True)
     print(f"{'=' * 80}", flush=True)
-    print(f"Node loading:      {node_load_time:8.1f}s ({node_load_time/overall_time*100:5.1f}%)", flush=True)
-    print(f"Matrix building:   {matrix_build_time:8.1f}s ({matrix_build_time/overall_time*100:5.1f}%)", flush=True)
+    print(f"Matrix loading:    {load_time:8.1f}s ({load_time/overall_time*100:5.1f}%)", flush=True)
     print(f"Overlap analysis:  {analysis_time:8.1f}s ({analysis_time/overall_time*100:5.1f}%)", flush=True)
     print(f"{'-' * 80}", flush=True)
     print(f"Total:             {overall_time:8.1f}s ({overall_time/60:.1f}min)", flush=True)

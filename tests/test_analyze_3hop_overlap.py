@@ -11,11 +11,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
 from analyze_hop_overlap import (
     format_metapath,
-    load_node_types,
-    build_matrices,
     build_matrix_list,
     is_canonical_direction,
     should_process_path,
+)
+from prebuild_matrices import (
+    load_node_types,
+    build_matrices,
 )
 
 
@@ -395,3 +397,73 @@ class TestBuildMatrixList:
             assert sym_entries[0][3] == 'F'  # Direction should be forward
         finally:
             Path(temp_path).unlink()
+
+    def test_build_matrix_list_bidirectional_edges(self):
+        """Test that bidirectional physical edges don't overwrite each other in matrix_metadata.
+
+        This tests the bug where if both ChemicalEntity→treats→Disease and
+        Disease→treats→ChemicalEntity exist as physical matrices, the forward
+        direction gets overwritten by the transpose of the reverse matrix.
+        """
+        import graphblas as gb
+
+        # Create two physical matrices: forward and reverse
+        # ChemicalEntity→treats→Disease: 3 edges
+        forward_matrix = gb.Matrix.from_coo(
+            [0, 1, 2],  # rows (chemicals)
+            [0, 0, 1],  # cols (diseases)
+            [True, True, True],
+            nrows=3,
+            ncols=2,
+            dtype=gb.dtypes.BOOL
+        )
+
+        # Disease→treats→ChemicalEntity: 1 edge (unusual but exists in real data)
+        reverse_matrix = gb.Matrix.from_coo(
+            [0],  # rows (diseases)
+            [1],  # cols (chemicals)
+            [True],
+            nrows=2,
+            ncols=3,
+            dtype=gb.dtypes.BOOL
+        )
+
+        # Simulate the input matrices dict as it comes from load_prebuilt_matrices
+        matrices = {
+            ('ChemicalEntity', 'treats', 'Disease'): forward_matrix,
+            ('Disease', 'treats', 'ChemicalEntity'): reverse_matrix,
+        }
+
+        all_matrices, matrix_metadata = build_matrix_list(matrices)
+
+        # With the fix, matrix_metadata keys now include direction:
+        # (src_type, pred, tgt_type, direction) -> matrix
+
+        # Check that we have BOTH the forward ChemicalEntity→Disease entry
+        # AND the reverse Disease→ChemicalEntity entry (as transpose)
+        assert ('ChemicalEntity', 'treats', 'Disease', 'F') in matrix_metadata
+        assert ('Disease', 'treats', 'ChemicalEntity', 'F') in matrix_metadata
+
+        # Check forward ChemicalEntity→Disease (should have 3 edges from physical matrix)
+        forward_metadata_matrix = matrix_metadata[('ChemicalEntity', 'treats', 'Disease', 'F')]
+        assert forward_metadata_matrix.nvals == 3, \
+            f"Expected 3 edges from forward ChemicalEntity→Disease matrix, got {forward_metadata_matrix.nvals}"
+
+        # Check forward Disease→ChemicalEntity (should have 1 edge from physical matrix)
+        reverse_metadata_matrix = matrix_metadata[('Disease', 'treats', 'ChemicalEntity', 'F')]
+        assert reverse_metadata_matrix.nvals == 1, \
+            f"Expected 1 edge from forward Disease→ChemicalEntity matrix, got {reverse_metadata_matrix.nvals}"
+
+        # Also check that we have the synthetic reverse entries (matrix.T)
+        assert ('Disease', 'treats', 'ChemicalEntity', 'R') in matrix_metadata
+        assert ('ChemicalEntity', 'treats', 'Disease', 'R') in matrix_metadata
+
+        # ChemicalEntity→Disease as reverse (transpose of Disease→ChemicalEntity)
+        # Should have same edges as forward Disease→ChemicalEntity (1 edge)
+        ce_disease_reverse = matrix_metadata[('ChemicalEntity', 'treats', 'Disease', 'R')]
+        assert ce_disease_reverse.nvals == 1
+
+        # Disease→ChemicalEntity as reverse (transpose of ChemicalEntity→Disease)
+        # Should have same edges as forward ChemicalEntity→Disease (3 edges)
+        disease_ce_reverse = matrix_metadata[('Disease', 'treats', 'ChemicalEntity', 'R')]
+        assert disease_ce_reverse.nvals == 3
