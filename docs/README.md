@@ -1,21 +1,31 @@
-# Parallel 3-Hop Metapath Analysis System
+# Parallel N-Hop Metapath Analysis System
 
-This system parallelizes 3-hop metapath analysis across SLURM cluster with automatic memory-tiered retry.
+This system parallelizes N-hop metapath analysis across SLURM cluster with automatic memory-tiered retry.
 
 ## Quick Start
 
 ```bash
-# 1. Initialize (if not already done)
-uv run python scripts/metapaths/prepare_analysis.py
+# 0. One-time: Pre-build matrices (only needs to be done once per KG)
+uv run python scripts/prebuild_matrices.py \
+  --edges /path/to/edges.jsonl \
+  --nodes /path/to/nodes.jsonl \
+  --output matrices \
+  --config config/type_expansion.yaml
+
+# 1. Initialize (creates manifest and directories)
+uv run python scripts/prepare_analysis.py \
+  --matrices-dir matrices \
+  --n-hops 3
 
 # 2. Run orchestrator (handles everything automatically)
-uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+uv run python scripts/orchestrate_hop_analysis.py \
+  --n-hops 3
 
 # 3. After completion, merge results
-uv run python scripts/metapaths/merge_results.py
+uv run python scripts/merge_results.py --n-hops 3
 
 # 4. Group results by 1-hop metapath with metrics
-uv run python scripts/metapaths/group_by_onehop.py
+uv run python scripts/group_by_onehop.py --n-hops 3
 ```
 
 ## System Overview
@@ -37,30 +47,52 @@ uv run python scripts/metapaths/group_by_onehop.py
 
 ## Step-by-Step Instructions
 
-### Step 1: Preparation (One-Time Setup)
+### Step 0: Pre-build Matrices (One-Time Setup Per KG)
 
-Initialize manifest and directories:
+Pre-build and serialize all matrices from the knowledge graph:
 
 ```bash
-cd /projects/sequence_analysis/vol3/bizon/sub/pathfilter
-uv run python scripts/metapaths/prepare_analysis.py
+uv run python scripts/prebuild_matrices.py \
+  --edges /path/to/edges.jsonl \
+  --nodes /path/to/nodes.jsonl \
+  --output matrices \
+  --config config/type_expansion.yaml
 ```
 
 **Output:**
-- Creates `scripts/metapaths/results/` directory
-- Creates `scripts/metapaths/logs/` directory
-- Generates `scripts/metapaths/results/manifest.json` with all 2,879 jobs
+- Creates `matrices/` directory with serialized .npz files
+- Creates `matrices/manifest.json` with metadata
+- Total size: ~5GB (compressed from ~84GB edges file)
 
-**Time:** ~3-4 minutes (loads entire graph to count matrices)
+**Time:** ~10-15 minutes (depends on graph size)
 
-**Note:** Only run this once. If you need to restart, the orchestrator uses the existing manifest.
+**Note:** Only needs to be done once per knowledge graph. All analysis runs will use these pre-built matrices.
+
+### Step 1: Initialize Analysis Run
+
+Initialize manifest and directories for specific N-hop analysis:
+
+```bash
+uv run python scripts/prepare_analysis.py \
+  --matrices-dir matrices \
+  --n-hops 3
+```
+
+**Output:**
+- Creates `results_3hop/` directory
+- Creates `logs_3hop/` directory
+- Generates `results_3hop/manifest.json` with all jobs
+
+**Time:** <5 seconds (just reads manifest metadata, doesn't load matrices)
+
+**Note:** Run this once per N-hop analysis (1-hop, 2-hop, 3-hop, etc.)
 
 ### Step 2: Run Orchestrator
 
 Submit and monitor all jobs automatically:
 
 ```bash
-uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 ```
 
 **What it does:**
@@ -77,19 +109,19 @@ uv run python scripts/metapaths/orchestrate_3hop_analysis.py
 **How to run:**
 - Option A: Run in foreground (monitor progress)
   ```bash
-  uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+  uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
   ```
 
 - Option B: Run in background with logs
   ```bash
-  nohup uv run python scripts/metapaths/orchestrate_3hop_analysis.py > orchestrator.log 2>&1 &
+  nohup uv run python scripts/orchestrate_hop_analysis.py --n-hops 3 > orchestrator.log 2>&1 &
   tail -f orchestrator.log
   ```
 
 - Option C: Run in screen/tmux session (recommended)
   ```bash
   screen -S metapath_orchestrator
-  uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+  uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
   # Detach: Ctrl+A, then D
   # Reattach: screen -r metapath_orchestrator
   ```

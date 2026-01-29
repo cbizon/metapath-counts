@@ -13,8 +13,11 @@ The primary output is metapath statistics that can be used for rule mining and p
 
 ## Features
 
-- **Parallel Processing**: Distributes ~2,879 independent jobs across SLURM cluster
+- **Hierarchical Type Expansion**: Nodes participate as ALL their types in the Biolink hierarchy (not just most specific)
+- **Per-Path OOM Recovery**: Granular tracking and retry at individual path level
+- **Parallel Processing**: Distributes jobs across SLURM cluster (693 jobs with hierarchical types)
 - **Memory Tiering**: Automatic retry at higher memory (180GB → 250GB → 500GB → 1TB → 1.5TB)
+- **Smart Retry**: Skip completed paths, only retry failed ones
 - **Duplicate Elimination**: Each path computed exactly once (~2x speedup)
 - **Performance**: ~50-100x faster than sequential (5 days → 2-4 hours)
 

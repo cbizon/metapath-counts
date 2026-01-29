@@ -12,7 +12,7 @@ import sys
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
-from analyze_hop_overlap import build_matrices
+from prebuild_matrices import build_matrices
 
 
 class TestBuildMatrices:

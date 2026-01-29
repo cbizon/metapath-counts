@@ -4,13 +4,14 @@
 
 set -e  # Exit on error
 
-EDGES="/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/84e6183aaeef2a8c/edges.jsonl"
-NODES="/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/84e6183aaeef2a8c/nodes.jsonl"
+NODES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Jan_20_filtered_redundant/nodes.jsonl"
+EDGES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Jan_20_filtered_redundant/edges.jsonl"
 MATRICES_DIR="matrices"
 CONFIG="config/type_expansion.yaml"
 
 # List of N-hop values to analyze
-NHOP_VALUES=(1 2 3)
+#NHOP_VALUES=(1 2 3)
+NHOP_VALUES=(2)
 
 echo "=========================================="
 echo "N-HOP METAPATH ANALYSIS PIPELINE"
@@ -53,11 +54,8 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     # Step 1: Prepare analysis (create manifest)
     echo "Step 1: Preparing ${N_HOPS}-hop analysis..."
     uv run python scripts/prepare_analysis.py \
-        --edges "$EDGES" \
-        --nodes "$NODES" \
-        --n-hops "$N_HOPS" \
         --matrices-dir "$MATRICES_DIR" \
-        --config "$CONFIG"
+        --n-hops "$N_HOPS"
 
     # Step 2: Run orchestrator (submit SLURM jobs)
     echo ""
@@ -66,8 +64,7 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "You can Ctrl+C and restart later - it will resume from the manifest."
     echo ""
     uv run python scripts/orchestrate_hop_analysis.py \
-        --n-hops "$N_HOPS" \
-        --config "$CONFIG"
+        --n-hops "$N_HOPS"
 
     # Step 3: Merge results
     echo ""

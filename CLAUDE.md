@@ -26,9 +26,10 @@ metapath-counts/
 │   ├── __init__.py
 │   └── type_utils.py            # Biolink type utilities
 ├── scripts/                     # Analysis scripts (CLI)
+│   ├── prebuild_matrices.py     # Pre-build matrices (one-time setup)
 │   ├── analyze_hop_overlap.py  # Core analysis engine
 │   ├── prepare_analysis.py      # Initialize SLURM job manifest
-│   ├── orchestrate_3hop_analysis.py # SLURM orchestrator
+│   ├── orchestrate_hop_analysis.py # SLURM orchestrator
 │   ├── merge_results.py         # Combine result files
 │   ├── group_by_onehop.py       # Group by 1-hop metapath
 │   └── run_single_matrix1.sh    # SLURM worker script
@@ -73,21 +74,27 @@ Important attributes:
 See `docs/README.md` for detailed instructions. Basic workflow:
 
 ```bash
+# 0. One-time: Pre-build matrices (only needs to be done once per KG)
+uv run python scripts/prebuild_matrices.py \
+  --edges /path/to/edges.jsonl \
+  --nodes /path/to/nodes.jsonl \
+  --output matrices \
+  --config config/type_expansion.yaml
+
 # 1. Initialize (creates manifest and directories)
 uv run python scripts/prepare_analysis.py \
-  --edges /path/to/edges.jsonl \
-  --nodes /path/to/nodes.jsonl
+  --matrices-dir matrices \
+  --n-hops 3
 
 # 2. Run orchestrator (submit and monitor SLURM jobs)
-uv run python scripts/orchestrate_3hop_analysis.py \
-  --edges /path/to/edges.jsonl \
-  --nodes /path/to/nodes.jsonl
+uv run python scripts/orchestrate_hop_analysis.py \
+  --n-hops 3
 
 # 3. Merge results (after all jobs complete)
-uv run python scripts/merge_results.py
+uv run python scripts/merge_results.py --n-hops 3
 
 # 4. Group by 1-hop metapath with performance metrics
-uv run python scripts/group_by_onehop.py
+uv run python scripts/group_by_onehop.py --n-hops 3
 ```
 
 ### Output Format
@@ -140,14 +147,21 @@ type_expansion:
 
 **CLI Usage:**
 ```bash
-# Use default config
-uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl
+# Pre-build matrices with default config
+uv run python scripts/prebuild_matrices.py \
+  --edges edges.jsonl \
+  --nodes nodes.jsonl \
+  --output matrices
 
-# Use custom config
-uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl --config custom.yaml
+# Pre-build with custom config
+uv run python scripts/prebuild_matrices.py \
+  --edges edges.jsonl \
+  --nodes nodes.jsonl \
+  --output matrices \
+  --config custom.yaml
 ```
 
-All scripts (`prepare_analysis.py`, `orchestrate_hop_analysis.py`, `analyze_hop_overlap.py`, `prebuild_matrices.py`) support `--config` option.
+**Note:** Type expansion configuration is baked into the pre-built matrices. All analysis scripts (`prepare_analysis.py`, `orchestrate_hop_analysis.py`, `analyze_hop_overlap.py`) use the configuration from the pre-built matrices.
 
 ### Per-Path OOM Recovery
 
@@ -190,6 +204,33 @@ Each path can be computed from either end (A→B→C→D or D→C→B→A). The 
 - Path D→C→B→A: When M1=D, M3=A → 1000 >= 5000 ✗ → Skip
 
 **Result:** Each unique path computed exactly once (~2x speedup)
+
+### 1-Hop Job Filtering
+
+For 1-hop analysis, duplicate elimination uses alphabetical ordering instead of size-based comparison (since there's only one matrix). `prepare_analysis.py` pre-filters the job list to only include canonical directions:
+
+**Rule:** Only create jobs where `src_type <= tgt_type` (alphabetically)
+
+**Example:**
+- `Gene|affects|Protein`: Gene < Protein alphabetically → Job created
+- `Protein|affects|Gene`: Protein > Gene alphabetically → Job skipped (reverse will be handled by first job)
+
+**Result:** ~50% fewer jobs for 1-hop analysis, no "0 paths completed" jobs
+
+### Optimized Matrix Loading
+
+Scripts only load matrices actually needed for the analysis:
+
+1. **Path Enumeration Simulation:** `determine_needed_matrices()` simulates the recursive path-building logic on metadata (without loading matrices) to determine which base triples can participate
+2. **Filtered Loading:** Only loads matrices in the needed set
+3. **Type Constraints:** Matrices are filtered based on type compatibility for N-hop chains
+
+**Example for 1-hop with matrix1_index=42:**
+- Reads job manifest to get `(src_type, pred, direction, tgt_type)` for job 42
+- Determines all matrices with matching `(src_type, tgt_type)` for comparison
+- Loads only those matrices instead of all 21,815
+
+**Result:** Faster startup, lower memory usage per job
 
 ### SLURM Memory Tiering
 

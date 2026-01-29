@@ -194,17 +194,18 @@ def get_completed_jobs_since(job_ids, since_time):
         return {}
 
 
-def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matrices_dir=None, config_file=None):
+def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, direction, tgt_type):
     """Submit a single matrix1 job to SLURM with specified memory.
 
     Args:
         matrix1_index: Index of the starting matrix
         memory_gb: Memory to request in GB
-        nodes_file: Path to KGX nodes file
-        edges_file: Path to KGX edges file
-        n_hops: Number of hops to analyze (default: 3)
-        matrices_dir: Optional directory with pre-built matrices (for faster startup)
-        config_file: Optional path to configuration file (default: config/type_expansion.yaml)
+        matrices_dir: Directory with pre-built matrices
+        n_hops: Number of hops to analyze
+        src_type: Source node type for matrix1
+        pred: Predicate for matrix1
+        direction: Direction for matrix1 (F, R, or A)
+        tgt_type: Target node type for matrix1
 
     Returns: job_id (str) or None on failure
     """
@@ -222,23 +223,13 @@ def submit_job(matrix1_index, memory_gb, nodes_file, edges_file, n_hops=3, matri
         f'--error={logs_dir}/matrix1_{matrix1_index:03d}_mem{memory_gb}.err',
         WORKER_SCRIPT,
         str(matrix1_index),
-        nodes_file,
-        edges_file,
-        str(n_hops)
+        matrices_dir,
+        str(n_hops),
+        src_type,
+        pred,
+        direction,
+        tgt_type
     ]
-
-    # Add matrices_dir if provided
-    if matrices_dir:
-        cmd.append(matrices_dir)
-    else:
-        # Need to provide empty string for positional arg if using config_file
-        cmd.append("")
-
-    # Add config_file
-    if config_file:
-        cmd.append(config_file)
-    else:
-        cmd.append("config/type_expansion.yaml")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -350,12 +341,11 @@ def print_status_summary(manifest, running_jobs):
     print(f"{'=' * 80}\n")
 
 
-def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
+def orchestrate(n_hops=3):
     """Main orchestration loop.
 
     Args:
         n_hops: Number of hops to analyze (default: 3)
-        config_file: Path to configuration file (default: config/type_expansion.yaml)
     """
     manifest_path = get_manifest_path(n_hops)
 
@@ -369,7 +359,6 @@ def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
     print(f"Poll interval: {POLL_INTERVAL}s")
     print(f"Max concurrent jobs: {max_concurrent}")
     print(f"N-hops: {n_hops}")
-    print(f"Config: {config_file}")
     print()
 
     # Load manifest
@@ -381,9 +370,12 @@ def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
         print("Please re-run: uv run python scripts/prepare_analysis.py")
         sys.exit(1)
 
-    nodes_file = manifest["_metadata"]["nodes_file"]
-    edges_file = manifest["_metadata"]["edges_file"]
     matrices_dir = manifest["_metadata"].get("matrices_dir", None)
+
+    if not matrices_dir:
+        print("ERROR: Manifest missing matrices_dir in _metadata!")
+        print("Please re-run: uv run python scripts/prepare_analysis.py --matrices-dir <path>")
+        sys.exit(1)
 
     # Get n_hops from manifest if not explicitly provided
     if "_metadata" in manifest and "n_hops" in manifest["_metadata"]:
@@ -394,12 +386,8 @@ def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
             n_hops = manifest_n_hops
 
     print(f"\nInput data from manifest:")
-    print(f"  Nodes: {nodes_file}")
-    print(f"  Edges: {edges_file}")
+    print(f"  Pre-built matrices: {matrices_dir}")
     print(f"  N-hops: {n_hops}")
-    print(f"  Config: {config_file}")
-    if matrices_dir:
-        print(f"  Pre-built matrices: {matrices_dir}")
 
     total_jobs = len(manifest) - 1  # Subtract 1 for _metadata entry
     print(f"\nLoaded manifest with {total_jobs} jobs")
@@ -596,7 +584,10 @@ def orchestrate(n_hops=3, config_file='config/type_expansion.yaml'):
                 memory_tier = data["memory_tier"]
 
                 print(f"Submitting {matrix1_id} with {memory_tier}GB memory (attempt {data['attempts'] + 1})...")
-                job_id = submit_job(matrix1_index, memory_tier, nodes_file, edges_file, n_hops, matrices_dir, config_file)
+                job_id = submit_job(
+                    matrix1_index, memory_tier, matrices_dir, n_hops,
+                    data['src_type'], data['pred'], data['direction'], data['tgt_type']
+                )
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")
@@ -674,15 +665,10 @@ if __name__ == "__main__":
         default=3,
         help="Number of hops to analyze (default: 3)"
     )
-    parser.add_argument(
-        "--config",
-        default="config/type_expansion.yaml",
-        help="Path to configuration YAML file (default: config/type_expansion.yaml)"
-    )
     args = parser.parse_args()
 
     try:
-        orchestrate(n_hops=args.n_hops, config_file=args.config)
+        orchestrate(n_hops=args.n_hops)
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")
         sys.exit(0)

@@ -23,12 +23,221 @@ import os
 import sys
 import time
 from pathlib import Path
+from collections import defaultdict
 import numpy as np
 import yaml
+import graphblas as gb
+from metapath_counts import get_all_types, get_symmetric_predicates
 
-# Add scripts directory to path
-sys.path.insert(0, os.path.dirname(__file__))
-from analyze_hop_overlap import load_node_types, build_matrices
+
+def load_node_types(nodes_file: str, config: dict = None) -> dict:
+    """
+    Load node types from KGX nodes file.
+
+    Returns dict mapping node_id -> list[str] of types (without biolink: prefix).
+    Uses hierarchical type expansion if configured.
+
+    Args:
+        nodes_file: Path to KGX nodes.jsonl file
+        config: Configuration dict with type_expansion settings:
+                - exclude_types: set/list of types to exclude
+                - max_depth: max hierarchy depth (None = unlimited)
+                - include_most_specific: always include most specific type
+
+    Returns:
+        dict: Mapping of node_id -> list of type names (without biolink: prefix)
+    """
+    print(f"Loading node types from {nodes_file}...", flush=True)
+
+    # Default config if none provided
+    if config is None:
+        config = {
+            'exclude_types': {
+                'ThingWithTaxon',
+                'SubjectOfInvestigation',
+                'PhysicalEssenceOrOccurrent',
+                'PhysicalEssence',
+                'OntologyClass',
+                'Occurrent',
+                'InformationContentEntity',
+                'Attribute'
+            },
+            'max_depth': None,
+            'include_most_specific': True
+        }
+
+    node_types = {}
+    type_count_distribution = {}  # Track how many nodes have N types
+
+    with open(nodes_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            if line_num % 1_000_000 == 0:
+                print(f"  Loaded {line_num:,} nodes", flush=True)
+
+            node = json.loads(line)
+            node_id = node['id']
+            categories = node.get('category', [])
+
+            if categories:
+                # Get all types (hierarchical expansion)
+                all_types = get_all_types(
+                    categories,
+                    exclude_types=config.get('exclude_types', set()),
+                    max_depth=config.get('max_depth'),
+                    include_most_specific=config.get('include_most_specific', True)
+                )
+
+                if all_types:
+                    node_types[node_id] = all_types
+
+                    # Track distribution
+                    num_types = len(all_types)
+                    type_count_distribution[num_types] = type_count_distribution.get(num_types, 0) + 1
+
+    print(f"Loaded {len(node_types):,} nodes with hierarchical types", flush=True)
+
+    # Print type distribution statistics
+    if type_count_distribution:
+        print(f"\nType count distribution:", flush=True)
+        total_nodes = len(node_types)
+        for count in sorted(type_count_distribution.keys()):
+            num_nodes = type_count_distribution[count]
+            pct = 100 * num_nodes / total_nodes
+            print(f"  {count} types: {num_nodes:,} nodes ({pct:.1f}%)", flush=True)
+
+        # Calculate average
+        total_type_assignments = sum(k * v for k, v in type_count_distribution.items())
+        avg_types = total_type_assignments / total_nodes
+        print(f"  Average types per node: {avg_types:.2f}", flush=True)
+
+    return node_types
+
+
+def build_matrices(edges_file: str, node_types: dict):
+    """
+    Build sparse matrices for each (source_type, predicate, target_type) triple.
+
+    With hierarchical types, each edge may appear in multiple matrices
+    (one for each type combination).
+
+    Args:
+        edges_file: Path to KGX edges.jsonl file
+        node_types: dict mapping node_id -> list[str] of types
+
+    Returns:
+        dict: Mapping of (src_type, pred, tgt_type) -> GraphBLAS Matrix
+    """
+    print(f"\nCollecting edge types from {edges_file}...", flush=True)
+
+    # Get symmetric predicates from biolink model
+    symmetric_predicates = get_symmetric_predicates()
+    print(f"Loaded {len(symmetric_predicates)} symmetric predicates from Biolink Model", flush=True)
+
+    edge_triples = defaultdict(list)
+    node_to_idx = defaultdict(dict)
+
+    skipped_subclass = 0
+    skipped_no_types = 0
+    edges_processed = 0
+    total_matrix_entries = 0  # Track explosion factor
+
+    with open(edges_file, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            if line_num % 1_000_000 == 0:
+                print(f"  Processed {line_num:,} edges, {total_matrix_entries:,} matrix entries", flush=True)
+
+            edge = json.loads(line)
+            predicate = edge.get('predicate', '')
+
+            if predicate == 'biolink:subclass_of':
+                skipped_subclass += 1
+                continue
+
+            subject = edge['subject']
+            obj = edge['object']
+            src_types = node_types.get(subject)  # Now returns list[str]
+            tgt_types = node_types.get(obj)      # Now returns list[str]
+
+            if not src_types or not tgt_types:
+                skipped_no_types += 1
+                continue
+
+            pred = predicate.replace('biolink:', '')
+
+            # For symmetric predicates, add edge in both directions
+            is_symmetric = pred in symmetric_predicates
+
+            # Iterate over all type combinations (Cartesian product)
+            for src_type in src_types:
+                for tgt_type in tgt_types:
+                    # Add forward direction
+                    triple = (src_type, pred, tgt_type)
+                    edge_triples[triple].append((subject, obj))
+                    total_matrix_entries += 1
+
+                    # Track node indices for both types
+                    if subject not in node_to_idx[src_type]:
+                        idx = len(node_to_idx[src_type])
+                        node_to_idx[src_type][subject] = idx
+
+                    if obj not in node_to_idx[tgt_type]:
+                        idx = len(node_to_idx[tgt_type])
+                        node_to_idx[tgt_type][obj] = idx
+
+                    # Add reverse direction for symmetric predicates
+                    if is_symmetric:
+                        reverse_triple = (tgt_type, pred, src_type)
+                        edge_triples[reverse_triple].append((obj, subject))
+                        total_matrix_entries += 1
+
+            edges_processed += 1
+
+    print(f"\nEdge statistics:", flush=True)
+    print(f"  Processed: {edges_processed:,} edges", flush=True)
+    print(f"  Skipped (no types): {skipped_no_types:,}", flush=True)
+    print(f"  Total matrix entries: {total_matrix_entries:,}", flush=True)
+    print(f"  Unique edge type triples: {len(edge_triples):,}", flush=True)
+    if edges_processed > 0:
+        expansion_factor = total_matrix_entries / edges_processed
+        print(f"  Type expansion factor: {expansion_factor:.2f}x", flush=True)
+
+    # Build matrices
+    print(f"\nBuilding GraphBLAS matrices...", flush=True)
+    matrices = {}
+
+    # Track matrix size distribution
+    matrix_sizes = []
+
+    for triple, edges in edge_triples.items():
+        src_type, pred, tgt_type = triple
+        rows = [node_to_idx[src_type][src_id] for src_id, _ in edges]
+        cols = [node_to_idx[tgt_type][tgt_id] for _, tgt_id in edges]
+
+        nrows = len(node_to_idx[src_type])
+        ncols = len(node_to_idx[tgt_type])
+
+        matrix = gb.Matrix.from_coo(
+            rows, cols, [1] * len(rows),
+            nrows=nrows, ncols=ncols,
+            dtype=gb.dtypes.BOOL,
+            dup_op=gb.binary.any
+        )
+
+        matrices[triple] = matrix
+        matrix_sizes.append((nrows * ncols, len(edges)))
+
+    print(f"Built {len(matrices):,} matrices", flush=True)
+
+    # Print matrix size statistics
+    if matrix_sizes:
+        total_dims = sum(size for size, _ in matrix_sizes)
+        total_entries = sum(entries for _, entries in matrix_sizes)
+        avg_dim = total_dims / len(matrix_sizes)
+        avg_entries = total_entries / len(matrix_sizes)
+        print(f"  Average matrix dimensions: {avg_dim:.0f}", flush=True)
+        print(f"  Average entries per matrix: {avg_entries:.0f}", flush=True)
+
+    return matrices
 
 
 def serialize_matrix(matrix, output_path):

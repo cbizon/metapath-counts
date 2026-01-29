@@ -13,12 +13,14 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
 from analyze_hop_overlap import (
-    load_node_types,
-    build_matrices,
     build_matrix_list,
     format_metapath,
     analyze_3hop_overlap,
     analyze_nhop_overlap,
+)
+from prebuild_matrices import (
+    load_node_types,
+    build_matrices,
 )
 from group_by_onehop import (
     parse_metapath,

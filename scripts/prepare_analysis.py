@@ -3,16 +3,16 @@
 Initialize manifest and directories for parallel N-hop metapath analysis.
 
 This script:
-1. Loads matrices to determine total count
+1. Reads pre-built matrix manifest
 2. Creates output directories
 3. Initializes manifest.json with all jobs in "pending" status
 
 Usage:
     # 3-hop analysis (default)
-    uv run python scripts/prepare_analysis.py --edges /path/to/edges.jsonl --nodes /path/to/nodes.jsonl
+    uv run python scripts/prepare_analysis.py --matrices-dir matrices
 
     # Custom N-hop analysis
-    uv run python scripts/prepare_analysis.py --edges /path/to/edges.jsonl --nodes /path/to/nodes.jsonl --n-hops 2
+    uv run python scripts/prepare_analysis.py --matrices-dir matrices --n-hops 2
 """
 
 import argparse
@@ -20,69 +20,82 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
-import sys
-import yaml
-
-# Add parent directory to path to import from analyze_hop_overlap
-sys.path.insert(0, os.path.dirname(__file__))
-from analyze_hop_overlap import load_node_types, build_matrices, build_matrix_list, load_prebuilt_matrices
+from metapath_counts import get_symmetric_predicates
 
 
-def load_config(config_path: str = None) -> dict:
-    """Load configuration from YAML file."""
-    if config_path is None:
-        config_path = 'config/type_expansion.yaml'
+def build_matrix_list_from_manifest(matrices_dir: str):
+    """
+    Build directed matrix list from pre-built matrix manifest WITHOUT loading matrices.
 
-    config_path = Path(config_path)
-    if not config_path.exists():
-        print(f"Warning: Config file not found at {config_path}, using defaults")
-        return None
+    Returns list of (src_type, pred, tgt_type, nvals, direction) tuples.
 
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    Args:
+        matrices_dir: Directory containing matrices and manifest.json
 
-    return config.get('type_expansion', {})
+    Returns:
+        List of (src_type, pred, tgt_type, nvals, direction) tuples
+    """
+    manifest_path = Path(matrices_dir) / 'manifest.json'
+
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Matrix manifest not found: {manifest_path}")
+
+    with open(manifest_path, 'r') as f:
+        manifest = json.load(f)
+
+    symmetric_predicates = get_symmetric_predicates()
+
+    all_matrices = []
+    for mat_info in manifest['matrices']:
+        src_type = mat_info['src_type']
+        pred = mat_info['predicate']
+        tgt_type = mat_info['tgt_type']
+        nvals = mat_info['nvals']
+
+        # Forward direction
+        all_matrices.append((src_type, pred, tgt_type, nvals, 'F'))
+
+        # Reverse direction (if not symmetric)
+        if pred not in symmetric_predicates:
+            all_matrices.append((tgt_type, pred, src_type, nvals, 'R'))
+
+    return all_matrices
 
 
-def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices_dir: str = None, config_path: str = None):
+def prepare_analysis(matrices_dir: str, n_hops: int = 3):
     """Prepare for parallel analysis run.
 
     Args:
-        nodes_file: Path to KGX nodes file
-        edges_file: Path to KGX edges file
+        matrices_dir: Directory with pre-built matrices
         n_hops: Number of hops to analyze (default: 3)
-        matrices_dir: Optional directory with pre-built matrices (faster)
-        config_path: Optional path to configuration YAML file
     """
-    # Load configuration
-    type_config = load_config(config_path)
-
     print("=" * 80)
     print(f"PREPARING PARALLEL {n_hops}-HOP ANALYSIS")
     print("=" * 80)
-    print(f"\nInput data:")
-    print(f"  Nodes: {nodes_file}")
-    print(f"  Edges: {edges_file}")
+    print(f"\nInput:")
+    print(f"  Pre-built matrices: {matrices_dir}")
     print(f"  N-hops: {n_hops}")
-    print(f"  Config: {config_path or 'config/type_expansion.yaml'}")
-    if matrices_dir:
-        print(f"  Pre-built matrices: {matrices_dir}")
-    if type_config:
-        print(f"  Type expansion: exclude {len(type_config.get('exclude_types', []))} types")
 
-    # Load matrices (either prebuilt or from edges)
-    if matrices_dir:
-        print("\nLoading pre-built matrices...")
-        matrices = load_prebuilt_matrices(matrices_dir)
-    else:
-        print("\nLoading graph data and building matrices...")
-        node_types = load_node_types(nodes_file, config=type_config)
-        matrices = build_matrices(edges_file, node_types)
+    # Read matrix manifest (fast, no matrix loading)
+    print("\nReading pre-built matrix manifest...")
+    all_matrices_metadata = build_matrix_list_from_manifest(matrices_dir)
+    num_matrices = len(all_matrices_metadata)
+    print(f"Found {num_matrices} directed matrices in manifest")
 
-    # Build extended matrix list with forward and reverse directions
-    all_matrices, _ = build_matrix_list(matrices)
+    # For 1-hop analysis, pre-filter to only canonical directions
+    # This cuts the job count roughly in half
+    if n_hops == 1:
+        print(f"\n1-hop analysis: filtering to canonical directions only (src_type <= tgt_type)...")
+        original_count = len(all_matrices_metadata)
+        all_matrices_metadata = [
+            (src, pred, tgt, nvals, d)
+            for src, pred, tgt, nvals, d in all_matrices_metadata
+            if src <= tgt  # Canonical direction
+        ]
+        filtered_count = len(all_matrices_metadata)
+        print(f"Filtered from {original_count} to {filtered_count} jobs ({100*filtered_count/original_count:.1f}%)")
+        num_matrices = filtered_count
 
-    num_matrices = len(all_matrices)
     print(f"\nTotal Matrix1 jobs to process: {num_matrices}")
 
     # Create output directories with n_hops suffix
@@ -101,21 +114,15 @@ def prepare_analysis(nodes_file: str, edges_file: str, n_hops: int = 3, matrices
     print(f"\nInitializing manifest at {manifest_path}...")
     manifest = {
         "_metadata": {
-            "nodes_file": nodes_file,
-            "edges_file": edges_file,
+            "matrices_dir": matrices_dir,
             "n_hops": n_hops,
             "created_at": datetime.now().isoformat(),
             "total_jobs": num_matrices
         }
     }
 
-    # Add matrices_dir to metadata if provided
-    if matrices_dir:
-        manifest["_metadata"]["matrices_dir"] = matrices_dir
-
     for i in range(num_matrices):
-        src_type, pred, tgt_type, matrix, direction = all_matrices[i]
-        matrix_nvals = matrix.nvals
+        src_type, pred, tgt_type, matrix_nvals, direction = all_matrices_metadata[i]
 
         manifest[f"matrix1_{i:03d}"] = {
             "status": "pending",
@@ -154,21 +161,14 @@ def main():
     parser = argparse.ArgumentParser(
         description='Initialize manifest and directories for parallel N-hop metapath analysis'
     )
-    parser.add_argument('--edges', required=True,
-                        help='Path to edges.jsonl file')
-    parser.add_argument('--nodes', required=True,
-                        help='Path to nodes.jsonl file')
+    parser.add_argument('--matrices-dir', required=True,
+                        help='Directory with pre-built matrices')
     parser.add_argument('--n-hops', type=int, default=3,
                         help='Number of hops to analyze (default: 3)')
-    parser.add_argument('--matrices-dir', default=None,
-                        help='Directory with pre-built matrices (for faster preparation)')
-    parser.add_argument('--config', default='config/type_expansion.yaml',
-                        help='Path to configuration YAML file (default: config/type_expansion.yaml)')
 
     args = parser.parse_args()
 
-    prepare_analysis(nodes_file=args.nodes, edges_file=args.edges, n_hops=args.n_hops,
-                    matrices_dir=args.matrices_dir, config_path=args.config)
+    prepare_analysis(matrices_dir=args.matrices_dir, n_hops=args.n_hops)
 
 
 if __name__ == "__main__":
