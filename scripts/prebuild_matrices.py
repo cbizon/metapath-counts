@@ -25,49 +25,27 @@ import time
 from pathlib import Path
 from collections import defaultdict
 import numpy as np
-import yaml
 import graphblas as gb
-from metapath_counts import get_all_types, get_symmetric_predicates
+from metapath_counts import assign_node_type, get_symmetric_predicates, is_pseudo_type
 
 
 def load_node_types(nodes_file: str, config: dict = None) -> dict:
     """
     Load node types from KGX nodes file.
 
-    Returns dict mapping node_id -> list[str] of types (without biolink: prefix).
-    Uses hierarchical type expansion if configured.
+    Each node is assigned to exactly ONE type or pseudo-type.
 
     Args:
         nodes_file: Path to KGX nodes.jsonl file
-        config: Configuration dict with type_expansion settings:
-                - exclude_types: set/list of types to exclude
-                - max_depth: max hierarchy depth (None = unlimited)
-                - include_most_specific: always include most specific type
+        config: Unused (kept for backwards compatibility)
 
     Returns:
-        dict: Mapping of node_id -> list of type names (without biolink: prefix)
+        dict: Mapping of node_id -> str (single type or pseudo-type)
     """
     print(f"Loading node types from {nodes_file}...", flush=True)
 
-    # Default config if none provided
-    if config is None:
-        config = {
-            'exclude_types': {
-                'ThingWithTaxon',
-                'SubjectOfInvestigation',
-                'PhysicalEssenceOrOccurrent',
-                'PhysicalEssence',
-                'OntologyClass',
-                'Occurrent',
-                'InformationContentEntity',
-                'Attribute'
-            },
-            'max_depth': None,
-            'include_most_specific': True
-        }
-
     node_types = {}
-    type_count_distribution = {}  # Track how many nodes have N types
+    pseudo_type_count = 0
 
     with open(nodes_file, 'r') as f:
         for line_num, line in enumerate(f, 1):
@@ -79,36 +57,18 @@ def load_node_types(nodes_file: str, config: dict = None) -> dict:
             categories = node.get('category', [])
 
             if categories:
-                # Get all types (hierarchical expansion)
-                all_types = get_all_types(
-                    categories,
-                    exclude_types=config.get('exclude_types', set()),
-                    max_depth=config.get('max_depth'),
-                    include_most_specific=config.get('include_most_specific', True)
-                )
+                # Assign single type or pseudo-type
+                assigned_type = assign_node_type(categories)
 
-                if all_types:
-                    node_types[node_id] = all_types
+                if assigned_type:
+                    node_types[node_id] = assigned_type
 
-                    # Track distribution
-                    num_types = len(all_types)
-                    type_count_distribution[num_types] = type_count_distribution.get(num_types, 0) + 1
+                    # Track pseudo-types
+                    if is_pseudo_type(assigned_type):
+                        pseudo_type_count += 1
 
-    print(f"Loaded {len(node_types):,} nodes with hierarchical types", flush=True)
-
-    # Print type distribution statistics
-    if type_count_distribution:
-        print(f"\nType count distribution:", flush=True)
-        total_nodes = len(node_types)
-        for count in sorted(type_count_distribution.keys()):
-            num_nodes = type_count_distribution[count]
-            pct = 100 * num_nodes / total_nodes
-            print(f"  {count} types: {num_nodes:,} nodes ({pct:.1f}%)", flush=True)
-
-        # Calculate average
-        total_type_assignments = sum(k * v for k, v in type_count_distribution.items())
-        avg_types = total_type_assignments / total_nodes
-        print(f"  Average types per node: {avg_types:.2f}", flush=True)
+    print(f"Loaded {len(node_types):,} nodes with assigned types", flush=True)
+    print(f"  Pseudo-types (multi-leaf): {pseudo_type_count:,} nodes ({100*pseudo_type_count/len(node_types):.1f}%)", flush=True)
 
     return node_types
 
@@ -117,15 +77,16 @@ def build_matrices(edges_file: str, node_types: dict):
     """
     Build sparse matrices for each (source_type, predicate, target_type) triple.
 
-    With hierarchical types, each edge may appear in multiple matrices
-    (one for each type combination).
+    Each node has exactly one assigned type, so each edge creates exactly one
+    matrix entry (or two for symmetric predicates).
 
     Args:
         edges_file: Path to KGX edges.jsonl file
-        node_types: dict mapping node_id -> list[str] of types
+        node_types: dict mapping node_id -> str (single type or pseudo-type)
 
     Returns:
         dict: Mapping of (src_type, pred, tgt_type) -> GraphBLAS Matrix
+        dict: Mapping of type_name -> {node_id: index}
     """
     print(f"\nCollecting edge types from {edges_file}...", flush=True)
 
@@ -139,12 +100,11 @@ def build_matrices(edges_file: str, node_types: dict):
     skipped_subclass = 0
     skipped_no_types = 0
     edges_processed = 0
-    total_matrix_entries = 0  # Track explosion factor
 
     with open(edges_file, 'r') as f:
         for line_num, line in enumerate(f, 1):
             if line_num % 1_000_000 == 0:
-                print(f"  Processed {line_num:,} edges, {total_matrix_entries:,} matrix entries", flush=True)
+                print(f"  Processed {line_num:,} edges", flush=True)
 
             edge = json.loads(line)
             predicate = edge.get('predicate', '')
@@ -155,10 +115,10 @@ def build_matrices(edges_file: str, node_types: dict):
 
             subject = edge['subject']
             obj = edge['object']
-            src_types = node_types.get(subject)  # Now returns list[str]
-            tgt_types = node_types.get(obj)      # Now returns list[str]
+            src_type = node_types.get(subject)  # Now returns single str
+            tgt_type = node_types.get(obj)      # Now returns single str
 
-            if not src_types or not tgt_types:
+            if not src_type or not tgt_type:
                 skipped_no_types += 1
                 continue
 
@@ -167,39 +127,31 @@ def build_matrices(edges_file: str, node_types: dict):
             # For symmetric predicates, add edge in both directions
             is_symmetric = pred in symmetric_predicates
 
-            # Iterate over all type combinations (Cartesian product)
-            for src_type in src_types:
-                for tgt_type in tgt_types:
-                    # Add forward direction
-                    triple = (src_type, pred, tgt_type)
-                    edge_triples[triple].append((subject, obj))
-                    total_matrix_entries += 1
+            # Add forward direction
+            triple = (src_type, pred, tgt_type)
+            edge_triples[triple].append((subject, obj))
 
-                    # Track node indices for both types
-                    if subject not in node_to_idx[src_type]:
-                        idx = len(node_to_idx[src_type])
-                        node_to_idx[src_type][subject] = idx
+            # Track node indices for both types
+            if subject not in node_to_idx[src_type]:
+                idx = len(node_to_idx[src_type])
+                node_to_idx[src_type][subject] = idx
 
-                    if obj not in node_to_idx[tgt_type]:
-                        idx = len(node_to_idx[tgt_type])
-                        node_to_idx[tgt_type][obj] = idx
+            if obj not in node_to_idx[tgt_type]:
+                idx = len(node_to_idx[tgt_type])
+                node_to_idx[tgt_type][obj] = idx
 
-                    # Add reverse direction for symmetric predicates
-                    if is_symmetric:
-                        reverse_triple = (tgt_type, pred, src_type)
-                        edge_triples[reverse_triple].append((obj, subject))
-                        total_matrix_entries += 1
+            # Add reverse direction for symmetric predicates
+            if is_symmetric:
+                reverse_triple = (tgt_type, pred, src_type)
+                edge_triples[reverse_triple].append((obj, subject))
 
             edges_processed += 1
 
     print(f"\nEdge statistics:", flush=True)
     print(f"  Processed: {edges_processed:,} edges", flush=True)
+    print(f"  Skipped (subclass_of): {skipped_subclass:,}", flush=True)
     print(f"  Skipped (no types): {skipped_no_types:,}", flush=True)
-    print(f"  Total matrix entries: {total_matrix_entries:,}", flush=True)
     print(f"  Unique edge type triples: {len(edge_triples):,}", flush=True)
-    if edges_processed > 0:
-        expansion_factor = total_matrix_entries / edges_processed
-        print(f"  Type expansion factor: {expansion_factor:.2f}x", flush=True)
 
     # Build matrices
     print(f"\nBuilding GraphBLAS matrices...", flush=True)
@@ -237,7 +189,7 @@ def build_matrices(edges_file: str, node_types: dict):
         print(f"  Average matrix dimensions: {avg_dim:.0f}", flush=True)
         print(f"  Average entries per matrix: {avg_entries:.0f}", flush=True)
 
-    return matrices
+    return matrices, node_to_idx
 
 
 def serialize_matrix(matrix, output_path):
@@ -288,22 +240,6 @@ def save_node_indexing(node_to_idx, output_dir):
     print(f"Saved node indexing metadata to {metadata_path}")
 
 
-def load_config(config_path: str = None) -> dict:
-    """Load configuration from YAML file."""
-    if config_path is None:
-        config_path = 'config/type_expansion.yaml'
-
-    config_path = Path(config_path)
-    if not config_path.exists():
-        print(f"Warning: Config file not found at {config_path}, using defaults")
-        return None
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    return config.get('type_expansion', {})
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='Pre-build and serialize matrices for fast loading'
@@ -311,19 +247,10 @@ def main():
     parser.add_argument('--edges', required=True, help='Path to edges.jsonl')
     parser.add_argument('--nodes', required=True, help='Path to nodes.jsonl')
     parser.add_argument('--output', required=True, help='Output directory for matrices')
-    parser.add_argument(
-        '--config',
-        default='config/type_expansion.yaml',
-        help='Path to configuration YAML file (default: config/type_expansion.yaml)'
-    )
-
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load configuration
-    type_config = load_config(args.config)
 
     print("=" * 80)
     print("PRE-BUILDING MATRICES")
@@ -331,16 +258,13 @@ def main():
     print(f"Nodes file: {args.nodes}")
     print(f"Edges file: {args.edges}")
     print(f"Output dir: {args.output}")
-    print(f"Config file: {args.config}")
-    if type_config:
-        print(f"Type expansion enabled: {type_config.get('enabled', True)}")
-        print(f"Excluded types: {len(type_config.get('exclude_types', []))}")
+    print(f"Method: Single type or pseudo-type assignment")
     print()
 
     # Load node types
     print("[1/3] Loading node types...")
     start_time = time.time()
-    node_types = load_node_types(args.nodes, config=type_config)
+    node_types = load_node_types(args.nodes)
     node_load_time = time.time() - start_time
     print(f"Loaded {len(node_types):,} nodes in {node_load_time:.1f}s")
     print()
@@ -348,7 +272,7 @@ def main():
     # Build matrices
     print("[2/3] Building matrices from edges...")
     start_time = time.time()
-    matrices = build_matrices(args.edges, node_types)
+    matrices, node_to_idx = build_matrices(args.edges, node_types)
     build_time = time.time() - start_time
     print(f"Built {len(matrices):,} matrices in {build_time:.1f}s ({build_time/60:.1f}min)")
     print()
@@ -384,10 +308,9 @@ def main():
         'num_matrices': len(matrices),
         'total_size_bytes': total_bytes,
         'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'type_expansion': {
-            'enabled': True,
-            'config_file': args.config,
-            'exclude_types': list(type_config.get('exclude_types', [])) if type_config else []
+        'type_assignment': {
+            'method': 'single_type_or_pseudo',
+            'description': 'Each node assigned to single type or pseudo-type for multi-leaf nodes'
         },
         'matrices': []
     }

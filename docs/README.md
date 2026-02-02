@@ -9,8 +9,7 @@ This system parallelizes N-hop metapath analysis across SLURM cluster with autom
 uv run python scripts/prebuild_matrices.py \
   --edges /path/to/edges.jsonl \
   --nodes /path/to/nodes.jsonl \
-  --output matrices \
-  --config config/type_expansion.yaml
+  --output matrices
 
 # 1. Initialize (creates manifest and directories)
 uv run python scripts/prepare_analysis.py \
@@ -55,8 +54,7 @@ Pre-build and serialize all matrices from the knowledge graph:
 uv run python scripts/prebuild_matrices.py \
   --edges /path/to/edges.jsonl \
   --nodes /path/to/nodes.jsonl \
-  --output matrices \
-  --config config/type_expansion.yaml
+  --output matrices
 ```
 
 **Output:**
@@ -480,15 +478,39 @@ NODES_FILE="/projects/stars/Data_services/biolink3/graphs/Baseline_Nonredundant/
 
 ## Architecture Details
 
-### Node Revisiting
+### Approximate Metrics (Precision, Recall, etc.)
 
-**Note:** The current implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
+**IMPORTANT:** The performance metrics (Precision, Recall, F1, MCC, etc.) in grouped results should be treated as **approximate values**, not exact calculations. There are two known sources of approximation:
+
+#### 1. Overlap Aggregation Uses Sum Semantics
+
+When aggregating explicit results to hierarchical types/predicates, overlaps are **summed** rather than computing the true **set union**. This causes overcounting when a node pair has multiple edge types that roll up to the same aggregated target.
+
+**Example:**
+- Node pair (Gene_A, Disease_B) has both a `treats` edge AND a `regulates` edge
+- Both predicates have `related_to` as an ancestor
+- Aggregated overlap counts this pair **twice** instead of once
+
+**Consequence:** For aggregated paths, `overlap` can exceed `predictor_count`, causing `precision > 1.0`.
+
+**Why not fix it?** Computing true set unions requires tracking individual node pairs, which is memory-prohibitive for large graphs.
+
+#### 2. Node Revisiting in Longer Paths
+
+The implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
 
 1. Matrix-based diagonal zeroing can only prevent revisiting the **start** node, not intermediate nodes
 2. Properly filtering all repeated nodes would require path enumeration, which is computationally expensive
 3. For rule mining purposes, the statistical signal from repeated-node paths is often still useful
 
-If distinct-node paths are required, post-processing filters can be applied.
+#### Practical Guidance
+
+- **Use metrics for ranking/comparison**, not as absolute values
+- **Explicit-only results** (`--explicit-only`) have exact metrics
+- **Aggregated results** are approximate but useful for pattern discovery
+- **Precision > 1.0** indicates overlap aggregation error; treat with caution
+
+If distinct-node paths or exact aggregated metrics are required, post-processing filters can be applied.
 
 ### Duplicate Elimination
 
@@ -535,68 +557,49 @@ Test run with 3 matrices:
 
 Most jobs complete in 3-5 minutes with <10GB memory. Small percentage need higher tiers.
 
-## Hierarchical Type Expansion
+## Type Assignment and Hierarchical Aggregation
 
-By default, the system uses **hierarchical type expansion** to maximize rule mining coverage. This means nodes participate in metapaths as ALL their types in the Biolink hierarchy, not just their most specific type.
+The system uses **single-type assignment** during matrix building, then **aggregates to hierarchy** during post-processing. This approach avoids matrix explosion while still providing comprehensive hierarchical coverage.
 
-### What It Does
+### How It Works
 
-**Old behavior (single type):**
-- Node with categories `["SmallMolecule", "ChemicalEntity"]`
-- Used only as `SmallMolecule` in metapaths
-- Missing paths like `ChemicalEntity → predicate → Gene`
+**Step 1: Single-Type Assignment (Matrix Building)**
+- Each node assigned to exactly ONE type
+- Node with `["SmallMolecule", "ChemicalEntity"]` → assigned to `SmallMolecule` (most specific)
+- Node with `["Gene", "SmallMolecule"]` (multi-leaf) → assigned to pseudo-type `Gene+SmallMolecule`
+- Fast: No matrix explosion (~4 hours vs multiple days)
 
-**New behavior (hierarchical):**
-- Same node used as BOTH `SmallMolecule` AND `ChemicalEntity`
-- Captures paths at multiple abstraction levels
-- More robust rule mining
+**Step 2: Hierarchical Aggregation (Post-Processing)**
+- Results aggregated during `group_by_onehop.py` step
+- Pseudo-types expanded: `Gene+SmallMolecule` contributes to both `Gene` and `SmallMolecule` paths
+- Type hierarchy: Results propagate to ancestors (e.g., `SmallMolecule` → `ChemicalEntity`)
+- Predicate hierarchy: Results propagate to ancestor predicates
 
-### Configuration
+**Example:**
+```
+Explicit result: Gene+SmallMolecule|affects|Disease (count: 100)
 
-Configure via `config/type_expansion.yaml`:
-
-```yaml
-type_expansion:
-  enabled: true
-  max_depth: null  # Use all types (unlimited)
-
-  # Exclude abstract types from hierarchy
-  exclude_types:
-    - ThingWithTaxon
-    - SubjectOfInvestigation
-    - PhysicalEssenceOrOccurrent
-    - PhysicalEssence
-    - OntologyClass
-    - Occurrent
-    - InformationContentEntity
-    - Attribute
-
-  include_most_specific: true  # Always include most specific type
+Aggregated to:
+  - Gene|affects|Disease (100)
+  - SmallMolecule|affects|Disease (100)
+  - BiologicalEntity|affects|Disease (100)  # Gene ancestor
+  - ChemicalEntity|affects|Disease (100)    # SmallMolecule ancestor
 ```
 
-### Impact
+### Benefits
 
-- **Matrix count**: ~15-20x more matrices (depends on type diversity)
-- **Path count**: More paths discovered (especially at abstract levels)
-- **Memory**: Slightly higher per job (but still within tiering)
-- **Runtime**: Similar due to parallelization
+- **No matrix explosion**: Linear scaling with edges (not 15-20x)
+- **Fast runtime**: ~4 hours (return to original speed)
+- **Comprehensive results**: Same hierarchical coverage via post-processing
+- **Lower memory**: Much lower per-job memory requirements
 
-### CLI Usage
+### Disabling Aggregation (Debug Mode)
 
-All scripts accept `--config` option:
+To see only explicit results without aggregation:
 
 ```bash
-# Use default config
-uv run python scripts/prepare_analysis.py --edges edges.jsonl --nodes nodes.jsonl
-
-# Use custom config
-uv run python scripts/prepare_analysis.py \
-  --edges edges.jsonl \
-  --nodes nodes.jsonl \
-  --config custom_config.yaml
+uv run python scripts/group_by_onehop.py --n-hops 3 --explicit-only
 ```
-
-The orchestrator automatically passes config to all worker jobs.
 
 ### Per-Path OOM Recovery
 

@@ -5,8 +5,12 @@ Merge individual matrix1 result files into a single output file.
 This script:
 1. Finds all results_matrix1_*.tsv files
 2. Verifies all expected indices are present
-3. Merges them into a single TSV with one header
+3. Merges them by SUMMING counts for duplicate (nhop_path, onehop_path) keys
 4. Reports statistics
+
+Note: Now that results are aggregated within each job, the same
+(nhop_path, onehop_path) pair can appear in multiple files and
+must be summed (not concatenated).
 
 Usage:
     # 3-hop (default)
@@ -107,43 +111,80 @@ def merge_results(results_dir=None, output_file=None, n_hops=3):
         output_file = os.path.join(results_dir, f"all_{n_hops}hop_overlaps.tsv")
 
     print(f"\nMerging {len(file_by_index)} files into: {output_file}")
+    print(f"Note: Summing counts for duplicate (nhop_path, onehop_path) keys...")
 
-    # Merge files
-    total_rows = 0
+    # Merge files by summing duplicate keys
+    # aggregated: (nhop_path, onehop_path) -> [nhop_count, onehop_count, overlap, total_possible]
+    aggregated = defaultdict(lambda: [0, 0, 0, 0])
+    total_rows_read = 0
     files_processed = 0
+    header = None
 
+    # Read all files and aggregate
+    for idx in sorted(file_by_index.keys()):
+        file_path = file_by_index[idx]
+        files_processed += 1
+
+        with open(file_path, 'r') as f:
+            # Read header from first file
+            file_header = f.readline().strip()
+            if header is None:
+                header = file_header
+
+            # Read data rows
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) != 6:
+                    print(f"Warning: skipping malformed line in {file_path}: {len(parts)} columns")
+                    continue
+
+                nhop_path = parts[0]
+                nhop_count = int(parts[1])
+                onehop_path = parts[2]
+                onehop_count = int(parts[3])
+                overlap = int(parts[4])
+                total_possible = int(parts[5])
+
+                # Accumulate counts
+                key = (nhop_path, onehop_path)
+                agg = aggregated[key]
+                agg[0] += nhop_count
+                agg[1] += onehop_count
+                agg[2] += overlap
+                agg[3] += total_possible
+
+                total_rows_read += 1
+
+        if (files_processed % 50 == 0) or (files_processed == len(file_by_index)):
+            print(f"  Processed {files_processed}/{len(file_by_index)} files ({total_rows_read:,} rows read, {len(aggregated):,} unique keys)")
+
+    # Write merged results
+    print(f"\nWriting {len(aggregated):,} unique rows to {output_file}...")
     with open(output_file, 'w') as out:
-        # Write header from first file
-        first_file = file_by_index[min(file_by_index.keys())]
-        with open(first_file, 'r') as f:
-            header = f.readline()
-            out.write(header)
+        out.write(header + '\n')
 
-        # Append data from all files (in index order)
-        for idx in sorted(file_by_index.keys()):
-            file_path = file_by_index[idx]
-            files_processed += 1
+        rows_written = 0
+        for (nhop_path, onehop_path), (nhop_count, onehop_count, overlap, total_possible) in aggregated.items():
+            out.write(f"{nhop_path}\t{nhop_count}\t{onehop_path}\t{onehop_count}\t{overlap}\t{total_possible}\n")
+            rows_written += 1
 
-            with open(file_path, 'r') as f:
-                # Skip header
-                f.readline()
+            if rows_written % 100000 == 0:
+                print(f"  Written {rows_written:,}/{len(aggregated):,} rows")
 
-                # Copy remaining lines
-                lines_from_file = 0
-                for line in f:
-                    out.write(line)
-                    lines_from_file += 1
-                    total_rows += 1
-
-            if (files_processed % 50 == 0) or (files_processed == len(file_by_index)):
-                print(f"  Processed {files_processed}/{len(file_by_index)} files ({total_rows:,} rows so far)")
+    total_rows = len(aggregated)
 
     print(f"\n{'=' * 80}")
     print("MERGE COMPLETE")
     print(f"{'=' * 80}")
     print(f"\nStatistics:")
     print(f"  Files merged: {files_processed}")
-    print(f"  Total rows: {total_rows:,}")
+    print(f"  Rows read: {total_rows_read:,}")
+    print(f"  Unique (nhop, 1hop) pairs: {total_rows:,}")
+    print(f"  Compression ratio: {total_rows_read/total_rows if total_rows > 0 else 1:.2f}x")
     print(f"  Output file: {output_file}")
 
     if missing_indices:

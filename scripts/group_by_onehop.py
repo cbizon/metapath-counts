@@ -3,11 +3,15 @@
 Group N-hop metapath results by their corresponding 1-hop metapath.
 
 This script:
-1. Reads all results_matrix1_*.tsv files
-2. Normalizes 1-hop metapaths to forward (F) direction
+1. Reads aggregated results (from merged SLURM job outputs)
+2. Normalizes 1-hop metapaths to canonical direction (alphabetically)
 3. When reversing a 1-hop, also reverses the corresponding N-hop metapath
 4. Groups results by normalized 1-hop metapath
-5. Writes each group to a separate output file
+5. Calculates prediction metrics (Precision, Recall, F1, MCC, etc.)
+6. Writes each group to a separate output file
+
+Note: Hierarchical aggregation (pseudo-type expansion, ancestor aggregation)
+is now performed during SLURM jobs, so input is already aggregated.
 
 Example normalization:
 - 1-hop: Disease|has_adverse_event|R|Drug -> Drug|has_adverse_event|F|Disease
@@ -16,10 +20,18 @@ Example normalization:
 
 import os
 import re
+import time
 from pathlib import Path
 from collections import defaultdict, OrderedDict
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Iterator
 import math
+import itertools
+from metapath_counts import (
+    is_pseudo_type,
+    parse_pseudo_type,
+    get_type_ancestors,
+    get_predicate_ancestors
+)
 
 
 def parse_metapath(metapath: str) -> Tuple[list, list, list]:
@@ -260,6 +272,224 @@ class FileHandleManager:
         self.handles.clear()
 
 
+def get_type_variants_for_aggregation(type_name: str, include_self: bool = True) -> List[str]:
+    """
+    Get all type variants for hierarchical aggregation.
+
+    For pseudo-types: expands to constituents
+    For all types: includes ancestors
+
+    Args:
+        type_name: Type name (e.g., "SmallMolecule" or "Gene+SmallMolecule")
+        include_self: Whether to include the type itself in the results
+
+    Returns:
+        List of type variants (includes pseudo-type itself, constituents, and all ancestors)
+    """
+    variants = []
+
+    # Always include the original type if requested
+    if include_self:
+        variants.append(type_name)
+
+    if is_pseudo_type(type_name):
+        # Pseudo-type: add each constituent
+        constituents = parse_pseudo_type(type_name)
+        variants.extend(constituents)
+
+    # Get ancestors (works for both regular types and pseudo-types)
+    ancestors = get_type_ancestors(type_name)
+
+    # Add ancestors (excluding the type itself if it's in there)
+    for ancestor in ancestors:
+        if ancestor != type_name and ancestor not in variants:
+            variants.append(ancestor)
+
+    return variants
+
+
+def get_predicate_variants_for_aggregation(predicate: str, include_self: bool = True) -> List[str]:
+    """
+    Get all predicate variants for hierarchical aggregation.
+
+    Args:
+        predicate: Predicate name (with or without biolink: prefix)
+        include_self: Whether to include the predicate itself
+
+    Returns:
+        List of predicate variants (includes predicate and its ancestors, all without biolink: prefix)
+    """
+    variants = []
+
+    # Normalize: strip biolink: prefix if present
+    clean_predicate = predicate.replace('biolink:', '')
+
+    # Include the original predicate (normalized)
+    if include_self:
+        variants.append(clean_predicate)
+
+    # Get ancestor predicates (already returned without biolink: prefix)
+    ancestors = get_predicate_ancestors(predicate)
+
+    for ancestor in ancestors:
+        if ancestor not in variants:
+            variants.append(ancestor)
+
+    return variants
+
+
+def generate_metapath_variants(metapath: str) -> Iterator[str]:
+    """
+    Generate all implied variants of a metapath through hierarchical aggregation.
+
+    This expands pseudo-types to constituents and propagates to ancestor
+    types and predicates.
+
+    Args:
+        metapath: Original metapath (may contain pseudo-types)
+
+    Yields:
+        All implied metapath variants
+
+    Example:
+        Input: "Gene+Protein|affects|F|SmallMolecule"
+        Yields:
+            - "Gene+Protein|affects|F|SmallMolecule" (original)
+            - "Gene|affects|F|SmallMolecule" (expand pseudo-type)
+            - "Protein|affects|F|SmallMolecule" (expand pseudo-type)
+            - "GeneOrGeneProduct|affects|F|SmallMolecule" (ancestor)
+            - "Gene|affects|F|ChemicalEntity" (ancestor)
+            - "Gene|interacts_with|F|SmallMolecule" (predicate ancestor)
+            - ... (all combinations)
+    """
+    nodes, predicates, directions = parse_metapath(metapath)
+
+    # Get all variants for each node type
+    node_variants = [get_type_variants_for_aggregation(node) for node in nodes]
+
+    # Get all variants for each predicate
+    predicate_variants = [get_predicate_variants_for_aggregation(pred) for pred in predicates]
+
+    # Generate all combinations
+    for node_combo in itertools.product(*node_variants):
+        for pred_combo in itertools.product(*predicate_variants):
+            # Build the variant metapath
+            variant = build_metapath(list(node_combo), list(pred_combo), directions)
+            yield variant
+
+
+def aggregate_results(explicit_results: List[Tuple]) -> Dict[Tuple[str, str], Tuple[int, int, int, int]]:
+    """
+    Aggregate explicit results to include all implied hierarchical paths.
+
+    This is where "de-re-aggregation" happens:
+    1. Expand pseudo-types to constituent types
+    2. Aggregate to ancestor types
+    3. Aggregate to ancestor predicates
+
+    Args:
+        explicit_results: List of (nhop_path, nhop_count, 1hop_path, 1hop_count, overlap, total_possible)
+
+    Returns:
+        Dict mapping (nhop_path, 1hop_path) -> (nhop_count, 1hop_count, overlap, total_possible)
+        where counts are summed across all explicit paths that imply this pair
+    """
+    # Step 1: Extract all unique metapaths
+    print("  [2a/2] Extracting unique metapaths...")
+    unique_nhop_paths = set()
+    unique_1hop_paths = set()
+    for nhop_path, _, onehop_path, _, _, _ in explicit_results:
+        unique_nhop_paths.add(nhop_path)
+        unique_1hop_paths.add(onehop_path)
+
+    print(f"    Found {len(unique_nhop_paths):,} unique N-hop paths")
+    print(f"    Found {len(unique_1hop_paths):,} unique 1-hop paths")
+
+    # Step 2: Pre-compute variants for all unique N-hop paths
+    print("  [2b/2] Pre-computing N-hop path variants...")
+    nhop_variants_cache = {}
+    for i, path in enumerate(unique_nhop_paths, 1):
+        if i % 100 == 0:
+            print(f"    Processed {i:,}/{len(unique_nhop_paths):,} N-hop paths")
+        nhop_variants_cache[path] = list(generate_metapath_variants(path))
+    print(f"    Completed {len(unique_nhop_paths):,} N-hop paths")
+
+    # Step 3: Pre-compute variants for all unique 1-hop paths
+    print("  [2c/2] Pre-computing 1-hop path variants...")
+    onehop_variants_cache = {}
+    for i, path in enumerate(unique_1hop_paths, 1):
+        if i % 100 == 0:
+            print(f"    Processed {i:,}/{len(unique_1hop_paths):,} 1-hop paths")
+        onehop_variants_cache[path] = list(generate_metapath_variants(path))
+    print(f"    Completed {len(unique_1hop_paths):,} 1-hop paths")
+
+    # Step 4: Compute aggregated counts for each nhop variant (independent of onehop)
+    # This fixes the bug where nhop_count was multiplied by number of onehop variants
+    print(f"  [2d/2] Computing independent variant counts...")
+    unique_nhop_counts = {}
+    unique_onehop_counts = {}
+    for nhop_path, nhop_count, onehop_path, onehop_count, _, _ in explicit_results:
+        if nhop_path not in unique_nhop_counts:
+            unique_nhop_counts[nhop_path] = nhop_count
+        if onehop_path not in unique_onehop_counts:
+            unique_onehop_counts[onehop_path] = onehop_count
+
+    # Aggregate nhop counts to variants
+    nhop_variant_counts = defaultdict(int)
+    for nhop_path, nhop_count in unique_nhop_counts.items():
+        for nhop_variant in nhop_variants_cache[nhop_path]:
+            nhop_variant_counts[nhop_variant] += nhop_count
+
+    # Aggregate onehop counts to variants
+    onehop_variant_counts = defaultdict(int)
+    for onehop_path, onehop_count in unique_onehop_counts.items():
+        for onehop_variant in onehop_variants_cache[onehop_path]:
+            onehop_variant_counts[onehop_variant] += onehop_count
+
+    print(f"    {len(nhop_variant_counts):,} N-hop variants, {len(onehop_variant_counts):,} 1-hop variants")
+
+    # Step 5: Aggregate overlap and total_possible for each (nhop_variant, onehop_variant) pair
+    print(f"  [2e/2] Aggregating pair data...")
+    print(f"    Total explicit results to process: {len(explicit_results):,}")
+    pair_data = defaultdict(lambda: [0, 0])  # [overlap, total_possible]
+
+    start_time = time.time()
+    for i, (nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible) in enumerate(explicit_results, 1):
+        # Show progress: first few, then every 1000, then every 10000
+        if i == 1 or i == 10 or i == 100 or i == 1000 or (i < 10000 and i % 1000 == 0) or i % 10000 == 0:
+            elapsed = time.time() - start_time
+            rate = i / elapsed if elapsed > 0 else 0
+            remaining = (len(explicit_results) - i) / rate if rate > 0 else 0
+            eta_mins = remaining / 60
+            print(f"    Aggregated {i:,}/{len(explicit_results):,} ({100*i/len(explicit_results):.1f}%) | "
+                  f"Rate: {rate:.0f} rows/sec | ETA: {eta_mins:.1f} min")
+
+        # Use cached variants - only accumulate overlap and total_possible
+        for nhop_variant in nhop_variants_cache[nhop_path]:
+            for onehop_variant in onehop_variants_cache[onehop_path]:
+                key = (nhop_variant, onehop_variant)
+                agg = pair_data[key]
+                agg[0] += overlap
+                agg[1] += total_possible
+
+    elapsed_total = time.time() - start_time
+    print(f"    Completed {len(explicit_results):,} explicit results in {elapsed_total/60:.1f} minutes")
+
+    # Step 6: Combine into final aggregated results
+    aggregated = {}
+    for (nhop_variant, onehop_variant), (overlap, total_possible) in pair_data.items():
+        aggregated[(nhop_variant, onehop_variant)] = (
+            nhop_variant_counts[nhop_variant],
+            onehop_variant_counts[onehop_variant],
+            overlap,
+            total_possible
+        )
+
+    print(f"    Generated {len(aggregated):,} aggregated results")
+
+    return aggregated
+
+
 def calculate_metrics(threehop_count: int, onehop_count: int, overlap: int, total_possible: int) -> dict:
     """
     Calculate prediction metrics from N-hop and 1-hop metapath overlap.
@@ -351,7 +581,15 @@ def main():
                         help='Run in test mode with test_results directory')
     parser.add_argument('--max-open-files', type=int, default=500,
                         help='Maximum number of file handles to keep open at once (default: 500)')
+    parser.add_argument('--aggregate', action='store_true',
+                        help='Perform hierarchical aggregation (expand pseudo-types and aggregate to ancestors). NOTE: Aggregation is now done during SLURM jobs by default, so this is rarely needed.')
+    parser.add_argument('--explicit-only', action='store_true',
+                        help='DEPRECATED: Aggregation is now off by default')
     args = parser.parse_args()
+
+    # Determine aggregation mode
+    # NEW DEFAULT: aggregation is OFF (done during SLURM jobs)
+    do_aggregation = args.aggregate
 
     # Input and output directories
     if args.test:
@@ -418,6 +656,7 @@ def main():
 
     # Initialize file handle manager
     print(f"Max open file handles: {args.max_open_files}")
+    print(f"Hierarchical aggregation: {'ENABLED (rare, results should already be aggregated)' if do_aggregation else 'DISABLED (default, aggregation done in SLURM jobs)'}")
     file_manager = FileHandleManager(output_dir, enhanced_header, max_open=args.max_open_files)
 
     # Statistics
@@ -425,14 +664,18 @@ def main():
     files_processed = 0
     unique_1hop_metapaths = set()
 
-    try:
+    # Step 1: Read all explicit results (needed for aggregation)
+    if do_aggregation:
+        print("\n[1/2] Reading explicit results for aggregation...")
+        explicit_results = []
+
         for input_file in result_files:
             files_processed += 1
             if files_processed % 100 == 0:
-                print(f"Processing file {files_processed}/{len(result_files)}: {input_file.name}")
+                print(f"  Reading file {files_processed}/{len(result_files)}: {input_file.name}")
 
             with open(input_file, 'r') as f:
-                # Skip original header
+                # Skip header
                 f.readline()
 
                 for line in f:
@@ -442,7 +685,7 @@ def main():
 
                     total_lines += 1
                     if total_lines % 1000000 == 0:
-                        print(f"  Processed {total_lines:,} lines, {len(unique_1hop_metapaths)} unique 1-hop metapaths, {len(file_manager.handles)} files open")
+                        print(f"    Read {total_lines:,} lines")
 
                     # Parse the line
                     parts = line.split('\t')
@@ -450,63 +693,165 @@ def main():
                         print(f"Warning: skipping malformed line with {len(parts)} columns")
                         continue
 
-                    threehop_metapath = parts[0]
-                    threehop_count = int(parts[1])
-                    onehop_metapath = parts[2]
+                    nhop_path = parts[0]
+                    nhop_count = int(parts[1])
+                    onehop_path = parts[2]
                     onehop_count = int(parts[3])
                     overlap = int(parts[4])
                     total_possible = int(parts[5])
 
-                    # Canonicalize row: reverse BOTH metapaths if needed to match canonical type pair direction
-                    threehop_metapath, onehop_metapath = canonicalize_row(threehop_metapath, onehop_metapath)
+                    explicit_results.append((nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible))
 
-                    # Calculate metrics
-                    metrics = calculate_metrics(threehop_count, onehop_count, overlap, total_possible)
+        print(f"  Read {len(explicit_results):,} explicit result rows")
 
-                    # Track unique 1-hop metapaths
-                    unique_1hop_metapaths.add(onehop_metapath)
+        # Step 2: Perform aggregation
+        print("\n[2/2] Performing hierarchical aggregation...")
+        aggregated_results = aggregate_results(explicit_results)
 
-                    # Get file handle (will open/reopen as needed)
-                    handle = file_manager.get_handle(onehop_metapath)
+        # Process aggregated results
+        print("\n[3/3] Writing grouped results...")
+        files_processed = 0
+        for (nhop_path, onehop_path), (nhop_count, onehop_count, overlap, total_possible) in aggregated_results.items():
+            files_processed += 1
+            if files_processed % 100000 == 0:
+                print(f"  Processed {files_processed:,}/{len(aggregated_results):,} aggregated rows")
 
-                    # Write the enhanced output line
-                    output_line = '\t'.join([
-                        threehop_metapath,
-                        str(threehop_count),
-                        onehop_metapath,
-                        str(onehop_count),
-                        str(overlap),
-                        str(total_possible),
-                        str(metrics['TP']),
-                        str(metrics['FP']),
-                        str(metrics['FN']),
-                        str(metrics['TN']),
-                        str(metrics['Total']),
-                        f"{metrics['Precision']:.6f}",
-                        f"{metrics['Recall']:.6f}",
-                        f"{metrics['Specificity']:.6f}",
-                        f"{metrics['NPV']:.6f}",
-                        f"{metrics['Accuracy']:.6f}",
-                        f"{metrics['Balanced_Accuracy']:.6f}",
-                        f"{metrics['F1']:.6f}",
-                        f"{metrics['MCC']:.6f}",
-                        f"{metrics['TPR']:.6f}",
-                        f"{metrics['FPR']:.6f}",
-                        f"{metrics['FNR']:.6f}",
-                        'inf' if math.isinf(metrics['PLR']) else f"{metrics['PLR']:.6f}",
-                        'inf' if math.isinf(metrics['NLR']) else f"{metrics['NLR']:.6f}"
-                    ])
-                    handle.write(output_line + '\n')
+            # Canonicalize row
+            nhop_path, onehop_path = canonicalize_row(nhop_path, onehop_path)
 
-        print(f"\nProcessing complete!")
-        print(f"  Total lines processed: {total_lines:,}")
-        print(f"  Unique 1-hop metapaths: {len(unique_1hop_metapaths)}")
-        print(f"  Currently open file handles: {len(file_manager.handles)}")
-        print(f"  Output files written to: {output_dir}")
+            # Calculate metrics
+            metrics = calculate_metrics(nhop_count, onehop_count, overlap, total_possible)
 
-    finally:
-        # Close all open file handles
+            # Track unique 1-hop metapaths
+            unique_1hop_metapaths.add(onehop_path)
+
+            # Get file handle
+            handle = file_manager.get_handle(onehop_path)
+
+            # Write output line
+            output_line = '\t'.join([
+                nhop_path,
+                str(nhop_count),
+                onehop_path,
+                str(onehop_count),
+                str(overlap),
+                str(total_possible),
+                str(metrics['TP']),
+                str(metrics['FP']),
+                str(metrics['FN']),
+                str(metrics['TN']),
+                str(metrics['Total']),
+                f"{metrics['Precision']:.6f}",
+                f"{metrics['Recall']:.6f}",
+                f"{metrics['Specificity']:.6f}",
+                f"{metrics['NPV']:.6f}",
+                f"{metrics['Accuracy']:.6f}",
+                f"{metrics['Balanced_Accuracy']:.6f}",
+                f"{metrics['F1']:.6f}",
+                f"{metrics['MCC']:.6f}",
+                f"{metrics['TPR']:.6f}",
+                f"{metrics['FPR']:.6f}",
+                f"{metrics['FNR']:.6f}",
+                'inf' if math.isinf(metrics['PLR']) else f"{metrics['PLR']:.6f}",
+                'inf' if math.isinf(metrics['NLR']) else f"{metrics['NLR']:.6f}"
+            ])
+            handle.write(output_line + '\n')
+
+        # Close file handles
         file_manager.close_all()
+
+    else:
+        # Process explicit results directly (no aggregation)
+        print("\nProcessing explicit results (no aggregation)...")
+
+        try:
+            for input_file in result_files:
+                files_processed += 1
+                if files_processed % 100 == 0:
+                    print(f"Processing file {files_processed}/{len(result_files)}: {input_file.name}")
+
+                with open(input_file, 'r') as f:
+                    # Skip original header
+                    f.readline()
+
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        total_lines += 1
+                        if total_lines % 1000000 == 0:
+                            print(f"  Processed {total_lines:,} lines, {len(unique_1hop_metapaths)} unique 1-hop metapaths, {len(file_manager.handles)} files open")
+
+                        # Parse the line
+                        parts = line.split('\t')
+                        if len(parts) != 6:
+                            print(f"Warning: skipping malformed line with {len(parts)} columns")
+                            continue
+
+                        threehop_metapath = parts[0]
+                        threehop_count = int(parts[1])
+                        onehop_metapath = parts[2]
+                        onehop_count = int(parts[3])
+                        overlap = int(parts[4])
+                        total_possible = int(parts[5])
+
+                        # Canonicalize row: reverse BOTH metapaths if needed to match canonical type pair direction
+                        threehop_metapath, onehop_metapath = canonicalize_row(threehop_metapath, onehop_metapath)
+
+                        # Calculate metrics
+                        metrics = calculate_metrics(threehop_count, onehop_count, overlap, total_possible)
+
+                        # Track unique 1-hop metapaths
+                        unique_1hop_metapaths.add(onehop_metapath)
+
+                        # Get file handle (will open/reopen as needed)
+                        handle = file_manager.get_handle(onehop_metapath)
+
+                        # Write the enhanced output line
+                        output_line = '\t'.join([
+                            threehop_metapath,
+                            str(threehop_count),
+                            onehop_metapath,
+                            str(onehop_count),
+                            str(overlap),
+                            str(total_possible),
+                            str(metrics['TP']),
+                            str(metrics['FP']),
+                            str(metrics['FN']),
+                            str(metrics['TN']),
+                            str(metrics['Total']),
+                            f"{metrics['Precision']:.6f}",
+                            f"{metrics['Recall']:.6f}",
+                            f"{metrics['Specificity']:.6f}",
+                            f"{metrics['NPV']:.6f}",
+                            f"{metrics['Accuracy']:.6f}",
+                            f"{metrics['Balanced_Accuracy']:.6f}",
+                            f"{metrics['F1']:.6f}",
+                            f"{metrics['MCC']:.6f}",
+                            f"{metrics['TPR']:.6f}",
+                            f"{metrics['FPR']:.6f}",
+                            f"{metrics['FNR']:.6f}",
+                            'inf' if math.isinf(metrics['PLR']) else f"{metrics['PLR']:.6f}",
+                            'inf' if math.isinf(metrics['NLR']) else f"{metrics['NLR']:.6f}"
+                        ])
+                        handle.write(output_line + '\n')
+
+            print(f"\nProcessing complete!")
+            print(f"  Total lines processed: {total_lines:,}")
+            print(f"  Unique 1-hop metapaths: {len(unique_1hop_metapaths)}")
+            print(f"  Currently open file handles: {len(file_manager.handles)}")
+            print(f"  Output files written to: {output_dir}")
+
+        finally:
+            # Close all open file handles
+            file_manager.close_all()
+
+    # Final summary
+    print(f"\nProcessing complete!")
+    print(f"  Mode: {'Aggregated' if do_aggregation else 'Explicit only'}")
+    print(f"  Unique 1-hop metapaths: {len(unique_1hop_metapaths)}")
+    print(f"  Output files written to: {output_dir}")
 
 
 if __name__ == '__main__':
