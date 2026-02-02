@@ -135,7 +135,7 @@ class TestEndToEnd:
     def test_build_matrices_tiny_graph(self, tiny_graph):
         """Test building matrices from tiny graph."""
         node_types = load_node_types(tiny_graph['nodes_file'])
-        matrices = build_matrices(tiny_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(tiny_graph['edges_file'], node_types)
 
         # Should have matrices for each predicate/type combination
         assert ('Drug', 'affects', 'Gene') in matrices
@@ -150,7 +150,7 @@ class TestEndToEnd:
     def test_matrix_list_has_both_directions(self, tiny_graph):
         """Test that matrix list includes forward and reverse."""
         node_types = load_node_types(tiny_graph['nodes_file'])
-        matrices = build_matrices(tiny_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(tiny_graph['edges_file'], node_types)
         all_matrices, _ = build_matrix_list(matrices)
 
         # Find affects matrices
@@ -170,7 +170,7 @@ class TestEndToEnd:
     def test_full_analysis_linear_chain(self, linear_chain_graph):
         """Test full analysis on linear chain produces expected output."""
         node_types = load_node_types(linear_chain_graph['nodes_file'])
-        matrices = build_matrices(linear_chain_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(linear_chain_graph['edges_file'], node_types)
 
         output_file = Path(linear_chain_graph['tmpdir']) / "output.tsv"
         analyze_3hop_overlap(matrices, str(output_file))
@@ -193,7 +193,7 @@ class TestEndToEnd:
     def test_3hop_path_counts(self, linear_chain_graph):
         """Test that 3-hop path counts are correct."""
         node_types = load_node_types(linear_chain_graph['nodes_file'])
-        matrices = build_matrices(linear_chain_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(linear_chain_graph['edges_file'], node_types)
 
         output_file = Path(linear_chain_graph['tmpdir']) / "output.tsv"
         analyze_3hop_overlap(matrices, str(output_file))
@@ -272,7 +272,7 @@ class TestNHopAnalysis:
     def test_1hop_analysis(self, linear_chain_graph):
         """Test 1-hop analysis (comparing 1-hop with 1-hop)."""
         node_types = load_node_types(linear_chain_graph['nodes_file'])
-        matrices = build_matrices(linear_chain_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(linear_chain_graph['edges_file'], node_types)
 
         output_file = Path(linear_chain_graph['tmpdir']) / "output_1hop.tsv"
         analyze_nhop_overlap(matrices, str(output_file), n_hops=1)
@@ -294,7 +294,7 @@ class TestNHopAnalysis:
     def test_2hop_analysis(self, linear_chain_graph):
         """Test 2-hop analysis (comparing 2-hop with 1-hop)."""
         node_types = load_node_types(linear_chain_graph['nodes_file'])
-        matrices = build_matrices(linear_chain_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(linear_chain_graph['edges_file'], node_types)
 
         output_file = Path(linear_chain_graph['tmpdir']) / "output_2hop.tsv"
         analyze_nhop_overlap(matrices, str(output_file), n_hops=2)
@@ -316,7 +316,7 @@ class TestNHopAnalysis:
     def test_3hop_backwards_compat(self, linear_chain_graph):
         """Test that 3-hop analysis still works (backwards compatibility)."""
         node_types = load_node_types(linear_chain_graph['nodes_file'])
-        matrices = build_matrices(linear_chain_graph['edges_file'], node_types)
+        matrices, node_to_idx = build_matrices(linear_chain_graph['edges_file'], node_types)
 
         output_file = Path(linear_chain_graph['tmpdir']) / "output_3hop_compat.tsv"
         analyze_3hop_overlap(matrices, str(output_file))
@@ -378,3 +378,154 @@ class TestMetapathFormats:
         # Should have 'A' direction, not 'F'
         nodes, predicates, directions = parse_metapath(metapath)
         assert directions[0] == 'A'
+
+
+class TestPseudoTypeIntegration:
+    """Integration tests for pseudo-type handling."""
+
+    def test_multi_root_node_assignment(self):
+        """Test that multi-root nodes get pseudo-types."""
+        from metapath_counts import assign_node_type, is_pseudo_type, parse_pseudo_type
+
+        # Node with two unrelated root types
+        result = assign_node_type(["biolink:Gene", "biolink:SmallMolecule"])
+
+        assert is_pseudo_type(result)
+        constituents = parse_pseudo_type(result)
+        assert set(constituents) == {"Gene", "SmallMolecule"}
+
+    def test_pseudo_type_in_matrices(self):
+        """Test that pseudo-types appear in matrices."""
+        nodes = [
+            {"id": "MULTI:1", "category": ["biolink:Gene", "biolink:SmallMolecule"]},
+            {"id": "DISEASE:1", "category": ["biolink:Disease"]}
+        ]
+        edges = [
+            {"subject": "MULTI:1", "predicate": "biolink:affects", "object": "DISEASE:1"}
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nodes_file = Path(tmpdir) / "nodes.jsonl"
+            edges_file = Path(tmpdir) / "edges.jsonl"
+
+            with open(nodes_file, 'w') as f:
+                for node in nodes:
+                    f.write(json.dumps(node) + '\n')
+
+            with open(edges_file, 'w') as f:
+                for edge in edges:
+                    f.write(json.dumps(edge) + '\n')
+
+            # Load and build matrices
+            node_types = load_node_types(str(nodes_file))
+            matrices, node_to_idx = build_matrices(str(edges_file), node_types)
+
+            # Should have a matrix with pseudo-type
+            pseudo_matrices = [
+                key for key in matrices.keys()
+                if '+' in key[0] or '+' in key[2]
+            ]
+            assert len(pseudo_matrices) > 0
+
+    def test_pseudo_type_aggregation(self):
+        """Test that pseudo-types expand correctly in aggregation."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from group_by_onehop import aggregate_results
+
+        # Explicit result with pseudo-type
+        explicit_results = [
+            ("Gene+SmallMolecule|affects|F|Disease", 100, "Gene+SmallMolecule|affects|F|Disease", 50, 30, 1000)
+        ]
+
+        aggregated = aggregate_results(explicit_results)
+
+        # Should expand to constituents
+        assert ("Gene|affects|F|Disease", "Gene|affects|F|Disease") in aggregated
+        assert ("SmallMolecule|affects|F|Disease", "SmallMolecule|affects|F|Disease") in aggregated
+
+        # Both should have same counts
+        assert aggregated[("Gene|affects|F|Disease", "Gene|affects|F|Disease")][0] == 100
+        assert aggregated[("SmallMolecule|affects|F|Disease", "SmallMolecule|affects|F|Disease")][0] == 100
+
+
+class TestHierarchyAggregationIntegration:
+    """Integration tests for full hierarchy aggregation."""
+
+    def test_aggregation_generates_ancestors(self):
+        """Test that aggregation generates ancestor types."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from group_by_onehop import aggregate_results
+
+        explicit_results = [
+            ("SmallMolecule|affects|F|Gene", 100, "SmallMolecule|affects|F|Gene", 50, 30, 1000)
+        ]
+
+        aggregated = aggregate_results(explicit_results)
+
+        # Should include ChemicalEntity (ancestor of SmallMolecule)
+        assert ("ChemicalEntity|affects|F|Gene", "ChemicalEntity|affects|F|Gene") in aggregated
+
+        # Should include BiologicalEntity (ancestor of Gene)
+        assert ("SmallMolecule|affects|F|BiologicalEntity", "SmallMolecule|affects|F|BiologicalEntity") in aggregated
+
+    def test_no_count_loss_in_aggregation(self):
+        """Test that original explicit results are preserved."""
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from group_by_onehop import aggregate_results
+
+        explicit_results = [
+            ("SmallMolecule|treats|F|Disease", 100, "SmallMolecule|treats|F|Disease", 50, 30, 1000),
+            ("Gene|affects|F|Disease", 200, "Gene|affects|F|Disease", 80, 40, 2000)
+        ]
+
+        aggregated = aggregate_results(explicit_results)
+
+        # Original paths should still exist
+        assert ("SmallMolecule|treats|F|Disease", "SmallMolecule|treats|F|Disease") in aggregated
+        assert ("Gene|affects|F|Disease", "Gene|affects|F|Disease") in aggregated
+
+        # With original counts
+        assert aggregated[("SmallMolecule|treats|F|Disease", "SmallMolecule|treats|F|Disease")][0] == 100
+        assert aggregated[("Gene|affects|F|Disease", "Gene|affects|F|Disease")][0] == 200
+
+
+class TestPerformanceRegression:
+    """Test that new approach doesn't create performance regressions."""
+
+    def test_matrix_count_linear_growth(self):
+        """Test that matrix count grows linearly with edges, not exponentially."""
+        # With old approach: matrix count could explode with type combinations
+        # With new approach: matrix count should be ~linear with edge count
+
+        nodes = [
+            {"id": f"NODE:{i}", "category": ["biolink:Gene", "biolink:BiologicalEntity"]}
+            for i in range(10)
+        ]
+
+        # Create edges between nodes
+        edges = [
+            {"subject": f"NODE:{i}", "predicate": "biolink:affects", "object": f"NODE:{i+1}"}
+            for i in range(9)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nodes_file = Path(tmpdir) / "nodes.jsonl"
+            edges_file = Path(tmpdir) / "edges.jsonl"
+
+            with open(nodes_file, 'w') as f:
+                for node in nodes:
+                    f.write(json.dumps(node) + '\n')
+
+            with open(edges_file, 'w') as f:
+                for edge in edges:
+                    f.write(json.dumps(edge) + '\n')
+
+            node_types = load_node_types(str(nodes_file))
+            matrices, _ = build_matrices(str(edges_file), node_types)
+
+            # Should have small number of unique matrix types
+            # (Gene, affects, Gene) in both directions
+            assert len(matrices) <= 10  # Much less than 9 edges × many type combos

@@ -24,7 +24,9 @@ The primary use case is generating metapath statistics that can be used for rule
 metapath-counts/
 ├── src/metapath_counts/         # Source code (library)
 │   ├── __init__.py
-│   └── type_utils.py            # Biolink type utilities
+│   ├── type_utils.py            # Biolink type utilities
+│   ├── type_assignment.py       # Single-type-per-node assignment
+│   └── hierarchy.py             # Hierarchy inference for aggregation
 ├── scripts/                     # Analysis scripts (CLI)
 │   ├── prebuild_matrices.py     # Pre-build matrices (one-time setup)
 │   ├── analyze_hop_overlap.py  # Core analysis engine
@@ -78,8 +80,7 @@ See `docs/README.md` for detailed instructions. Basic workflow:
 uv run python scripts/prebuild_matrices.py \
   --edges /path/to/edges.jsonl \
   --nodes /path/to/nodes.jsonl \
-  --output matrices \
-  --config config/type_expansion.yaml
+  --output matrices
 
 # 1. Initialize (creates manifest and directories)
 uv run python scripts/prepare_analysis.py \
@@ -109,6 +110,7 @@ SmallMolecule|affects|F|Gene|affects|R|SmallMolecule|affects|F|Gene | 6170000000
 - One file per unique 1-hop metapath
 - Contains all 3-hop paths that predict that 1-hop
 - Includes performance metrics: Precision, Recall, F1, MCC, etc.
+- **Note:** Metrics are approximate for aggregated results (see "Approximate Metrics" section below)
 
 ### Metapath Format
 
@@ -119,49 +121,70 @@ Pipe-separated: `NodeType|predicate|direction|NodeType|...`
 
 ## Key Implementation Details
 
-### Hierarchical Type Expansion
+### Type Assignment and Hierarchical Aggregation
 
-**Default behavior:** Nodes participate in metapaths as ALL their types in the Biolink hierarchy, not just the most specific type.
+**New Approach (Post-Processing Aggregation):**
+
+Instead of expanding types during matrix building (which caused 15-20x matrix explosion), we now:
+1. **Assign each node to exactly ONE type during matrix building**
+2. **Aggregate to hierarchy during result grouping**
+
+This provides the same comprehensive results but with ~4 hour runtime instead of multiple days.
+
+**Type Assignment Rules:**
+
+Each node is assigned to a single type or pseudo-type:
+
+**Single Leaf Type:**
+- Node with `["SmallMolecule", "ChemicalEntity", "MolecularEntity"]`
+- Assigned type: `SmallMolecule` (most specific)
+
+**Multiple Leaf Types (Pseudo-Type):**
+- Node with `["Gene", "SmallMolecule"]` (two unrelated roots)
+- Assigned type: `Gene+SmallMolecule` (pseudo-type)
+- Prevents double-counting during aggregation
+
+**Hierarchical Aggregation:**
+
+After explicit metapath computation, results are aggregated during grouping:
+
+1. **Pseudo-Type Expansion:** `Gene+SmallMolecule` contributes to both `Gene` and `SmallMolecule` paths
+2. **Type Hierarchy:** Results propagate to ancestor types (e.g., `SmallMolecule` → `ChemicalEntity`)
+3. **Predicate Hierarchy:** Results propagate to ancestor predicates (e.g., `treats` → `related_to`)
 
 **Example:**
-- Node with categories: `["SmallMolecule", "ChemicalEntity", "MolecularEntity"]`
-- Participates as: `SmallMolecule`, `ChemicalEntity`, AND `MolecularEntity`
-- Creates paths like:
-  - `SmallMolecule → affects → Gene`
-  - `ChemicalEntity → affects → Gene`
-  - `MolecularEntity → affects → Gene`
+```
+Explicit: Gene+SmallMolecule|affects|F|Disease (count: 100)
 
-**Configuration** (`config/type_expansion.yaml`):
-```yaml
-type_expansion:
-  enabled: true
-  exclude_types: [ThingWithTaxon, SubjectOfInvestigation, ...]  # 8 abstract types excluded by default
-  max_depth: null  # Unlimited depth
-  include_most_specific: true  # Always include most specific type
+Aggregated to:
+- Gene|affects|F|Disease (100)
+- SmallMolecule|affects|F|Disease (100)
+- BiologicalEntity|affects|F|Disease (100)  # Gene ancestor
+- ChemicalEntity|affects|F|Disease (100)    # SmallMolecule ancestor
+- ... (all combinations of ancestors)
 ```
 
-**Impact:**
-- Matrix count: ~15-20x more matrices (depends on type diversity)
-- More comprehensive rule mining (captures patterns at multiple abstraction levels)
-- Slight memory increase per job (handled by tiering)
+**Performance:**
+- Matrix count: No explosion (linear with edges)
+- Computation time: ~4 hours (return to original speed)
+- Aggregation time: Minimal overhead during grouping
+- Memory: Much lower per job
 
 **CLI Usage:**
 ```bash
-# Pre-build matrices with default config
+# Pre-build matrices (fast, no explosion)
 uv run python scripts/prebuild_matrices.py \
   --edges edges.jsonl \
   --nodes nodes.jsonl \
   --output matrices
 
-# Pre-build with custom config
-uv run python scripts/prebuild_matrices.py \
-  --edges edges.jsonl \
-  --nodes nodes.jsonl \
-  --output matrices \
-  --config custom.yaml
-```
+# Run analysis (explicit results only)
+uv run python scripts/group_by_onehop.py --n-hops 3
 
-**Note:** Type expansion configuration is baked into the pre-built matrices. All analysis scripts (`prepare_analysis.py`, `orchestrate_hop_analysis.py`, `analyze_hop_overlap.py`) use the configuration from the pre-built matrices.
+# Aggregation happens automatically during grouping (default behavior)
+# To disable aggregation for debugging:
+uv run python scripts/group_by_onehop.py --n-hops 3 --explicit-only
+```
 
 ### Per-Path OOM Recovery
 
@@ -181,15 +204,43 @@ The system tracks completion at **individual path granularity**, not just job-le
 
 **Result:** Maximum path completion despite memory constraints. Jobs can complete with partial results at max tier.
 
-### Node Revisiting
+### Approximate Metrics (Precision, Recall, etc.)
 
-**Note:** The current implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
+**IMPORTANT:** The performance metrics (Precision, Recall, F1, MCC, etc.) in grouped results should be treated as **approximate values**, not exact calculations. There are two known sources of approximation:
+
+#### 1. Overlap Aggregation Uses Sum Semantics (Not Union)
+
+When aggregating explicit results to hierarchical types/predicates, overlaps are **summed** rather than computing the true **set union**. This causes overcounting when a node pair has multiple edge types that roll up to the same aggregated target.
+
+**Example:**
+- Node pair (Gene_A, Disease_B) has both a `treats` edge AND a `regulates` edge
+- Both `treats` and `regulates` have `related_to` as a predicate ancestor
+- Explicit results: `(predictor, treats, overlap=1)` and `(predictor, regulates, overlap=1)`
+- When aggregating to target `related_to`: overlap is summed to 2
+- But the pair should only count **once** in the aggregated overlap
+
+**Consequence:** For aggregated paths, `overlap` can exceed `predictor_count`, causing `precision > 1.0`. This is mathematically impossible for true precision, indicating the approximation error.
+
+**Why not fix it?** Computing true set unions would require tracking individual node pairs across all explicit results, which is memory-prohibitive for large graphs. The current approach trades exactness for scalability.
+
+#### 2. Node Revisiting in Longer Paths
+
+The implementation does NOT filter out paths with repeated nodes. Path counts include all paths regardless of whether nodes are revisited (e.g., `A → B → A → C` is counted). This is intentional because:
 
 1. Matrix-based diagonal zeroing can only prevent revisiting the **start** node, not intermediate nodes
 2. Properly filtering all repeated nodes would require path enumeration, which is computationally expensive
 3. For rule mining purposes, the statistical signal from repeated-node paths is often still useful
 
-If distinct-node paths are required, post-processing filters can be applied.
+**Consequence:** Path counts may be inflated by paths that revisit nodes, affecting all derived metrics.
+
+#### Practical Guidance
+
+- **Use metrics for ranking/comparison**, not as absolute values
+- **Explicit-only results** (with `--explicit-only`) have exact metrics for the specific type/predicate combinations
+- **Aggregated results** are approximate but useful for identifying promising patterns at higher abstraction levels
+- **Precision > 1.0** indicates significant overlap aggregation error for that path; treat with caution
+
+If distinct-node paths or exact aggregated metrics are required, post-processing filters can be applied, but this requires significant additional computation.
 
 ### Duplicate Elimination
 

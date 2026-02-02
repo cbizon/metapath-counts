@@ -39,7 +39,14 @@ import gc
 import numpy as np
 from pathlib import Path
 import graphblas as gb
-from metapath_counts import get_symmetric_predicates
+import itertools
+from metapath_counts import (
+    get_symmetric_predicates,
+    is_pseudo_type,
+    parse_pseudo_type,
+    get_type_ancestors,
+    get_predicate_ancestors
+)
 
 # Add path_tracker module
 sys.path.insert(0, os.path.dirname(__file__))
@@ -53,6 +60,186 @@ from path_tracker import (
     clear_path_in_progress,
     enumerate_downstream_paths
 )
+
+
+def parse_metapath_for_aggregation(metapath: str):
+    """Parse a metapath into node types, predicates, and directions."""
+    parts = metapath.split('|')
+    num_parts = len(parts)
+
+    if (num_parts - 1) % 3 != 0 or num_parts < 4:
+        raise ValueError(f"Invalid metapath format: {metapath}")
+
+    n_hops = (num_parts - 1) // 3
+    nodes = [parts[i * 3] for i in range(n_hops + 1)]
+    predicates = [parts[i * 3 + 1] for i in range(n_hops)]
+    directions = [parts[i * 3 + 2] for i in range(n_hops)]
+
+    return nodes, predicates, directions
+
+
+def build_metapath_from_parts(nodes: list, predicates: list, directions: list) -> str:
+    """Build metapath string from components."""
+    result = []
+    for i in range(len(predicates)):
+        result.append(nodes[i])
+        result.append(predicates[i])
+        result.append(directions[i])
+    result.append(nodes[-1])
+    return '|'.join(result)
+
+
+def get_type_variants_for_aggregation(type_name: str, include_self: bool = True):
+    """Get all type variants for hierarchical aggregation."""
+    variants = []
+
+    if include_self:
+        variants.append(type_name)
+
+    if is_pseudo_type(type_name):
+        constituents = parse_pseudo_type(type_name)
+        variants.extend(constituents)
+
+    ancestors = get_type_ancestors(type_name)
+    for ancestor in ancestors:
+        if ancestor != type_name and ancestor not in variants:
+            variants.append(ancestor)
+
+    return variants
+
+
+def get_predicate_variants_for_aggregation(predicate: str, include_self: bool = True):
+    """Get all predicate variants for hierarchical aggregation."""
+    variants = []
+
+    if include_self:
+        variants.append(predicate)
+
+    ancestors = get_predicate_ancestors(predicate)
+    for ancestor in ancestors:
+        clean_ancestor = ancestor.replace('biolink:', '')
+        if clean_ancestor not in variants:
+            variants.append(clean_ancestor)
+
+    return variants
+
+
+def generate_metapath_variants(metapath: str):
+    """Generate all implied variants of a metapath through hierarchical aggregation."""
+    nodes, predicates, directions = parse_metapath_for_aggregation(metapath)
+
+    node_variants = [get_type_variants_for_aggregation(node) for node in nodes]
+    predicate_variants = [get_predicate_variants_for_aggregation(pred) for pred in predicates]
+
+    for node_combo in itertools.product(*node_variants):
+        for pred_combo in itertools.product(*predicate_variants):
+            variant = build_metapath_from_parts(list(node_combo), list(pred_combo), directions)
+            yield variant
+
+
+def aggregate_explicit_results(explicit_file: str, aggregated_file: str):
+    """
+    Aggregate explicit results to all hierarchical variants.
+
+    Reads explicit results, expands to variants, and writes aggregated results.
+    """
+    print(f"\n[AGGREGATION] Starting hierarchical aggregation...", flush=True)
+    agg_start = time.time()
+
+    # Read explicit results
+    print(f"[AGGREGATION] Reading explicit results from {explicit_file}...", flush=True)
+    explicit_results = []
+
+    with open(explicit_file, 'r') as f:
+        header = f.readline().strip()
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) != 6:
+                continue
+            nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible = parts
+            explicit_results.append((
+                nhop_path,
+                int(nhop_count),
+                onehop_path,
+                int(onehop_count),
+                int(overlap),
+                int(total_possible)
+            ))
+
+    print(f"[AGGREGATION] Read {len(explicit_results):,} explicit results", flush=True)
+
+    # Extract unique paths and their counts
+    # Each explicit nhop/onehop path should only be counted ONCE, not once per comparison row
+    unique_nhop_counts = {}
+    unique_onehop_counts = {}
+    for nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible in explicit_results:
+        if nhop_path not in unique_nhop_counts:
+            unique_nhop_counts[nhop_path] = nhop_count
+        if onehop_path not in unique_onehop_counts:
+            unique_onehop_counts[onehop_path] = onehop_count
+
+    print(f"[AGGREGATION] Found {len(unique_nhop_counts):,} unique N-hop paths, {len(unique_onehop_counts):,} unique 1-hop paths", flush=True)
+
+    # Pre-compute variants for each unique path
+    print(f"[AGGREGATION] Pre-computing variants for N-hop paths...", flush=True)
+    nhop_variants_cache = {}
+    for path in unique_nhop_counts:
+        nhop_variants_cache[path] = list(generate_metapath_variants(path))
+
+    print(f"[AGGREGATION] Pre-computing variants for 1-hop paths...", flush=True)
+    onehop_variants_cache = {}
+    for path in unique_onehop_counts:
+        onehop_variants_cache[path] = list(generate_metapath_variants(path))
+
+    # Step 1: Compute aggregated counts for each nhop variant (independent of onehop)
+    print(f"[AGGREGATION] Computing N-hop variant counts...", flush=True)
+    nhop_variant_counts = defaultdict(int)
+    for nhop_path, nhop_count in unique_nhop_counts.items():
+        for nhop_variant in nhop_variants_cache[nhop_path]:
+            nhop_variant_counts[nhop_variant] += nhop_count
+
+    # Step 2: Compute aggregated counts for each onehop variant (independent of nhop)
+    print(f"[AGGREGATION] Computing 1-hop variant counts...", flush=True)
+    onehop_variant_counts = defaultdict(int)
+    for onehop_path, onehop_count in unique_onehop_counts.items():
+        for onehop_variant in onehop_variants_cache[onehop_path]:
+            onehop_variant_counts[onehop_variant] += onehop_count
+
+    # Step 3: Aggregate overlap and total_possible for each (nhop_variant, onehop_variant) pair
+    print(f"[AGGREGATION] Aggregating {len(explicit_results):,} pair results...", flush=True)
+    pair_data = defaultdict(lambda: [0, 0])  # [overlap, total_possible]
+
+    for i, (nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible) in enumerate(explicit_results, 1):
+        if i % 1000 == 0:
+            print(f"[AGGREGATION] Processed {i:,}/{len(explicit_results):,} ({100*i/len(explicit_results):.1f}%)", flush=True)
+
+        for nhop_variant in nhop_variants_cache[nhop_path]:
+            for onehop_variant in onehop_variants_cache[onehop_path]:
+                key = (nhop_variant, onehop_variant)
+                pair_data[key][0] += overlap
+                pair_data[key][1] += total_possible
+
+    # Step 4: Combine into final aggregated results
+    print(f"[AGGREGATION] Building final aggregated results...", flush=True)
+    aggregated = {}
+    for (nhop_variant, onehop_variant), (overlap, total_possible) in pair_data.items():
+        aggregated[(nhop_variant, onehop_variant)] = [
+            nhop_variant_counts[nhop_variant],
+            onehop_variant_counts[onehop_variant],
+            overlap,
+            total_possible
+        ]
+
+    # Write aggregated results
+    print(f"[AGGREGATION] Writing {len(aggregated):,} aggregated results to {aggregated_file}...", flush=True)
+    with open(aggregated_file, 'w') as f:
+        f.write(header + '\n')
+        for (nhop_path, onehop_path), (nhop_count, onehop_count, overlap, total_possible) in aggregated.items():
+            f.write(f"{nhop_path}\t{nhop_count}\t{onehop_path}\t{onehop_count}\t{overlap}\t{total_possible}\n")
+
+    agg_time = time.time() - agg_start
+    print(f"[AGGREGATION] Completed in {agg_time:.1f}s ({agg_time/60:.1f}min)", flush=True)
+    print(f"[AGGREGATION] Expansion: {len(explicit_results):,} explicit → {len(aggregated):,} aggregated ({len(aggregated)/len(explicit_results):.1f}x)", flush=True)
 
 
 def get_memory_mb():
@@ -686,14 +873,19 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
         computation_time = time.time() - computation_start
         print(f"\n[TIMING] Main computation loop completed in {computation_time:.1f}s ({computation_time/60:.1f}min)", flush=True)
 
-    print(f"\nDone! Wrote {rows_written:,} rows to {output_file}", flush=True)
+    print(f"\nDone! Wrote {rows_written:,} explicit rows to {output_file}", flush=True)
     print(f"Total {n_hops}-hop paths computed: {paths_computed:,}", flush=True)
+
+    # NOTE: Hierarchical aggregation is now done ONLY during the grouping step,
+    # using precomputed aggregated counts from prepare_grouping.py.
+    # This avoids double-aggregation and ensures correct count computation.
+    # The per-job files contain EXPLICIT results only.
 
     total_analysis_time = time.time() - start_time
     print(f"\n[TIMING] Total analysis function time: {total_analysis_time:.1f}s ({total_analysis_time/60:.1f}min)", flush=True)
     print(f"[TIMING] Breakdown:", flush=True)
     print(f"  Matrix list build:  {list_build_time:7.1f}s ({list_build_time/total_analysis_time*100:5.1f}%)", flush=True)
-    print(f"  Aggregation:        {agg_time:7.1f}s ({agg_time/total_analysis_time*100:5.1f}%)", flush=True)
+    print(f"  ANY matrix build:   {agg_time:7.1f}s ({agg_time/total_analysis_time*100:5.1f}%)", flush=True)
     print(f"  Main computation:   {computation_time:7.1f}s ({computation_time/total_analysis_time*100:5.1f}%)", flush=True)
 
 

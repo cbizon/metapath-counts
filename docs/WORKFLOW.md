@@ -3,47 +3,47 @@
 ## Quick Start
 
 ```bash
-# 1. Initialize (creates manifest and directories)
-uv run python scripts/prepare_analysis.py \
+# 0. Pre-build matrices (one-time setup)
+uv run python scripts/prebuild_matrices.py \
   --edges /path/to/edges.jsonl \
   --nodes /path/to/nodes.jsonl \
-  --config config/type_expansion.yaml  # Optional, uses default if omitted
+  --output matrices
+
+# 1. Initialize (creates manifest and directories)
+uv run python scripts/prepare_analysis.py \
+  --matrices-dir matrices \
+  --n-hops 3
 
 # 2. Run orchestrator (submit and monitor jobs)
 uv run python scripts/orchestrate_hop_analysis.py \
-  --config config/type_expansion.yaml  # Optional
+  --n-hops 3
 
 # 3. Merge results (after all jobs complete)
 uv run python scripts/merge_results.py --n-hops 3
 
-# 4. Group by 1-hop metapath with performance metrics
-uv run python scripts/group_by_onehop.py
+# 4. Group by 1-hop metapath with hierarchical aggregation
+uv run python scripts/group_by_onehop.py --n-hops 3
 ```
 
-## Configuration
+## Type Assignment Strategy
 
-The system uses hierarchical type expansion by default. Configure via `config/type_expansion.yaml`:
+The system uses **single-type assignment** during matrix building with **hierarchical aggregation** during post-processing:
 
-```yaml
-type_expansion:
-  enabled: true
-  max_depth: null  # Unlimited hierarchy depth
-  exclude_types:   # Abstract types to skip
-    - ThingWithTaxon
-    - SubjectOfInvestigation
-    - PhysicalEssenceOrOccurrent
-    - PhysicalEssence
-    - OntologyClass
-    - Occurrent
-    - InformationContentEntity
-    - Attribute
-  include_most_specific: true  # Always include most specific type
+**Matrix Building:**
+- Each node assigned to ONE type (most specific, or pseudo-type for multi-leaf nodes)
+- Fast: No matrix explosion (~4 hours vs multiple days)
+- Example: `["SmallMolecule", "ChemicalEntity"]` → `SmallMolecule`
+- Example: `["Gene", "SmallMolecule"]` → `Gene+SmallMolecule` (pseudo-type)
+
+**Post-Processing (group_by_onehop.py):**
+- Pseudo-types expanded to constituents
+- Results aggregated to ancestor types and predicates
+- Comprehensive hierarchical coverage without explosion
+
+**Debug mode (explicit results only):**
+```bash
+uv run python scripts/group_by_onehop.py --n-hops 3 --explicit-only
 ```
-
-**Key features:**
-- **Hierarchical types**: Nodes participate as ALL their types, not just most specific
-- **Type filtering**: Exclude overly abstract types
-- **Configurable**: Pass `--config` to any script to use custom config
 
 ## Manual Testing (Small Scale)
 
@@ -51,13 +51,13 @@ Test with a single matrix before full run:
 
 ```bash
 # Test matrix 0
-sbatch --mem=250G scripts/run_single_matrix1.sh 0 /path/to/nodes.jsonl /path/to/edges.jsonl 3 "" config/type_expansion.yaml
+sbatch --mem=180G scripts/run_single_matrix1.sh 0 3
 
 # Check output
-tail -f logs_3hop/matrix1_000_mem250.out
+tail -f logs_3hop/matrix1_000_mem180.out
 
 # View results
-head results_3hop/results_matrix1_000.tsv
+head results_3hop/matrix1_000/results.tsv
 ```
 
 ## Architecture
