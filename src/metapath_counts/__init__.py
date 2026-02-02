@@ -9,9 +9,7 @@ __version__ = "0.1.0"
 
 from .type_utils import (
     get_most_specific_type,
-    get_symmetric_predicates,
-    get_all_types,
-    filter_abstract_types
+    get_symmetric_predicates
 )
 
 from .type_assignment import (
@@ -31,8 +29,6 @@ from .hierarchy import (
 __all__ = [
     "get_most_specific_type",
     "get_symmetric_predicates",
-    "get_all_types",
-    "filter_abstract_types",
     "assign_node_type",
     "is_pseudo_type",
     "parse_pseudo_type",

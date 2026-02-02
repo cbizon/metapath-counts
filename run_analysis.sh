@@ -11,7 +11,7 @@ MATRICES_DIR="matrices"
 
 # List of N-hop values to analyze
 #NHOP_VALUES=(1 2 3)
-NHOP_VALUES=(1)
+NHOP_VALUES=(2)
 
 echo "=========================================="
 echo "N-HOP METAPATH ANALYSIS PIPELINE"
