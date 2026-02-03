@@ -8,16 +8,18 @@ from pathlib import Path
 # Add scripts to path for importing
 sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
 
-from group_by_onehop import (
+from metapath_counts import (
     parse_metapath,
     build_metapath,
+    calculate_metrics,
+)
+from group_by_onehop import (
     normalize_1hop,
     reverse_metapath,
     reverse_3hop,
     get_endpoint_types,
     get_canonical_direction,
     canonicalize_row,
-    calculate_metrics,
     safe_filename,
 )
 
@@ -310,10 +312,11 @@ class TestCalculateMetrics:
         """Test metrics when prediction is perfect (all overlap)."""
         # 100 3-hop paths, all 100 are 1-hop, 100 overlap
         metrics = calculate_metrics(
-            threehop_count=100,
+            nhop_count=100,
             onehop_count=100,
             overlap=100,
-            total_possible=1000
+            total_possible=1000,
+            full_metrics=True
         )
 
         assert metrics['TP'] == 100
@@ -327,10 +330,11 @@ class TestCalculateMetrics:
     def test_no_overlap(self):
         """Test metrics when there's no overlap."""
         metrics = calculate_metrics(
-            threehop_count=100,
+            nhop_count=100,
             onehop_count=100,
             overlap=0,
-            total_possible=1000
+            total_possible=1000,
+            full_metrics=True
         )
 
         assert metrics['TP'] == 0
@@ -344,10 +348,11 @@ class TestCalculateMetrics:
     def test_partial_overlap(self):
         """Test metrics with partial overlap."""
         metrics = calculate_metrics(
-            threehop_count=100,
+            nhop_count=100,
             onehop_count=50,
             overlap=25,
-            total_possible=1000
+            total_possible=1000,
+            full_metrics=True
         )
 
         assert metrics['TP'] == 25
@@ -366,10 +371,11 @@ class TestCalculateMetrics:
         """Test MCC calculation."""
         # Use a case where MCC can be verified
         metrics = calculate_metrics(
-            threehop_count=100,
+            nhop_count=100,
             onehop_count=100,
             overlap=80,
-            total_possible=1000
+            total_possible=1000,
+            full_metrics=True
         )
 
         # TP=80, FP=20, FN=20, TN=880
@@ -384,10 +390,11 @@ class TestCalculateMetrics:
         """Test that division by zero is handled gracefully."""
         # All zeros
         metrics = calculate_metrics(
-            threehop_count=0,
+            nhop_count=0,
             onehop_count=0,
             overlap=0,
-            total_possible=0
+            total_possible=0,
+            full_metrics=True
         )
 
         # Should not raise, should return 0 for metrics

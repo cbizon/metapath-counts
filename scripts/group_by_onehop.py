@@ -30,57 +30,14 @@ from metapath_counts import (
     is_pseudo_type,
     parse_pseudo_type,
     get_type_ancestors,
-    get_predicate_ancestors
+    get_predicate_ancestors,
+    parse_metapath,
+    build_metapath,
+    get_type_variants,
+    get_predicate_variants,
+    generate_metapath_variants,
+    calculate_metrics
 )
-
-
-def parse_metapath(metapath: str) -> Tuple[list, list, list]:
-    """
-    Parse a metapath into node types, predicates, and directions.
-
-    Metapath format: Type1|pred1|dir1|Type2|pred2|dir2|...|TypeN
-    - N-hop path has N+1 node types, N predicates, N directions
-    - Number of parts = 1 + 3*N (for N hops)
-
-    Examples:
-        1-hop: "A|pred1|F|B" -> nodes=['A', 'B'], predicates=['pred1'], directions=['F']
-        2-hop: "A|p1|F|B|p2|R|C" -> nodes=['A', 'B', 'C'], predicates=['p1', 'p2'], directions=['F', 'R']
-        3-hop: "A|p1|F|B|p2|R|C|p3|F|D" -> nodes=['A', 'B', 'C', 'D'], ...
-
-    Returns:
-        Tuple of (nodes, predicates, directions)
-    """
-    parts = metapath.split('|')
-    num_parts = len(parts)
-
-    # Formula: num_parts = 1 + 3*n_hops
-    # So: n_hops = (num_parts - 1) / 3
-    if (num_parts - 1) % 3 != 0 or num_parts < 4:
-        raise ValueError(f"Invalid metapath format: {metapath} (parts: {num_parts}, expected 1+3*N)")
-
-    n_hops = (num_parts - 1) // 3
-
-    # Extract nodes: positions 0, 3, 6, 9, ... (every 3rd starting at 0)
-    nodes = [parts[i * 3] for i in range(n_hops + 1)]
-
-    # Extract predicates: positions 1, 4, 7, 10, ... (every 3rd starting at 1)
-    predicates = [parts[i * 3 + 1] for i in range(n_hops)]
-
-    # Extract directions: positions 2, 5, 8, 11, ... (every 3rd starting at 2)
-    directions = [parts[i * 3 + 2] for i in range(n_hops)]
-
-    return nodes, predicates, directions
-
-
-def build_metapath(nodes: list, predicates: list, directions: list) -> str:
-    """Build metapath string from components."""
-    result = []
-    for i in range(len(predicates)):
-        result.append(nodes[i])
-        result.append(predicates[i])
-        result.append(directions[i])
-    result.append(nodes[-1])
-    return '|'.join(result)
 
 
 def normalize_1hop(metapath: str) -> Tuple[str, bool]:
@@ -272,112 +229,6 @@ class FileHandleManager:
         self.handles.clear()
 
 
-def get_type_variants_for_aggregation(type_name: str, include_self: bool = True) -> List[str]:
-    """
-    Get all type variants for hierarchical aggregation.
-
-    For pseudo-types: expands to constituents
-    For all types: includes ancestors
-
-    Args:
-        type_name: Type name (e.g., "SmallMolecule" or "Gene+SmallMolecule")
-        include_self: Whether to include the type itself in the results
-
-    Returns:
-        List of type variants (includes pseudo-type itself, constituents, and all ancestors)
-    """
-    variants = []
-
-    # Always include the original type if requested
-    if include_self:
-        variants.append(type_name)
-
-    if is_pseudo_type(type_name):
-        # Pseudo-type: add each constituent
-        constituents = parse_pseudo_type(type_name)
-        variants.extend(constituents)
-
-    # Get ancestors (works for both regular types and pseudo-types)
-    ancestors = get_type_ancestors(type_name)
-
-    # Add ancestors (excluding the type itself if it's in there)
-    for ancestor in ancestors:
-        if ancestor != type_name and ancestor not in variants:
-            variants.append(ancestor)
-
-    return variants
-
-
-def get_predicate_variants_for_aggregation(predicate: str, include_self: bool = True) -> List[str]:
-    """
-    Get all predicate variants for hierarchical aggregation.
-
-    Args:
-        predicate: Predicate name (with or without biolink: prefix)
-        include_self: Whether to include the predicate itself
-
-    Returns:
-        List of predicate variants (includes predicate and its ancestors, all without biolink: prefix)
-    """
-    variants = []
-
-    # Normalize: strip biolink: prefix if present
-    clean_predicate = predicate.replace('biolink:', '')
-
-    # Include the original predicate (normalized)
-    if include_self:
-        variants.append(clean_predicate)
-
-    # Get ancestor predicates (already returned without biolink: prefix)
-    ancestors = get_predicate_ancestors(predicate)
-
-    for ancestor in ancestors:
-        if ancestor not in variants:
-            variants.append(ancestor)
-
-    return variants
-
-
-def generate_metapath_variants(metapath: str) -> Iterator[str]:
-    """
-    Generate all implied variants of a metapath through hierarchical aggregation.
-
-    This expands pseudo-types to constituents and propagates to ancestor
-    types and predicates.
-
-    Args:
-        metapath: Original metapath (may contain pseudo-types)
-
-    Yields:
-        All implied metapath variants
-
-    Example:
-        Input: "Gene+Protein|affects|F|SmallMolecule"
-        Yields:
-            - "Gene+Protein|affects|F|SmallMolecule" (original)
-            - "Gene|affects|F|SmallMolecule" (expand pseudo-type)
-            - "Protein|affects|F|SmallMolecule" (expand pseudo-type)
-            - "GeneOrGeneProduct|affects|F|SmallMolecule" (ancestor)
-            - "Gene|affects|F|ChemicalEntity" (ancestor)
-            - "Gene|interacts_with|F|SmallMolecule" (predicate ancestor)
-            - ... (all combinations)
-    """
-    nodes, predicates, directions = parse_metapath(metapath)
-
-    # Get all variants for each node type
-    node_variants = [get_type_variants_for_aggregation(node) for node in nodes]
-
-    # Get all variants for each predicate
-    predicate_variants = [get_predicate_variants_for_aggregation(pred) for pred in predicates]
-
-    # Generate all combinations
-    for node_combo in itertools.product(*node_variants):
-        for pred_combo in itertools.product(*predicate_variants):
-            # Build the variant metapath
-            variant = build_metapath(list(node_combo), list(pred_combo), directions)
-            yield variant
-
-
 def aggregate_results(explicit_results: List[Tuple]) -> Dict[Tuple[str, str], Tuple[int, int, int, int]]:
     """
     Aggregate explicit results to include all implied hierarchical paths.
@@ -488,79 +339,6 @@ def aggregate_results(explicit_results: List[Tuple]) -> Dict[Tuple[str, str], Tu
     print(f"    Generated {len(aggregated):,} aggregated results")
 
     return aggregated
-
-
-def calculate_metrics(threehop_count: int, onehop_count: int, overlap: int, total_possible: int) -> dict:
-    """
-    Calculate prediction metrics from N-hop and 1-hop metapath overlap.
-
-    Args:
-        threehop_count: Number of N-hop paths (parameter name kept for backwards compat)
-        onehop_count: Number of 1-hop paths
-        overlap: Number of node pairs with both N-hop and 1-hop paths
-        total_possible: Total possible node pairs
-
-    Confusion matrix:
-    - TP (True Positives): overlap
-    - FP (False Positives): nhop_count - overlap
-    - FN (False Negatives): 1hop_count - overlap
-    - TN (True Negatives): total_possible - nhop_count - 1hop_count + overlap
-
-    Returns dict with all calculated metrics.
-    """
-    # Confusion matrix (threehop_count is actually nhop_count)
-    TP = overlap
-    FP = threehop_count - overlap
-    FN = onehop_count - overlap
-    TN = total_possible - threehop_count - onehop_count + overlap
-    Total = TP + FP + FN + TN
-
-    # Basic metrics with division by zero protection
-    Precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
-    Recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
-    Specificity = TN / (TN + FP) if (TN + FP) > 0 else 0.0
-    NPV = TN / (TN + FN) if (TN + FN) > 0 else 0.0  # Negative Predictive Value
-    Accuracy = (TP + TN) / Total if Total > 0 else 0.0
-
-    # Derived metrics
-    TPR = Recall  # True Positive Rate = Recall
-    FPR = FP / (FP + TN) if (FP + TN) > 0 else 0.0  # False Positive Rate
-    FNR = FN / (FN + TP) if (FN + TP) > 0 else 0.0  # False Negative Rate
-
-    # Balanced Accuracy
-    Balanced_Accuracy = (TPR + Specificity) / 2.0
-
-    # F1 Score
-    F1 = 2 * (Precision * Recall) / (Precision + Recall) if (Precision + Recall) > 0 else 0.0
-
-    # Matthews Correlation Coefficient
-    denominator = math.sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
-    MCC = ((TP * TN) - (FP * FN)) / denominator if denominator > 0 else 0.0
-
-    # Likelihood Ratios
-    PLR = TPR / FPR if FPR > 0 else float('inf')  # Positive Likelihood Ratio
-    NLR = FNR / Specificity if Specificity > 0 else float('inf')  # Negative Likelihood Ratio
-
-    return {
-        'TP': TP,
-        'FP': FP,
-        'FN': FN,
-        'TN': TN,
-        'Total': Total,
-        'Precision': Precision,
-        'Recall': Recall,
-        'Specificity': Specificity,
-        'NPV': NPV,
-        'Accuracy': Accuracy,
-        'Balanced_Accuracy': Balanced_Accuracy,
-        'F1': F1,
-        'MCC': MCC,
-        'TPR': TPR,
-        'FPR': FPR,
-        'FNR': FNR,
-        'PLR': PLR,
-        'NLR': NLR
-    }
 
 
 def main():
@@ -720,7 +498,7 @@ def main():
             nhop_path, onehop_path = canonicalize_row(nhop_path, onehop_path)
 
             # Calculate metrics
-            metrics = calculate_metrics(nhop_count, onehop_count, overlap, total_possible)
+            metrics = calculate_metrics(nhop_count, onehop_count, overlap, total_possible, full_metrics=True)
 
             # Track unique 1-hop metapaths
             unique_1hop_metapaths.add(onehop_path)
@@ -800,7 +578,7 @@ def main():
                         threehop_metapath, onehop_metapath = canonicalize_row(threehop_metapath, onehop_metapath)
 
                         # Calculate metrics
-                        metrics = calculate_metrics(threehop_count, onehop_count, overlap, total_possible)
+                        metrics = calculate_metrics(threehop_count, onehop_count, overlap, total_possible, full_metrics=True)
 
                         # Track unique 1-hop metapaths
                         unique_1hop_metapaths.add(onehop_metapath)

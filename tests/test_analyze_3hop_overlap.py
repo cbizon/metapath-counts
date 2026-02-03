@@ -467,3 +467,292 @@ class TestBuildMatrixList:
         # Should have same edges as forward ChemicalEntity→Disease (3 edges)
         disease_ce_reverse = matrix_metadata[('Disease', 'treats', 'ChemicalEntity', 'R')]
         assert disease_ce_reverse.nvals == 3
+
+
+class TestAggregateExplicitResults:
+    """Tests for aggregate_explicit_results function."""
+
+    def test_aggregate_single_result(self):
+        """Test aggregating a single explicit result expands to variants."""
+        from analyze_hop_overlap import aggregate_explicit_results
+
+        # Create a temporary explicit results file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            explicit_file = Path(tmpdir) / "explicit.tsv"
+            aggregated_file = Path(tmpdir) / "aggregated.tsv"
+
+            # Write explicit results (SmallMolecule should expand to ChemicalEntity)
+            with open(explicit_file, 'w') as f:
+                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("SmallMolecule|affects|F|Gene\t100\tSmallMolecule|affects|F|Gene\t50\t30\t1000\n")
+
+            # Run aggregation
+            aggregate_explicit_results(str(explicit_file), str(aggregated_file))
+
+            # Read aggregated results
+            with open(aggregated_file) as f:
+                lines = f.readlines()[1:]  # Skip header
+
+            # Should have multiple lines due to hierarchical expansion
+            assert len(lines) > 1
+
+            # Parse results
+            results = {}
+            for line in lines:
+                parts = line.strip().split('\t')
+                nhop, nhop_count, onehop, onehop_count, overlap, total = parts
+                results[(nhop, onehop)] = (int(nhop_count), int(onehop_count), int(overlap), int(total))
+
+            # Original should be preserved
+            assert ("SmallMolecule|affects|F|Gene", "SmallMolecule|affects|F|Gene") in results
+
+            # ChemicalEntity (ancestor of SmallMolecule) should appear
+            chem_variants = [k for k in results.keys() if "ChemicalEntity" in k[0] or "ChemicalEntity" in k[1]]
+            assert len(chem_variants) > 0
+
+    def test_aggregate_preserves_counts(self):
+        """Test that aggregation preserves counts correctly."""
+        from analyze_hop_overlap import aggregate_explicit_results
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            explicit_file = Path(tmpdir) / "explicit.tsv"
+            aggregated_file = Path(tmpdir) / "aggregated.tsv"
+
+            # Write explicit results
+            with open(explicit_file, 'w') as f:
+                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("Gene|affects|F|Disease\t200\tGene|affects|F|Disease\t100\t50\t5000\n")
+
+            aggregate_explicit_results(str(explicit_file), str(aggregated_file))
+
+            with open(aggregated_file) as f:
+                lines = f.readlines()[1:]
+
+            # Find the original row
+            for line in lines:
+                parts = line.strip().split('\t')
+                if parts[0] == "Gene|affects|F|Disease" and parts[2] == "Gene|affects|F|Disease":
+                    assert int(parts[1]) == 200  # nhop_count preserved
+                    assert int(parts[3]) == 100  # onehop_count preserved
+                    assert int(parts[4]) == 50   # overlap preserved
+                    assert int(parts[5]) == 5000 # total_possible preserved
+                    break
+            else:
+                pytest.fail("Original result not found in aggregated output")
+
+    def test_aggregate_multiple_results_sum_correctly(self):
+        """Test that multiple explicit results sum correctly when aggregated."""
+        from analyze_hop_overlap import aggregate_explicit_results
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            explicit_file = Path(tmpdir) / "explicit.tsv"
+            aggregated_file = Path(tmpdir) / "aggregated.tsv"
+
+            # Two different explicit paths that both aggregate to BiologicalEntity
+            with open(explicit_file, 'w') as f:
+                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("Gene|affects|F|Disease\t100\tGene|affects|F|Disease\t50\t25\t1000\n")
+                f.write("Protein|affects|F|Disease\t80\tProtein|affects|F|Disease\t40\t20\t800\n")
+
+            aggregate_explicit_results(str(explicit_file), str(aggregated_file))
+
+            with open(aggregated_file) as f:
+                lines = f.readlines()[1:]
+
+            results = {}
+            for line in lines:
+                parts = line.strip().split('\t')
+                key = (parts[0], parts[2])
+                results[key] = (int(parts[1]), int(parts[3]), int(parts[4]), int(parts[5]))
+
+            # BiologicalEntity (ancestor of both Gene and Protein) should have summed counts
+            bio_variants = [(k, v) for k, v in results.items()
+                           if "BiologicalEntity" in k[0] and "BiologicalEntity" in k[1]]
+
+            # Should have at least one BiologicalEntity variant
+            assert len(bio_variants) > 0
+
+            # The counts should be sums (100+80=180 for nhop, 50+40=90 for onehop, etc.)
+            for key, (nhop, onehop, overlap, total) in bio_variants:
+                if key == ("BiologicalEntity|affects|F|Disease", "BiologicalEntity|affects|F|Disease"):
+                    assert nhop == 180  # 100 + 80
+                    assert onehop == 90  # 50 + 40
+                    assert overlap == 45  # 25 + 20
+                    assert total == 1800  # 1000 + 800
+
+
+class TestDetermineNeededMatrices:
+    """Tests for determine_needed_matrices function."""
+
+    def test_determine_needed_for_single_matrix1(self):
+        """Test determining needed matrices for a single starting matrix."""
+        from analyze_hop_overlap import determine_needed_matrices
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "manifest.json"
+
+            # Create a simple manifest
+            manifest = {
+                "num_matrices": 3,
+                "matrices": [
+                    {"src_type": "Drug", "predicate": "treats", "tgt_type": "Disease", "filename": "m1.npz"},
+                    {"src_type": "Drug", "predicate": "affects", "tgt_type": "Gene", "filename": "m2.npz"},
+                    {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease", "filename": "m3.npz"},
+                ]
+            }
+
+            with open(manifest_path, 'w') as f:
+                json.dump(manifest, f)
+
+            # Determine needed matrices for 2-hop starting from Drug|affects|F|Gene
+            matrix1_spec = ("Drug", "affects", "F", "Gene")
+            needed = determine_needed_matrices(manifest_path, n_hops=2, matrix1_spec=matrix1_spec)
+
+            # Should need the starting matrix
+            assert ("Drug", "affects", "Gene") in needed
+
+            # Should need matrices that continue from Gene
+            assert ("Gene", "causes", "Disease") in needed
+
+            # Should need 1-hop comparison matrices for Drug->Disease
+            # (final endpoints of Drug->Gene->Disease)
+            assert ("Drug", "treats", "Disease") in needed
+
+    def test_determine_needed_excludes_unrelated(self):
+        """Test that unrelated matrices are excluded."""
+        from analyze_hop_overlap import determine_needed_matrices
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "manifest.json"
+
+            manifest = {
+                "num_matrices": 4,
+                "matrices": [
+                    {"src_type": "Drug", "predicate": "affects", "tgt_type": "Gene", "filename": "m1.npz"},
+                    {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease", "filename": "m2.npz"},
+                    {"src_type": "Protein", "predicate": "binds", "tgt_type": "Pathway", "filename": "m3.npz"},
+                    {"src_type": "Drug", "predicate": "treats", "tgt_type": "Disease", "filename": "m4.npz"},
+                ]
+            }
+
+            with open(manifest_path, 'w') as f:
+                json.dump(manifest, f)
+
+            matrix1_spec = ("Drug", "affects", "F", "Gene")
+            needed = determine_needed_matrices(manifest_path, n_hops=2, matrix1_spec=matrix1_spec)
+
+            # Protein->Pathway is unrelated to Drug->Gene->Disease paths
+            assert ("Protein", "binds", "Pathway") not in needed
+
+    def test_determine_needed_for_1hop(self):
+        """Test determining needed matrices for 1-hop analysis."""
+        from analyze_hop_overlap import determine_needed_matrices
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "manifest.json"
+
+            manifest = {
+                "num_matrices": 2,
+                "matrices": [
+                    {"src_type": "Drug", "predicate": "treats", "tgt_type": "Disease", "filename": "m1.npz"},
+                    {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease", "filename": "m2.npz"},
+                ]
+            }
+
+            with open(manifest_path, 'w') as f:
+                json.dump(manifest, f)
+
+            # For 1-hop Drug->Disease, we only need Drug->Disease matrices
+            matrix1_spec = ("Drug", "treats", "F", "Disease")
+            needed = determine_needed_matrices(manifest_path, n_hops=1, matrix1_spec=matrix1_spec)
+
+            assert ("Drug", "treats", "Disease") in needed
+            # Gene->Disease should NOT be needed (different source type)
+            # But it might be included as a 1-hop comparison matrix if types match
+            # For 1-hop analysis, we compare Drug->Disease with all Drug->Disease matrices
+
+
+class TestLoadPrebuiltMatrices:
+    """Tests for load_prebuilt_matrices function."""
+
+    def test_load_with_filtering(self):
+        """Test loading only needed matrices."""
+        from analyze_hop_overlap import load_prebuilt_matrices
+        import numpy as np
+        import graphblas as gb
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matrices_dir = Path(tmpdir)
+
+            # Create mock manifest
+            manifest = {
+                "num_matrices": 2,
+                "total_size_bytes": 1000,
+                "matrices": [
+                    {"src_type": "Drug", "predicate": "treats", "tgt_type": "Disease",
+                     "filename": "drug_treats_disease.npz", "nvals": 10},
+                    {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease",
+                     "filename": "gene_causes_disease.npz", "nvals": 5},
+                ]
+            }
+
+            with open(matrices_dir / "manifest.json", 'w') as f:
+                json.dump(manifest, f)
+
+            # Create mock matrix files
+            for mat_info in manifest["matrices"]:
+                np.savez(
+                    matrices_dir / mat_info["filename"],
+                    rows=np.array([0, 1]),
+                    cols=np.array([0, 0]),
+                    vals=np.array([True, True]),
+                    nrows=2,
+                    ncols=1
+                )
+
+            # Load only Drug->Disease
+            needed = {("Drug", "treats", "Disease")}
+            matrices = load_prebuilt_matrices(str(matrices_dir), needed_triples=needed)
+
+            assert len(matrices) == 1
+            assert ("Drug", "treats", "Disease") in matrices
+            assert ("Gene", "causes", "Disease") not in matrices
+
+    def test_load_all_matrices(self):
+        """Test loading all matrices when no filter specified."""
+        from analyze_hop_overlap import load_prebuilt_matrices
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            matrices_dir = Path(tmpdir)
+
+            manifest = {
+                "num_matrices": 2,
+                "total_size_bytes": 1000,
+                "matrices": [
+                    {"src_type": "Drug", "predicate": "treats", "tgt_type": "Disease",
+                     "filename": "m1.npz", "nvals": 10},
+                    {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease",
+                     "filename": "m2.npz", "nvals": 5},
+                ]
+            }
+
+            with open(matrices_dir / "manifest.json", 'w') as f:
+                json.dump(manifest, f)
+
+            for mat_info in manifest["matrices"]:
+                np.savez(
+                    matrices_dir / mat_info["filename"],
+                    rows=np.array([0]),
+                    cols=np.array([0]),
+                    vals=np.array([True]),
+                    nrows=1,
+                    ncols=1
+                )
+
+            # Load all (no filter)
+            matrices = load_prebuilt_matrices(str(matrices_dir), needed_triples=None)
+
+            assert len(matrices) == 2
+            assert ("Drug", "treats", "Disease") in matrices
+            assert ("Gene", "causes", "Disease") in matrices

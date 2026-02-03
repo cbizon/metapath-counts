@@ -19,12 +19,17 @@ from pathlib import Path
 scripts_dir = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from group_by_onehop import (
-    get_type_variants_for_aggregation,
-    get_predicate_variants_for_aggregation,
-    generate_metapath_variants,
-    aggregate_results
+from metapath_counts import (
+    get_type_variants,
+    get_predicate_variants,
+    generate_metapath_variants
 )
+
+from group_by_onehop import aggregate_results
+
+# Aliases for backwards compatibility with test code
+get_type_variants_for_aggregation = get_type_variants
+get_predicate_variants_for_aggregation = get_predicate_variants
 
 
 class TestGetTypeVariantsForAggregation:

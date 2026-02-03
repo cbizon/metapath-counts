@@ -7,12 +7,23 @@ monitors progress, handles retries with memory tier escalation.
 """
 
 import argparse
-import json
 import os
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+
+from slurm_utils import (
+    load_manifest,
+    save_manifest,
+    update_job_status,
+    get_jobs_by_status,
+    get_running_slurm_jobs,
+    get_pending_slurm_jobs,
+    get_completed_jobs_since,
+    increment_memory_tier,
+    submit_slurm_job,
+    GROUPING_MEMORY_TIERS,
+)
 
 # Configuration
 WORKER_SCRIPT = "scripts/group_single_onehop.sh"
@@ -20,25 +31,19 @@ POLL_INTERVAL = 30  # seconds
 MAX_CONCURRENT_JOBS = 100  # Max pending jobs in queue
 
 
-def load_manifest(n_hops):
-    """Load grouping manifest."""
-    manifest_path = f"results_{n_hops}hop/grouping_manifest.json"
-    with open(manifest_path, 'r') as f:
-        return json.load(f)
+def get_grouping_manifest_path(n_hops):
+    """Get grouping manifest path for given n_hops."""
+    return f"results_{n_hops}hop/grouping_manifest.json"
 
 
-def save_manifest(manifest, n_hops):
-    """Save grouping manifest."""
-    manifest_path = f"results_{n_hops}hop/grouping_manifest.json"
-    with open(manifest_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
+def get_analysis_manifest_path(n_hops):
+    """Get analysis manifest path for given n_hops."""
+    return f"results_{n_hops}hop/manifest.json"
 
 
 def load_analysis_manifest(n_hops):
     """Load analysis manifest to map matrix indices to edge types."""
-    manifest_path = f"results_{n_hops}hop/manifest.json"
-    with open(manifest_path, 'r') as f:
-        return json.load(f)
+    return load_manifest(get_analysis_manifest_path(n_hops))
 
 
 def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
@@ -93,96 +98,7 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
     return result_files
 
 
-def get_running_slurm_jobs():
-    """Get list of currently running job IDs."""
-    try:
-        result = subprocess.run(
-            ["squeue", "-u", os.environ.get("USER", ""), "-h", "-o", "%i"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-    except Exception as e:
-        print(f"Warning: Could not query SLURM queue: {e}")
-    return []
-
-
-def get_pending_slurm_jobs():
-    """Get list of pending job IDs."""
-    try:
-        result = subprocess.run(
-            ["squeue", "-u", os.environ.get("USER", ""), "-h", "-t", "PENDING", "-o", "%i"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        if result.returncode == 0:
-            return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-    except Exception as e:
-        print(f"Warning: Could not query pending jobs: {e}")
-    return []
-
-
-def get_completed_jobs_since(job_ids, start_time):
-    """Check which jobs have completed since start_time.
-
-    Returns:
-        dict: {job_id: (state, exit_code)}
-    """
-    if not job_ids:
-        return {}
-
-    try:
-        # Use sacct to check job status
-        result = subprocess.run(
-            [
-                "sacct",
-                "-j", ",".join(job_ids),
-                "-S", start_time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "-o", "JobID,State,ExitCode",
-                "-n", "-P"
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-
-        if result.returncode != 0:
-            return {}
-
-        completed = {}
-        for line in result.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-
-            parts = line.split('|')
-            if len(parts) < 3:
-                continue
-
-            job_id = parts[0].split('.')[0]  # Remove .batch suffix
-            state = parts[1]
-            exit_code_str = parts[2]
-
-            # Parse exit code (format: "0:0")
-            try:
-                exit_code = int(exit_code_str.split(':')[0])
-            except:
-                exit_code = -1
-
-            # Only include terminal states
-            if state in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL"]:
-                completed[job_id] = (state, exit_code)
-
-        return completed
-
-    except Exception as e:
-        print(f"Warning: sacct query failed: {e}")
-        return {}
-
-
-def submit_job(type1, type2, file_list, memory_gb, n_hops, job_index):
+def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index):
     """Submit a SLURM job for one type pair.
 
     Args:
@@ -204,68 +120,22 @@ def submit_job(type1, type2, file_list, memory_gb, n_hops, job_index):
     with open(file_list_path, 'w') as f:
         f.write('\n'.join(file_list))
 
-    try:
-        result = subprocess.run(
-            [
-                "sbatch",
-                f"--mem={memory_gb}G",
-                f"--output={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.out",
-                f"--error={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.err",
-                WORKER_SCRIPT,
-                type1,
-                type2,
-                file_list_path,
-                str(n_hops)
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+    job_name = f"grp_{job_index:04d}"
 
-        if result.returncode != 0:
-            print(f"ERROR: sbatch failed for typepair_{job_index:04d}: {result.stderr}")
-            return None
+    cmd = [
+        "sbatch",
+        f"--mem={memory_gb}G",
+        f"--job-name={job_name}",
+        f"--output={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.out",
+        f"--error={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.err",
+        WORKER_SCRIPT,
+        type1,
+        type2,
+        file_list_path,
+        str(n_hops)
+    ]
 
-        # Extract job ID from "Submitted batch job 12345"
-        job_id = result.stdout.strip().split()[-1]
-        return job_id
-
-    except Exception as e:
-        print(f"ERROR: Failed to submit typepair_{job_index:04d}: {e}")
-        return None
-
-
-def increment_memory_tier(current_memory):
-    """Get next memory tier for retry."""
-    if current_memory < 64:
-        return 64
-    elif current_memory < 128:
-        return 128
-    elif current_memory < 250:
-        return 250
-    elif current_memory < 500:
-        return 500
-    else:
-        return None  # Already at max
-
-
-def update_job_status(manifest, job_key, n_hops, **kwargs):
-    """Update job status in manifest."""
-    for key, value in kwargs.items():
-        manifest[job_key][key] = value
-    manifest[job_key]["last_update"] = datetime.now().isoformat()
-    save_manifest(manifest, n_hops)
-
-
-def get_jobs_by_status(manifest, status):
-    """Get all jobs with given status."""
-    jobs = []
-    for key, data in manifest.items():
-        if key == "_metadata":
-            continue
-        if data.get("status") == status:
-            jobs.append((key, data))
-    return jobs
+    return submit_slurm_job(cmd, job_name=job_name)
 
 
 def print_status_summary(manifest, running_jobs):
@@ -282,6 +152,8 @@ def print_status_summary(manifest, running_jobs):
 
 def orchestrate(n_hops):
     """Main orchestration loop."""
+    manifest_path = get_grouping_manifest_path(n_hops)
+
     print("=" * 80)
     print(f"ORCHESTRATING DISTRIBUTED GROUPING FOR {n_hops}-HOP")
     print("=" * 80)
@@ -291,7 +163,7 @@ def orchestrate(n_hops):
     print()
 
     # Load manifests
-    manifest = load_manifest(n_hops)
+    manifest = load_manifest(manifest_path)
     analysis_manifest = load_analysis_manifest(n_hops)
 
     total_jobs = len(manifest) - 1  # Exclude _metadata
@@ -333,10 +205,10 @@ def orchestrate(n_hops):
         print(f"\n--- Iteration {iteration} at {datetime.now().strftime('%H:%M:%S')} ---")
 
         # Reload manifest
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
 
         # Get SLURM status
-        running_jobs = get_running_slurm_jobs()
+        running_jobs = get_running_slurm_jobs(include_names=False)
         pending_jobs = get_pending_slurm_jobs()
 
         # Check completed jobs
@@ -354,18 +226,18 @@ def orchestrate(n_hops):
 
                 if state == "COMPLETED" and exit_code == 0:
                     # Success
-                    update_job_status(manifest, job_key, n_hops, status="completed")
+                    update_job_status(manifest, job_key, manifest_path, status="completed")
                     print(f"  ✓ {job_key} completed successfully")
                     del submitted_jobs[job_id]
 
                 elif state == "OUT_OF_MEMORY" or exit_code == 137:
                     # OOM - retry at higher tier
-                    next_memory = increment_memory_tier(current_memory)
+                    next_memory = increment_memory_tier(current_memory, GROUPING_MEMORY_TIERS)
 
                     if next_memory:
                         print(f"  ⚠ {job_key} OOM at {current_memory}GB, retrying at {next_memory}GB")
                         update_job_status(
-                            manifest, job_key, n_hops,
+                            manifest, job_key, manifest_path,
                             status="pending",
                             memory_tier=next_memory,
                             attempts=manifest[job_key]["attempts"] + 1,
@@ -374,7 +246,7 @@ def orchestrate(n_hops):
                     else:
                         print(f"  ✗ {job_key} failed OOM at {current_memory}GB (max memory reached)")
                         update_job_status(
-                            manifest, job_key, n_hops,
+                            manifest, job_key, manifest_path,
                             status="failed",
                             error_type="OOM_MAX_MEMORY"
                         )
@@ -385,14 +257,14 @@ def orchestrate(n_hops):
                     # Other failure
                     print(f"  ✗ {job_key} failed: {state}")
                     update_job_status(
-                        manifest, job_key, n_hops,
+                        manifest, job_key, manifest_path,
                         status="failed",
                         error_type=state
                     )
                     del submitted_jobs[job_id]
 
         # Reload manifest after updates
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
 
         # Submit new jobs if queue space available
         num_pending_in_queue = len(pending_jobs)
@@ -417,20 +289,20 @@ def orchestrate(n_hops):
                 file_list = typepair_to_files.get(typepair_key, [])
 
                 print(f"Submitting {job_key} ({type1}, {type2}) with {memory_tier}GB ({len(file_list)} files, attempt {data['attempts'] + 1})...")
-                job_id = submit_job(type1, type2, file_list, memory_tier, n_hops, job_index)
+                job_id = submit_grouping_job(type1, type2, file_list, memory_tier, n_hops, job_index)
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")
                     submitted_jobs[job_id] = job_key
                     update_job_status(
-                        manifest, job_key, n_hops,
+                        manifest, job_key, manifest_path,
                         status="running",
                         job_id=job_id,
                         attempts=data["attempts"] + 1
                     )
 
         # Print status summary
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
         print_status_summary(manifest, running_jobs)
 
         # Check if all jobs are complete

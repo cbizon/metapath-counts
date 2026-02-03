@@ -23,14 +23,17 @@ from collections import defaultdict
 scripts_dir = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+from metapath_counts import expand_metapath_to_variants, calculate_metrics
+
 from group_single_onehop_worker import (
-    expand_metapath_with_hierarchy,
-    calculate_metrics,
     load_aggregated_counts,
     group_type_pair
 )
 
 from group_by_onehop import aggregate_results
+
+# Alias for backwards compatibility with test code
+expand_metapath_with_hierarchy = expand_metapath_to_variants
 
 
 class TestNhopCountNotMultiplied:
@@ -203,15 +206,15 @@ class TestMetricsCalculation:
 
     def test_precision_with_correct_counts(self):
         """Precision = overlap / nhop_count."""
-        # overlap=100, nhop_count=1000, onehop_count=500, total_possible=1M
-        metrics = calculate_metrics(100, 500, 1000, 1_000_000)
+        # nhop_count=1000, onehop_count=500, overlap=100, total_possible=1M
+        metrics = calculate_metrics(1000, 500, 100, 1_000_000)
 
         # Precision = TP / (TP + FP) = overlap / nhop_count = 100/1000 = 0.1
         assert abs(metrics["precision"] - 0.1) < 0.0001
 
     def test_recall_with_correct_counts(self):
         """Recall = overlap / onehop_count."""
-        metrics = calculate_metrics(100, 500, 1000, 1_000_000)
+        metrics = calculate_metrics(1000, 500, 100, 1_000_000)
 
         # Recall = TP / (TP + FN) = overlap / onehop_count = 100/500 = 0.2
         assert abs(metrics["recall"] - 0.2) < 0.0001
@@ -228,7 +231,7 @@ class TestMetricsCalculation:
         global_onehop_count = 500
         total_possible = 1_000_000
 
-        metrics = calculate_metrics(overlap_from_files, global_onehop_count, global_nhop_count, total_possible)
+        metrics = calculate_metrics(global_nhop_count, global_onehop_count, overlap_from_files, total_possible)
 
         # Precision should use global count: 100/10000 = 0.01
         assert abs(metrics["precision"] - 0.01) < 0.0001
@@ -868,3 +871,177 @@ class TestEndToEndHierarchicalOutput:
             assert len(chemical_files) > 0, (
                 f"Expected ChemicalEntity output file, got: {files}"
             )
+
+
+class TestNhopCountFromResultsNotLookup:
+    """Test that nhop_count is aggregated from explicit results, not looked up.
+
+    This tests the bug where group_single_onehop_worker.py was looking up
+    nhop_count from aggregated_counts (which only contains 1-hop paths),
+    causing nhop_count=0 for all N-hop analysis where N>1.
+
+    The symptom was: overlap > 0 but nhop_count = 0, which is impossible.
+    """
+
+    def test_2hop_nhop_count_from_results_not_lookup(self):
+        """For 2-hop analysis, nhop_count should come from results, not precomputed 1-hop counts.
+
+        The bug: aggregated_counts only has 1-hop paths (from matrix metadata).
+        For 2-hop analysis, nhop paths are 2-hop paths which won't be in aggregated_counts.
+        The old code would return nhop_count=0, causing impossible metrics like overlap > 0 with count = 0.
+        """
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = os.path.join(tmpdir, "results_2hop")
+            output_dir = os.path.join(tmpdir, "grouped")
+            os.makedirs(results_dir)
+            os.makedirs(output_dir)
+
+            # Create a 2-hop result file
+            # Format: nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible
+            result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
+            with open(result_file, 'w') as f:
+                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                # 2-hop path with count=5000 and overlap=923
+                f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t5000\tGene|treats|F|SmallMolecule\t1000\t923\t1000000\n")
+
+            # Create aggregated_counts with ONLY 1-hop paths (simulating real scenario)
+            # This is what prepare_grouping.py produces - it computes from matrix metadata
+            # which only has 1-hop edge counts
+            aggregated_counts = {
+                "Gene|treats|F|SmallMolecule": 1000,
+                "Gene|treats|F|ChemicalEntity": 1000,
+                "BiologicalEntity|treats|F|SmallMolecule": 1000,
+                # Note: NO 2-hop paths like "Gene|affects|F|Disease|treats|R|SmallMolecule"
+            }
+
+            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
+            with open(counts_file, 'w') as f:
+                json.dump({"counts": aggregated_counts}, f)
+
+            # Create type node counts
+            type_node_counts = {
+                "Gene": 5000, "SmallMolecule": 3000, "Disease": 2000,
+                "ChemicalEntity": 3500, "BiologicalEntity": 6000,
+                "Entity": 20000, "NamedThing": 20000
+            }
+
+            type_counts_file = os.path.join(results_dir, "type_node_counts.json")
+            with open(type_counts_file, 'w') as f:
+                json.dump(type_node_counts, f)
+
+            # Run the worker
+            group_type_pair(
+                type1="Gene",
+                type2="SmallMolecule",
+                file_list=[result_file],
+                output_dir=output_dir,
+                n_hops=2,
+                aggregate=True,
+                aggregated_counts=aggregated_counts,
+                type_node_counts=type_node_counts
+            )
+
+            # Check output files
+            files = os.listdir(output_dir)
+            assert len(files) > 0, "No output files created"
+
+            # Read the output and verify nhop_count is NOT 0
+            for fname in files:
+                fpath = os.path.join(output_dir, fname)
+                with open(fpath, 'r') as f:
+                    lines = f.readlines()
+                    assert len(lines) > 1, f"No data in {fname}"
+
+                    # Check each data row
+                    for line in lines[1:]:  # Skip header
+                        parts = line.strip().split('\t')
+                        if len(parts) >= 3:
+                            nhop_count = int(parts[1])
+                            overlap = int(parts[2])
+
+                            # THE KEY ASSERTION: if overlap > 0, nhop_count must be > 0
+                            if overlap > 0:
+                                assert nhop_count > 0, (
+                                    f"BUG: overlap={overlap} but nhop_count={nhop_count}. "
+                                    f"This is impossible - nhop_count should be aggregated from results, "
+                                    f"not looked up from 1-hop precomputed counts. Line: {line.strip()}"
+                                )
+
+    def test_nhop_count_aggregates_correctly_across_variants(self):
+        """When multiple explicit nhop paths expand to same variant, counts should sum."""
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_dir = os.path.join(tmpdir, "results_2hop")
+            output_dir = os.path.join(tmpdir, "grouped")
+            os.makedirs(results_dir)
+            os.makedirs(output_dir)
+
+            # Create result file with multiple 2-hop paths that expand to same variant
+            result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
+            with open(result_file, 'w') as f:
+                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                # Two different 2-hop paths, both should aggregate to Entity|related_to|...
+                f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t3000\tGene|treats|F|SmallMolecule\t1000\t100\t1000000\n")
+                f.write("Protein|regulates|F|Disease|treats|R|Drug\t2000\tProtein|treats|F|Drug\t500\t50\t1000000\n")
+
+            # Only 1-hop counts in aggregated_counts
+            aggregated_counts = {
+                "Gene|treats|F|SmallMolecule": 1000,
+                "Protein|treats|F|Drug": 500,
+            }
+
+            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
+            with open(counts_file, 'w') as f:
+                json.dump({"counts": aggregated_counts}, f)
+
+            type_node_counts = {
+                "Gene": 5000, "Protein": 4000, "SmallMolecule": 3000, "Drug": 2000,
+                "Disease": 2000, "BiologicalEntity": 10000, "ChemicalEntity": 5000,
+                "Entity": 20000, "NamedThing": 20000
+            }
+
+            type_counts_file = os.path.join(results_dir, "type_node_counts.json")
+            with open(type_counts_file, 'w') as f:
+                json.dump(type_node_counts, f)
+
+            # Run for BiologicalEntity-ChemicalEntity type pair (should catch both paths)
+            group_type_pair(
+                type1="BiologicalEntity",
+                type2="ChemicalEntity",
+                file_list=[result_file],
+                output_dir=output_dir,
+                n_hops=2,
+                aggregate=True,
+                aggregated_counts=aggregated_counts,
+                type_node_counts=type_node_counts
+            )
+
+            # Find output files and verify aggregated counts
+            files = os.listdir(output_dir)
+
+            # Look for rows where nhop path is something like "BiologicalEntity|...|ChemicalEntity"
+            # The aggregated nhop_count should be 3000 + 2000 = 5000 for the most general variant
+            found_aggregated = False
+            for fname in files:
+                fpath = os.path.join(output_dir, fname)
+                with open(fpath, 'r') as f:
+                    for line in f.readlines()[1:]:  # Skip header
+                        parts = line.strip().split('\t')
+                        if len(parts) >= 3:
+                            nhop_path = parts[0]
+                            nhop_count = int(parts[1])
+                            overlap = int(parts[2])
+
+                            # Check that overlap > 0 implies nhop_count > 0
+                            if overlap > 0:
+                                assert nhop_count > 0, (
+                                    f"overlap={overlap} but nhop_count=0 for {nhop_path}"
+                                )
+                                found_aggregated = True
+
+            assert found_aggregated, "No aggregated results found with overlap > 0"
