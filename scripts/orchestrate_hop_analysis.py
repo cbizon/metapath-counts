@@ -17,17 +17,27 @@ Usage:
     uv run python scripts/orchestrate_hop_analysis.py --n-hops 2
 """
 
-import json
-import subprocess
-import time
 import os
 import sys
+import time
 from datetime import datetime
 from collections import defaultdict
 
-# Import path tracking functions
+# Import path tracking functions and shared utilities
 sys.path.insert(0, os.path.dirname(__file__))
 from path_tracker import get_path_statistics as get_path_stats_from_tracker
+from slurm_utils import (
+    load_manifest,
+    save_manifest,
+    update_job_status,
+    get_jobs_by_status,
+    get_running_slurm_jobs,
+    get_pending_slurm_jobs,
+    get_completed_jobs_since,
+    increment_memory_tier,
+    submit_slurm_job,
+    HOP_ANALYSIS_MEMORY_TIERS,
+)
 
 
 WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
@@ -59,141 +69,6 @@ def get_manifest_path(n_hops):
     return f"results_{n_hops}hop/manifest.json"
 
 
-def load_manifest(n_hops):
-    """Load manifest from disk."""
-    manifest_path = get_manifest_path(n_hops)
-    with open(manifest_path, 'r') as f:
-        return json.load(f)
-
-
-def save_manifest(manifest, n_hops):
-    """Save manifest to disk."""
-    manifest_path = get_manifest_path(n_hops)
-    with open(manifest_path, 'w') as f:
-        json.dump(manifest, f, indent=2)
-
-
-def update_job_status(manifest, matrix1_id, n_hops, **kwargs):
-    """Update a job's status in the manifest."""
-    if matrix1_id not in manifest:
-        raise KeyError(f"Job {matrix1_id} not found in manifest")
-
-    for key, value in kwargs.items():
-        manifest[matrix1_id][key] = value
-
-    manifest[matrix1_id]["last_update"] = datetime.now().isoformat()
-    save_manifest(manifest, n_hops)
-
-
-def get_jobs_by_status(manifest, status):
-    """Get all jobs with given status."""
-    return [
-        (matrix1_id, data)
-        for matrix1_id, data in manifest.items()
-        if matrix1_id != "_metadata" and data["status"] == status
-    ]
-
-
-def get_pending_slurm_jobs():
-    """Get list of PENDING jobs from SLURM."""
-    try:
-        # Get username properly
-        import getpass
-        username = getpass.getuser()
-
-        result = subprocess.run(
-            ["squeue", "-u", username, "-t", "PENDING", "-o", "%i", "-h"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            return [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
-    except Exception as e:
-        print(f"Warning: Failed to query SLURM pending jobs: {e}")
-
-    return []
-
-
-def get_running_slurm_jobs():
-    """Get dictionary of RUNNING jobs from SLURM: {job_id: job_name}."""
-    try:
-        result = subprocess.run(
-            ["squeue", "-u", os.environ.get("USER", ""), "-t", "RUNNING", "-o", "%i %j", "-h"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            jobs = {}
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        jobs[parts[0]] = ' '.join(parts[1:])
-            return jobs
-    except Exception as e:
-        print(f"Warning: Failed to query SLURM running jobs: {e}")
-
-    return {}
-
-
-def get_completed_jobs_since(job_ids, since_time):
-    """
-    Query SLURM sacct for completed jobs.
-
-    Returns: dict {job_id: (state, exit_code)}
-    """
-    if not job_ids:
-        return {}
-
-    try:
-        # Format time for sacct
-        start_time = since_time.strftime("%Y-%m-%dT%H:%M:%S")
-
-        result = subprocess.run(
-            [
-                "sacct",
-                "-j", ",".join(job_ids),
-                "--starttime", start_time,
-                "--format=JobID,State,ExitCode",
-                "--noheader",
-                "--parsable2"
-            ],
-            capture_output=True, text=True, timeout=30
-        )
-
-        if result.returncode != 0:
-            return {}
-
-        completed = {}
-        for line in result.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-
-            parts = line.strip().split('|')
-            if len(parts) < 3:
-                continue
-
-            job_id, state, exit_code = parts[0], parts[1], parts[2]
-
-            # Skip sub-jobs (e.g., "12345.batch")
-            if '.' in job_id:
-                continue
-
-            # Parse exit code (format: "0:0" or "137:0")
-            exit_code_int = 0
-            if ':' in exit_code:
-                exit_code_int = int(exit_code.split(':')[0])
-
-            # Only return jobs in terminal states (not RUNNING, PENDING, etc.)
-            terminal_states = {"COMPLETED", "FAILED", "OUT_OF_MEMORY", "CANCELLED", "TIMEOUT", "NODE_FAIL"}
-            if state in terminal_states:
-                completed[job_id] = (state, exit_code_int)
-
-        return completed
-
-    except Exception as e:
-        print(f"Warning: Failed to query sacct: {e}")
-        return {}
-
-
 def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, direction, tgt_type):
     """Submit a single matrix1 job to SLURM with specified memory.
 
@@ -213,12 +88,13 @@ def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, d
     partition = 'largemem' if memory_gb > 1000 else 'lowpri'
 
     logs_dir = f"logs_{n_hops}hop"
+    job_name = f"{n_hops}hop_m1_{matrix1_index:03d}"
 
     cmd = [
         'sbatch',
         f'--partition={partition}',
         f'--mem={memory_gb}G',
-        f'--job-name={n_hops}hop_m1_{matrix1_index:03d}',
+        f'--job-name={job_name}',
         f'--output={logs_dir}/matrix1_{matrix1_index:03d}_mem{memory_gb}.out',
         f'--error={logs_dir}/matrix1_{matrix1_index:03d}_mem{memory_gb}.err',
         WORKER_SCRIPT,
@@ -231,25 +107,7 @@ def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, d
         tgt_type
     ]
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-
-        if result.returncode != 0:
-            print(f"ERROR: sbatch failed for matrix1_{matrix1_index:03d}: {result.stderr}")
-            return None
-
-        # Parse job ID from "Submitted batch job 12345678"
-        output = result.stdout.strip()
-        if "Submitted batch job" in output:
-            job_id = output.split()[-1]
-            return job_id
-        else:
-            print(f"ERROR: Unexpected sbatch output: {output}")
-            return None
-
-    except Exception as e:
-        print(f"ERROR: Failed to submit job for matrix1_{matrix1_index:03d}: {e}")
-        return None
+    return submit_slurm_job(cmd, job_name=job_name)
 
 
 def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
@@ -283,27 +141,6 @@ def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
         'failed_at_lower_tiers': failed_at_lower_tiers,
         'total_failed': total_failed
     }
-
-
-def increment_memory_tier(current_memory):
-    """Increment memory tier for retry.
-
-    180 -> 250 -> 500 -> 1000 -> 1400 -> None (give up)
-
-    180GB matches most cluster nodes (~191GB available)
-    Higher tiers use fewer but larger nodes
-    1400GB uses largemem partition (~1495GB available)
-    """
-    if current_memory < 250:
-        return 250
-    elif current_memory < 500:
-        return 500
-    elif current_memory < 1000:
-        return 1000
-    elif current_memory < 1400:
-        return 1400
-    else:
-        return None  # Already at max, give up
 
 
 def print_status_summary(manifest, running_jobs):
@@ -362,7 +199,7 @@ def orchestrate(n_hops=3):
     print()
 
     # Load manifest
-    manifest = load_manifest(n_hops)
+    manifest = load_manifest(manifest_path)
 
     # Extract input file paths from metadata
     if "_metadata" not in manifest:
@@ -400,7 +237,7 @@ def orchestrate(n_hops=3):
             continue
         if data["status"] == "failed" and data.get("error_type") == "FAILED":
             current_memory = data["memory_tier"]
-            next_memory = increment_memory_tier(current_memory)
+            next_memory = increment_memory_tier(current_memory, HOP_ANALYSIS_MEMORY_TIERS)
 
             if next_memory:
                 print(f"Auto-resetting {matrix1_id}: failed at {current_memory}GB -> pending at {next_memory}GB")
@@ -414,8 +251,8 @@ def orchestrate(n_hops=3):
 
     if reset_count > 0:
         print(f"\nReset {reset_count} failed jobs to pending for OOM retry\n")
-        save_manifest(manifest, n_hops)
-        manifest = load_manifest(n_hops)  # Reload
+        save_manifest(manifest, manifest_path)
+        manifest = load_manifest(manifest_path)  # Reload
 
     # Track submitted jobs
     submitted_jobs = {}  # job_id -> matrix1_id
@@ -436,7 +273,7 @@ def orchestrate(n_hops=3):
         print(f"\n--- Iteration {iteration} at {datetime.now().strftime('%H:%M:%S')} ---")
 
         # Reload manifest
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
 
         # Get SLURM status
         running_jobs = get_running_slurm_jobs()
@@ -470,7 +307,7 @@ def orchestrate(n_hops=3):
                     if total_failed == 0:
                         # All paths completed successfully
                         update_job_status(
-                            manifest, matrix1_id, n_hops,
+                            manifest, matrix1_id, manifest_path,
                             status="completed",
                             paths_completed=completed_paths,
                             paths_failed=0
@@ -478,11 +315,11 @@ def orchestrate(n_hops=3):
                         print(f"  ✓ {matrix1_id} completed successfully ({completed_paths} paths)")
                     else:
                         # Job completed but some paths failed - need retry at higher tier
-                        next_memory = increment_memory_tier(current_memory)
+                        next_memory = increment_memory_tier(current_memory, HOP_ANALYSIS_MEMORY_TIERS)
                         if next_memory:
                             print(f"  ⚠ {matrix1_id} has {total_failed} failed paths, retrying at {next_memory}GB")
                             update_job_status(
-                                manifest, matrix1_id, n_hops,
+                                manifest, matrix1_id, manifest_path,
                                 status="pending",
                                 memory_tier=next_memory,
                                 attempts=manifest[matrix1_id]["attempts"] + 1,
@@ -494,7 +331,7 @@ def orchestrate(n_hops=3):
                             # Already at max tier, mark as completed with partial results
                             print(f"  ✓ {matrix1_id} completed with {total_failed} failed paths (max memory reached)")
                             update_job_status(
-                                manifest, matrix1_id, n_hops,
+                                manifest, matrix1_id, manifest_path,
                                 status="completed",
                                 paths_completed=completed_paths,
                                 paths_failed=total_failed,
@@ -513,14 +350,14 @@ def orchestrate(n_hops=3):
 
                     if failed_current > 0 or failed_lower > 0 or completed_paths > 0:
                         # We have failed paths or made some progress
-                        next_memory = increment_memory_tier(current_memory)
+                        next_memory = increment_memory_tier(current_memory, HOP_ANALYSIS_MEMORY_TIERS)
 
                         if next_memory:
                             print(f"  ⚠ {matrix1_id} OOM at {current_memory}GB (state={state})")
                             print(f"      Progress: {completed_paths} completed, {total_failed} failed")
                             print(f"      Retrying at {next_memory}GB for failed paths")
                             update_job_status(
-                                manifest, matrix1_id, n_hops,
+                                manifest, matrix1_id, manifest_path,
                                 status="pending",
                                 memory_tier=next_memory,
                                 attempts=manifest[matrix1_id]["attempts"] + 1,
@@ -532,7 +369,7 @@ def orchestrate(n_hops=3):
                             print(f"  ✗ {matrix1_id} failed OOM at {current_memory}GB (max memory reached)")
                             print(f"      Final: {completed_paths} completed, {total_failed} failed")
                             update_job_status(
-                                manifest, matrix1_id, n_hops,
+                                manifest, matrix1_id, manifest_path,
                                 status="completed",
                                 paths_completed=completed_paths,
                                 paths_failed=total_failed,
@@ -542,7 +379,7 @@ def orchestrate(n_hops=3):
                         # No progress at all - this is a true failure
                         print(f"  ✗ {matrix1_id} failed immediately at {current_memory}GB (no paths computed)")
                         update_job_status(
-                            manifest, matrix1_id, n_hops,
+                            manifest, matrix1_id, manifest_path,
                             status="failed",
                             error_type=f"FAILED_IMMEDIATE_{state}",
                             paths_completed=0,
@@ -556,7 +393,7 @@ def orchestrate(n_hops=3):
                     print(f"  ✗ {matrix1_id} failed: {state}")
                     print(f"      Progress: {completed_paths} completed, {total_failed} failed")
                     update_job_status(
-                        manifest, matrix1_id, n_hops,
+                        manifest, matrix1_id, manifest_path,
                         status="failed",
                         error_type=state,
                         paths_completed=completed_paths,
@@ -565,7 +402,7 @@ def orchestrate(n_hops=3):
                     del submitted_jobs[job_id]
 
         # Reload manifest after updates
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
 
         # Submit new jobs if queue space available
         num_pending_in_queue = len(pending_jobs)
@@ -593,14 +430,14 @@ def orchestrate(n_hops=3):
                     print(f"  → Job ID: {job_id}")
                     submitted_jobs[job_id] = matrix1_id
                     update_job_status(
-                        manifest, matrix1_id, n_hops,
+                        manifest, matrix1_id, manifest_path,
                         status="running",
                         job_id=job_id,
                         attempts=data["attempts"] + 1
                     )
 
         # Print status summary
-        manifest = load_manifest(n_hops)
+        manifest = load_manifest(manifest_path)
         print_status_summary(manifest, running_jobs)
 
         # Check if all jobs are complete
