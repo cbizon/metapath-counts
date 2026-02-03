@@ -22,7 +22,7 @@ from prebuild_matrices import (
     load_node_types,
     build_matrices,
 )
-from group_by_onehop import (
+from metapath_counts import (
     parse_metapath,
     calculate_metrics,
 )
@@ -230,10 +230,11 @@ class TestMetricCalculations:
     def test_metrics_perfect_classifier(self):
         """Test metrics for a perfect classifier."""
         metrics = calculate_metrics(
-            threehop_count=50,
+            nhop_count=50,
             onehop_count=50,
             overlap=50,
-            total_possible=100
+            total_possible=100,
+            full_metrics=True
         )
 
         assert metrics['Precision'] == 1.0
@@ -247,10 +248,11 @@ class TestMetricCalculations:
         # 50 positives, 50 negatives, predict 50 as positive
         # Overlap 25 (half correct)
         metrics = calculate_metrics(
-            threehop_count=50,
+            nhop_count=50,
             onehop_count=50,
             overlap=25,
-            total_possible=100
+            total_possible=100,
+            full_metrics=True
         )
 
         # TP=25, FP=25, FN=25, TN=25

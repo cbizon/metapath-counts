@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from metapath_counts.hierarchy import get_type_ancestors, get_predicate_ancestors
 from metapath_counts.type_assignment import is_pseudo_type, parse_pseudo_type
+from metapath_counts.aggregation import expand_metapath_to_variants, calculate_metrics
 
 
 # Global caches for precomputed data
@@ -92,164 +93,6 @@ def compute_total_possible(type1, type2, type_node_counts):
     return count1 * count2
 
 
-def calculate_metrics(overlap, onehop_count, nhop_count, total_possible):
-    """Calculate performance metrics for a prediction.
-
-    Args:
-        overlap: Number of overlapping edges
-        onehop_count: Total edges in 1-hop path
-        onehop_count: Total edges in N-hop path
-        total_possible: Total possible pairs (nodes_start * nodes_end)
-
-    Returns:
-        dict with precision, recall, f1, mcc, specificity, npv
-    """
-    # True positives: overlap
-    tp = overlap
-
-    # False positives: predicted by N-hop but not in 1-hop
-    fp = nhop_count - overlap
-
-    # False negatives: in 1-hop but not predicted by N-hop
-    fn = onehop_count - overlap
-
-    # True negatives: not in either
-    # Note: tn can be negative when aggregated counts exceed total_possible
-    tn = total_possible - (tp + fp + fn)
-
-    # Precision: TP / (TP + FP)
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-
-    # Recall (Sensitivity): TP / (TP + FN)
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-
-    # F1 Score: 2 * (Precision * Recall) / (Precision + Recall)
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    # Specificity: TN / (TN + FP) - undefined if tn < 0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 and tn >= 0 else 0.0
-
-    # NPV (Negative Predictive Value): TN / (TN + FN) - undefined if tn < 0
-    npv = tn / (tn + fn) if (tn + fn) > 0 and tn >= 0 else 0.0
-
-    # Matthews Correlation Coefficient (MCC)
-    # MCC is undefined when tn < 0 (denominator would involve sqrt of negative)
-    numerator = (tp * tn) - (fp * fn)
-    denom_product = (tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)
-    if denom_product > 0:
-        denominator = denom_product ** 0.5
-        mcc = numerator / denominator
-    else:
-        mcc = 0.0
-
-    return {
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'mcc': mcc,
-        'specificity': specificity,
-        'npv': npv
-    }
-
-
-def expand_metapath_with_hierarchy(metapath):
-    """Expand a metapath to all hierarchical variants.
-
-    Args:
-        metapath: Pipe-separated metapath like "Gene|affects|F|Disease"
-
-    Returns:
-        Set of expanded metapaths including hierarchical ancestors
-    """
-    parts = metapath.split('|')
-
-    # For N-hop: parts = [type1, pred1, dir1, type2, pred2, dir2, ..., typeN]
-    # For 1-hop: parts = [type1, pred, dir, type2]
-
-    # Extract types and predicates
-    types = []
-    predicates = []
-    directions = []
-
-    i = 0
-    while i < len(parts):
-        # Type
-        types.append(parts[i])
-        i += 1
-
-        if i >= len(parts):
-            break
-
-        # Predicate
-        predicates.append(parts[i])
-        i += 1
-
-        if i >= len(parts):
-            break
-
-        # Direction
-        directions.append(parts[i])
-        i += 1
-
-    # Expand types (handle pseudo-types)
-    expanded_types_list = []
-    for typ in types:
-        if is_pseudo_type(typ):
-            # Pseudo-type: expand to constituents and their ancestors
-            constituents = parse_pseudo_type(typ)
-            all_variants = set()
-            for constituent in constituents:
-                all_variants.update(get_type_ancestors(constituent))
-            expanded_types_list.append(sorted(all_variants))
-        else:
-            # Regular type: get ancestors
-            expanded_types_list.append(sorted(get_type_ancestors(typ)))
-
-    # Expand predicates (normalize to remove biolink: prefix)
-    expanded_preds_list = []
-    for pred in predicates:
-        # Normalize: strip biolink: prefix if present
-        clean_pred = pred.replace('biolink:', '')
-        # Get ancestors (already returned without biolink: prefix)
-        ancestors = get_predicate_ancestors(pred)
-        # Include self + ancestors
-        expanded_preds_list.append(sorted([clean_pred] + list(ancestors)))
-
-    # Generate all combinations
-    def cartesian_product(lists):
-        if not lists:
-            return [[]]
-        result = []
-        for item in lists[0]:
-            for rest in cartesian_product(lists[1:]):
-                result.append([item] + rest)
-        return result
-
-    # Build expanded metapaths
-    expanded = set()
-
-    # Cartesian product of all type variants
-    type_combos = cartesian_product(expanded_types_list)
-
-    # Cartesian product of all predicate variants
-    pred_combos = cartesian_product(expanded_preds_list)
-
-    # Combine types and predicates
-    for type_combo in type_combos:
-        for pred_combo in pred_combos:
-            # Interleave types, predicates, directions
-            parts_expanded = []
-            for i, typ in enumerate(type_combo):
-                parts_expanded.append(typ)
-                if i < len(pred_combo):
-                    parts_expanded.append(pred_combo[i])
-                    parts_expanded.append(directions[i])
-
-            expanded.add('|'.join(parts_expanded))
-
-    return expanded
-
-
 def check_type_match(onehop_path, type1, type2):
     """Check if a 1-hop metapath aggregates to a type pair.
 
@@ -312,9 +155,10 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
 
     print(f"Scanning {len(file_list)} result files (optimized subset)...")
 
-    # Data structure: onehop_path -> {nhop_path -> overlap}
+    # Data structure: onehop_path -> {nhop_path -> [overlap, nhop_count]}
     # Note: total_possible is computed per type pair, not summed from rows
-    onehop_to_data = defaultdict(lambda: defaultdict(int))
+    # We track BOTH overlap and nhop_count because nhop_count must be summed during aggregation
+    onehop_to_data = defaultdict(lambda: defaultdict(lambda: [0, 0]))
 
     files_processed = 0
     rows_found = 0
@@ -334,7 +178,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
                     continue
 
                 nhop_path = parts[0]
-                # nhop_count = int(parts[1])  # Don't use - will look up from aggregated_counts
+                nhop_count = int(parts[1])  # Read from results - must be aggregated, not looked up
                 onehop_path = parts[2]
                 # onehop_count = int(parts[3])  # Don't use - will look up from aggregated_counts
                 overlap = int(parts[4])
@@ -345,9 +189,9 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
                     rows_found += 1
 
                     # Expand 1-hop path to all hierarchical variants
-                    onehop_variants = expand_metapath_with_hierarchy(onehop_path)
+                    onehop_variants = expand_metapath_to_variants(onehop_path)
 
-                    # Store overlap for each variant that matches the type pair
+                    # Store overlap AND nhop_count for each variant that matches the type pair
                     for onehop_variant in onehop_variants:
                         # Only keep variants that match this job's type pair
                         variant_parts = onehop_variant.split('|')
@@ -355,7 +199,9 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
                             v_src, v_pred, v_dir, v_tgt = variant_parts
                             # Check exact match (not hierarchical - variants are already expanded)
                             if (v_src == type1 and v_tgt == type2) or (v_src == type2 and v_tgt == type1):
-                                onehop_to_data[onehop_variant][nhop_path] += overlap
+                                data = onehop_to_data[onehop_variant][nhop_path]
+                                data[0] += overlap
+                                data[1] += nhop_count
 
         if files_processed % 500 == 0:
             print(f"  Processed {files_processed}/{len(file_list)} files, found {rows_found} matching rows")
@@ -381,21 +227,22 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             onehop_count_global = 0
 
         # Apply hierarchical aggregation if enabled
-        # Data structure: nhop_variant -> overlap
+        # Data structure: nhop_variant -> [overlap, nhop_count]
         aggregated = {}
         if aggregate:
             print(f"  Applying hierarchical aggregation...")
 
-            # For each nhop_path, expand and aggregate overlap
-            final_aggregated = defaultdict(int)
+            # For each nhop_path, expand and aggregate both overlap and nhop_count
+            final_aggregated = defaultdict(lambda: [0, 0])
 
-            for nhop_path, overlap in nhop_data.items():
+            for nhop_path, (overlap, nhop_count) in nhop_data.items():
                 # Expand nhop_path to all hierarchical variants
-                nhop_variants = expand_metapath_with_hierarchy(nhop_path)
+                nhop_variants = expand_metapath_to_variants(nhop_path)
 
-                # Add overlap to all variants
+                # Add overlap and nhop_count to all variants
                 for variant in nhop_variants:
-                    final_aggregated[variant] += overlap
+                    final_aggregated[variant][0] += overlap
+                    final_aggregated[variant][1] += nhop_count
 
             aggregated = dict(final_aggregated)
             print(f"    N-hop paths expanded to {len(aggregated)} aggregated paths")
@@ -414,20 +261,14 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             out.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
-            # Sort by overlap descending
-            sorted_items = sorted(aggregated.items(), key=lambda x: x[1], reverse=True)
+            # Sort by overlap descending (overlap is first element of tuple)
+            sorted_items = sorted(aggregated.items(), key=lambda x: x[1][0], reverse=True)
 
-            for nhop_path, overlap in sorted_items:
-                # Look up nhop_count from precomputed aggregated counts
-                if aggregated_counts and nhop_path in aggregated_counts:
-                    nhop_count = aggregated_counts[nhop_path]
-                else:
-                    # Fallback: shouldn't happen
-                    print(f"  WARNING: No precomputed count for {nhop_path}")
-                    nhop_count = 0
+            for nhop_path, (overlap, nhop_count) in sorted_items:
+                # nhop_count is now properly aggregated from explicit results, not looked up
 
                 # Calculate metrics using type-pair total_possible
-                metrics = calculate_metrics(overlap, onehop_count_global, nhop_count, total_possible_for_pair)
+                metrics = calculate_metrics(nhop_count, onehop_count_global, overlap, total_possible_for_pair)
 
                 # Write row
                 out.write(f"{nhop_path}\t{nhop_count}\t{overlap}\t{total_possible_for_pair}\t")

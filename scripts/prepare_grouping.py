@@ -23,7 +23,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.group_single_onehop_worker import expand_metapath_with_hierarchy
+from metapath_counts import expand_metapath_to_variants
 
 
 def extract_type_pairs_from_aggregated_paths(aggregated_counts):
@@ -161,7 +161,7 @@ def precompute_aggregated_counts(matrices_dir, output_path):
             print(f"  Expanding path {i+1}/{len(explicit_counts)}...")
 
         # Expand to hierarchical variants
-        variants = expand_metapath_with_hierarchy(path)
+        variants = expand_metapath_to_variants(path)
 
         for variant in variants:
             aggregated_counts[variant] += count

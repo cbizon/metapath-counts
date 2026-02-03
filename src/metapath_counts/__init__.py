@@ -26,6 +26,16 @@ from .hierarchy import (
     get_qualifier_ancestors
 )
 
+from .aggregation import (
+    parse_metapath,
+    build_metapath,
+    get_type_variants,
+    get_predicate_variants,
+    generate_metapath_variants,
+    expand_metapath_to_variants,
+    calculate_metrics
+)
+
 __all__ = [
     "get_most_specific_type",
     "get_symmetric_predicates",
@@ -36,5 +46,12 @@ __all__ = [
     "find_leaf_types",
     "get_type_ancestors",
     "get_predicate_ancestors",
-    "get_qualifier_ancestors"
+    "get_qualifier_ancestors",
+    "parse_metapath",
+    "build_metapath",
+    "get_type_variants",
+    "get_predicate_variants",
+    "generate_metapath_variants",
+    "expand_metapath_to_variants",
+    "calculate_metrics"
 ]

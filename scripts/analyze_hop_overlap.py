@@ -45,7 +45,10 @@ from metapath_counts import (
     is_pseudo_type,
     parse_pseudo_type,
     get_type_ancestors,
-    get_predicate_ancestors
+    get_predicate_ancestors,
+    parse_metapath,
+    build_metapath,
+    generate_metapath_variants
 )
 
 # Add path_tracker module
@@ -60,81 +63,6 @@ from path_tracker import (
     clear_path_in_progress,
     enumerate_downstream_paths
 )
-
-
-def parse_metapath_for_aggregation(metapath: str):
-    """Parse a metapath into node types, predicates, and directions."""
-    parts = metapath.split('|')
-    num_parts = len(parts)
-
-    if (num_parts - 1) % 3 != 0 or num_parts < 4:
-        raise ValueError(f"Invalid metapath format: {metapath}")
-
-    n_hops = (num_parts - 1) // 3
-    nodes = [parts[i * 3] for i in range(n_hops + 1)]
-    predicates = [parts[i * 3 + 1] for i in range(n_hops)]
-    directions = [parts[i * 3 + 2] for i in range(n_hops)]
-
-    return nodes, predicates, directions
-
-
-def build_metapath_from_parts(nodes: list, predicates: list, directions: list) -> str:
-    """Build metapath string from components."""
-    result = []
-    for i in range(len(predicates)):
-        result.append(nodes[i])
-        result.append(predicates[i])
-        result.append(directions[i])
-    result.append(nodes[-1])
-    return '|'.join(result)
-
-
-def get_type_variants_for_aggregation(type_name: str, include_self: bool = True):
-    """Get all type variants for hierarchical aggregation."""
-    variants = []
-
-    if include_self:
-        variants.append(type_name)
-
-    if is_pseudo_type(type_name):
-        constituents = parse_pseudo_type(type_name)
-        variants.extend(constituents)
-
-    ancestors = get_type_ancestors(type_name)
-    for ancestor in ancestors:
-        if ancestor != type_name and ancestor not in variants:
-            variants.append(ancestor)
-
-    return variants
-
-
-def get_predicate_variants_for_aggregation(predicate: str, include_self: bool = True):
-    """Get all predicate variants for hierarchical aggregation."""
-    variants = []
-
-    if include_self:
-        variants.append(predicate)
-
-    ancestors = get_predicate_ancestors(predicate)
-    for ancestor in ancestors:
-        clean_ancestor = ancestor.replace('biolink:', '')
-        if clean_ancestor not in variants:
-            variants.append(clean_ancestor)
-
-    return variants
-
-
-def generate_metapath_variants(metapath: str):
-    """Generate all implied variants of a metapath through hierarchical aggregation."""
-    nodes, predicates, directions = parse_metapath_for_aggregation(metapath)
-
-    node_variants = [get_type_variants_for_aggregation(node) for node in nodes]
-    predicate_variants = [get_predicate_variants_for_aggregation(pred) for pred in predicates]
-
-    for node_combo in itertools.product(*node_variants):
-        for pred_combo in itertools.product(*predicate_variants):
-            variant = build_metapath_from_parts(list(node_combo), list(pred_combo), directions)
-            yield variant
 
 
 def aggregate_explicit_results(explicit_file: str, aggregated_file: str):
