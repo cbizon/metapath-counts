@@ -628,6 +628,44 @@ class TestHierarchicalTypePairExtraction:
         assert ("Entity", "Entity") in type_pairs
 
 
+    def test_type_pairs_exclude_pseudo_types(self):
+        """Pseudo-type paths in aggregated counts should not generate type pair jobs.
+
+        Gene+SmallMolecule|treats|F|Disease exists in aggregated_counts as the
+        original explicit path, but (Disease, Gene+SmallMolecule) should never
+        become a job — those counts are already captured by (Disease, Gene) and
+        (Disease, SmallMolecule).
+        """
+        import sys
+        scripts_dir = Path(__file__).parent.parent / "scripts"
+        sys.path.insert(0, str(scripts_dir))
+        from prepare_grouping import extract_type_pairs_from_aggregated_paths
+
+        # Simulate aggregated_counts that include pseudo-type paths
+        aggregated_counts = {
+            "Gene+SmallMolecule|treats|F|Disease": 100,
+            "Gene|treats|F|Disease": 100,
+            "SmallMolecule|treats|F|Disease": 100,
+            "ChemicalEntity|treats|F|Disease": 100,
+            "Protein+Disease|affects|F|Gene": 50,
+            "Protein|affects|F|Gene": 50,
+            "Disease|affects|F|Gene": 50,
+        }
+
+        type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
+
+        # Constituent type pairs should be present
+        assert ("Disease", "Gene") in type_pairs
+        assert ("Disease", "SmallMolecule") in type_pairs
+        assert ("ChemicalEntity", "Disease") in type_pairs
+        assert ("Gene", "Protein") in type_pairs
+
+        # No pseudo-type should appear in any type pair
+        for t1, t2 in type_pairs:
+            assert "+" not in t1, f"Pseudo-type found in type pair: ({t1}, {t2})"
+            assert "+" not in t2, f"Pseudo-type found in type pair: ({t1}, {t2})"
+
+
 class TestCheckTypeMatchHierarchical:
     """Test that check_type_match properly matches explicit paths to hierarchical type pairs.
 
