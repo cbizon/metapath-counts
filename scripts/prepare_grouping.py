@@ -23,7 +23,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from metapath_counts import expand_metapath_to_variants
+from metapath_counts import expand_metapath_to_variants, is_pseudo_type
 
 
 def extract_type_pairs_from_aggregated_paths(aggregated_counts):
@@ -49,6 +49,10 @@ def extract_type_pairs_from_aggregated_paths(aggregated_counts):
             continue
 
         src_type, pred, direction, tgt_type = parts
+
+        # Skip pseudo-types: their counts are already captured by constituent type jobs
+        if is_pseudo_type(src_type) or is_pseudo_type(tgt_type):
+            continue
 
         # Store as sorted tuple to treat (A,B) same as (B,A)
         pair = tuple(sorted([src_type, tgt_type]))
