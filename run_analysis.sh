@@ -78,9 +78,14 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "  - Each job finds and groups all 1-hop metapaths between those types"
     echo "  - Memory-efficient streaming through relevant result files only"
     echo "  - Automatic hierarchical aggregation"
+    echo "  - Filters: min-count=10, min-precision=0.001"
+    echo "  - Excluded types: Entity, ThingWithTaxon"
+    echo "  - Excluded predicates: related_to_at_instance_level, related_to_at_concept_level"
     echo "  - You can Ctrl+C and restart later - it will resume from the manifest"
     echo ""
-    uv run python scripts/orchestrate_grouping.py --n-hops "$N_HOPS"
+    uv run python scripts/orchestrate_grouping.py --n-hops "$N_HOPS" \
+        --min-count 10 \
+        --min-precision 0.001
 
     echo ""
     echo "✓ ${N_HOPS}-hop analysis complete!"

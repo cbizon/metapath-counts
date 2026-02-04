@@ -91,26 +91,25 @@ uv run python scripts/prepare_analysis.py \
 uv run python scripts/orchestrate_hop_analysis.py \
   --n-hops 3
 
-# 3. Merge results (after all jobs complete)
-uv run python scripts/merge_results.py --n-hops 3
-
-# 4. Group by 1-hop metapath with performance metrics
-uv run python scripts/group_by_onehop.py --n-hops 3
+# 3. Prepare and run distributed grouping with filters
+uv run python scripts/prepare_grouping.py --n-hops 3
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+  --min-count 10 --min-precision 0.001
 ```
 
 ### Output Format
 
-**Merged results** (`results/all_3hop_overlaps.tsv`):
-```
-3hop_metapath | 3hop_count | 1hop_metapath | 1hop_count | overlap | total_possible
-SmallMolecule|affects|F|Gene|affects|R|SmallMolecule|affects|F|Gene | 6170000000 | SmallMolecule|regulates|F|Gene | 500000 | 450000 | 201000000000
-```
-
-**Grouped results** (`grouped_by_1hop/*.tsv`):
+**Grouped results** (`grouped_by_results_3hop/*.tsv`):
 - One file per unique 1-hop metapath
-- Contains all 3-hop paths that predict that 1-hop
+- Contains all N-hop paths that predict that 1-hop
 - Includes performance metrics: Precision, Recall, F1, MCC, etc.
 - **Note:** Metrics are approximate for aggregated results (see "Approximate Metrics" section below)
+
+**Default Filters (reduce output size significantly):**
+- `--min-count 10`: Exclude rules with fewer than 10 predictor paths
+- `--min-precision 0.001`: Exclude rules with precision < 0.1%
+- `--exclude-types Entity,ThingWithTaxon`: Exclude overly general node types
+- `--exclude-predicates related_to_at_instance_level,related_to_at_concept_level`: Exclude overly general predicates
 
 ### Metapath Format
 

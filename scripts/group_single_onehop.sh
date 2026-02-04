@@ -10,13 +10,18 @@
 #   $2: type2 - Second type (e.g., "Disease")
 #   $3: file_list_path - Path to file containing list of result files to scan
 #   $4: n_hops - Number of hops (1, 2, or 3)
+#   $5: min_count - Minimum N-hop count (default: 0)
+#   $6: min_precision - Minimum precision (default: 0)
+#   $7: exclude_types - Comma-separated types to exclude (default: Entity,ThingWithTaxon)
+#   $8: exclude_predicates - Comma-separated predicates to exclude
 #
 # This script:
 # 1. Receives type pair and file list from orchestrator (no manifest access!)
 # 2. Calls Python worker to stream through specified files
 # 3. Finds all 1-hop metapaths between type1 and type2
 # 4. Aggregates and computes metrics for each
-# 5. Outputs to grouped_by_results_{n_hops}hop/<sanitized_typepair>/
+# 5. Applies filters (min-count, min-precision, excluded types/predicates)
+# 6. Outputs to grouped_by_results_{n_hops}hop/<sanitized_typepair>/
 
 set -e
 
@@ -24,10 +29,14 @@ TYPE1="$1"
 TYPE2="$2"
 FILE_LIST_PATH="$3"
 N_HOPS="$4"
+MIN_COUNT="${5:-0}"
+MIN_PRECISION="${6:-0}"
+EXCLUDE_TYPES="${7:-Entity,ThingWithTaxon}"
+EXCLUDE_PREDICATES="${8:-related_to_at_instance_level,related_to_at_concept_level}"
 
 if [ -z "$TYPE1" ] || [ -z "$TYPE2" ] || [ -z "$FILE_LIST_PATH" ] || [ -z "$N_HOPS" ]; then
-    echo "ERROR: Missing arguments"
-    echo "Usage: $0 <type1> <type2> <file_list_path> <n_hops>"
+    echo "ERROR: Missing required arguments"
+    echo "Usage: $0 <type1> <type2> <file_list_path> <n_hops> [min_count] [min_precision] [exclude_types] [exclude_predicates]"
     exit 1
 fi
 
@@ -45,6 +54,10 @@ echo "N-hops: $N_HOPS"
 echo "Output dir: $OUTPUT_DIR"
 echo "Aggregated counts: $AGGREGATED_COUNTS"
 echo "Type node counts: $TYPE_NODE_COUNTS"
+echo "Min count: $MIN_COUNT"
+echo "Min precision: $MIN_PRECISION"
+echo "Exclude types: $EXCLUDE_TYPES"
+echo "Exclude predicates: $EXCLUDE_PREDICATES"
 echo ""
 
 # Check if file list exists
@@ -83,7 +96,11 @@ uv run python scripts/group_single_onehop_worker.py \
     --output-dir "$OUTPUT_DIR" \
     --n-hops "$N_HOPS" \
     --aggregated-counts "$AGGREGATED_COUNTS" \
-    --type-node-counts "$TYPE_NODE_COUNTS"
+    --type-node-counts "$TYPE_NODE_COUNTS" \
+    --min-count "$MIN_COUNT" \
+    --min-precision "$MIN_PRECISION" \
+    --exclude-types "$EXCLUDE_TYPES" \
+    --exclude-predicates "$EXCLUDE_PREDICATES"
 
 echo ""
 echo "✓ Grouping complete"

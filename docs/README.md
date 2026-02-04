@@ -20,11 +20,12 @@ uv run python scripts/prepare_analysis.py \
 uv run python scripts/orchestrate_hop_analysis.py \
   --n-hops 3
 
-# 3. After completion, merge results
-uv run python scripts/merge_results.py --n-hops 3
+# 3. Prepare distributed grouping (creates type pair manifest)
+uv run python scripts/prepare_grouping.py --n-hops 3
 
-# 4. Group results by 1-hop metapath with metrics
-uv run python scripts/group_by_onehop.py --n-hops 3
+# 4. Run distributed grouping with filters
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+    --min-count 10 --min-precision 0.001
 ```
 
 ## System Overview
@@ -129,51 +130,61 @@ uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 - Jobs will continue running in SLURM
 - Restart orchestrator anytime - it resumes from manifest
 
-### Step 3: Merge Results
+### Step 3: Prepare Grouping
 
-After all jobs complete, combine outputs:
+After all analysis jobs complete, prepare distributed grouping:
 
 ```bash
-uv run python scripts/metapaths/merge_results.py
+uv run python scripts/prepare_grouping.py --n-hops 3
 ```
 
 **Output:**
-- `scripts/metapaths/results/all_3hop_overlaps.tsv` (final merged file)
-- Verifies all expected result files are present
-- Reports statistics (total rows, missing files, etc.)
+- Creates `results_3hop/grouping_manifest.json` with type pair jobs
+- Precomputes aggregated path counts for global lookups
+- Precomputes type node counts for total_possible calculations
 
-**Time:** ~1-2 minutes
+**Time:** ~5-10 minutes
 
-### Step 4: Group Results by 1-Hop Metapath
+### Step 4: Run Distributed Grouping
 
-After merging, group the 3-hop results by their corresponding normalized 1-hop metapaths:
+Run distributed grouping with filters:
 
 ```bash
-uv run python scripts/metapaths/group_by_onehop.py
+uv run python scripts/prepare_grouping.py --n-hops 3
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+    --min-count 10 --min-precision 0.001
 ```
 
 **What it does:**
-- Reads all result files from `scripts/metapaths/results/`
+- Distributes grouping across SLURM jobs (one per type pair)
 - Normalizes 1-hop metapaths to forward (F) direction
-- Reverses 3-hop paths when needed to match normalization
+- Reverses N-hop paths when needed to match normalization
 - Calculates performance metrics (Precision, Recall, F1, MCC, etc.)
-- Groups results by normalized 1-hop metapath
+- Applies filters to reduce output size
 - Writes one TSV file per unique 1-hop metapath
 
+**Filters (applied by default):**
+- `--min-count 10`: Exclude rules with fewer than 10 predictor paths
+- `--min-precision 0.001`: Exclude rules with precision < 0.1%
+- `--exclude-types Entity,ThingWithTaxon`: Exclude overly general node types
+- `--exclude-predicates related_to_at_instance_level,related_to_at_concept_level`: Exclude overly general predicates
+
 **Output:**
-- `scripts/metapaths/grouped_by_1hop/*.tsv` (one file per 1-hop metapath)
+- `grouped_by_results_3hop/*.tsv` (one file per 1-hop metapath)
 - Example: `Drug_has_adverse_event_F_Disease.tsv` contains all 3-hop paths that predict that 1-hop
 
 **Options:**
 ```bash
-# Use custom file handle limit (default: 500)
-uv run python scripts/metapaths/group_by_onehop.py --max-open-files 1000
+# Run with different filter thresholds
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+    --min-count 100 --min-precision 0.01
 
-# Run in test mode (uses test_results directory)
-uv run python scripts/metapaths/group_by_onehop.py --test
+# Disable type/predicate exclusions
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+    --exclude-types "" --exclude-predicates ""
 ```
 
-**Time:** ~10-20 minutes for full dataset (45M lines)
+**Time:** ~1-2 hours (distributed across SLURM)
 
 **Output columns:**
 - Original: `3hop_metapath`, `3hop_count`, `1hop_metapath`, `1hop_count`, `overlap`, `total_possible`
@@ -186,31 +197,24 @@ If you need to regenerate all results (e.g., after algorithm changes), follow th
 ### Step 1: Clean Old Results
 
 ```bash
-# WARNING: This deletes ~22 GB of data
+# WARNING: This deletes all results
 # Optional: backup first if you want to compare old vs new results
-mkdir -p scripts/metapaths/old_results_backup
-mv scripts/metapaths/results scripts/metapaths/old_results_backup/results_$(date +%Y%m%d)
-mv scripts/metapaths/logs scripts/metapaths/old_results_backup/logs_$(date +%Y%m%d)
-mv scripts/metapaths/grouped_by_1hop scripts/metapaths/old_results_backup/grouped_$(date +%Y%m%d)
+mkdir -p old_results_backup
+mv results_3hop old_results_backup/results_$(date +%Y%m%d)
+mv logs_3hop old_results_backup/logs_$(date +%Y%m%d)
+mv grouped_by_results_3hop old_results_backup/grouped_$(date +%Y%m%d)
 
-# Clean out old results
-rm -rf scripts/metapaths/results/*
-rm -rf scripts/metapaths/logs/*
-rm -rf scripts/metapaths/grouped_by_1hop/*
-
-# Verify empty
-ls scripts/metapaths/results/ | wc -l      # Should show 0
-ls scripts/metapaths/logs/ | wc -l         # Should show 0
-ls scripts/metapaths/grouped_by_1hop/ | wc -l  # Should show 0
+# Or just delete everything
+rm -rf results_3hop logs_3hop logs_grouping_3hop grouped_by_results_3hop
 ```
 
 ### Step 2: Regenerate Manifest
 
 ```bash
-uv run python scripts/metapaths/prepare_analysis.py
+uv run python scripts/prepare_analysis.py --matrices-dir matrices --n-hops 3
 ```
 
-This creates a fresh `manifest.json` with all 2,879 jobs set to "pending".
+This creates a fresh `results_3hop/manifest.json` with all jobs set to "pending".
 
 **Time:** ~3-4 minutes (loads entire graph)
 
@@ -219,22 +223,18 @@ This creates a fresh `manifest.json` with all 2,879 jobs set to "pending".
 ```bash
 # Recommended: run in screen/tmux
 screen -S metapath_orchestrator
-uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 # Detach: Ctrl+A, then D
 ```
 
 **Time:** ~2-4 hours
 
-### Step 4: Merge Results
+### Step 4: Group Results
 
 ```bash
-uv run python scripts/metapaths/merge_results.py
-```
-
-### Step 5: Group Results
-
-```bash
-uv run python scripts/metapaths/group_by_onehop.py
+uv run python scripts/prepare_grouping.py --n-hops 3
+uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+    --min-count 10 --min-precision 0.001
 ```
 
 **Total time:** ~3-5 hours (mostly cluster compute time)
@@ -269,50 +269,47 @@ squeue -j <job_id>
 
 ```bash
 # Count completed jobs
-jq '[.[] | select(.status == "completed")] | length' scripts/metapaths/results/manifest.json
+jq '[.[] | select(.status == "completed")] | length' results_3hop/manifest.json
 
 # Count failed jobs
-jq '[.[] | select(.status == "failed")] | length' scripts/metapaths/results/manifest.json
+jq '[.[] | select(.status == "failed")] | length' results_3hop/manifest.json
 
 # List failed jobs with errors
 jq -r '.[] | select(.status == "failed") | "\(.)|error:\(.error_type)"' \
-  scripts/metapaths/results/manifest.json
+  results_3hop/manifest.json
 
 # Find jobs that needed high memory
 jq -r '.[] | select(.memory_tier > 250) | "\(.): \(.memory_tier)GB"' \
-  scripts/metapaths/results/manifest.json
+  results_3hop/manifest.json
 ```
 
 ### Check Individual Job Logs
 
-SLURM output files are in the current directory (e.g., `slurm-32368.out`):
+SLURM output files are in logs directories:
 
 ```bash
-# List recent log files
-ls -lth slurm-*.out | head -20
+# List recent analysis log files
+ls -lth logs_3hop/*.out | head -20
 
-# View specific job output
-tail -f slurm-32368.out
+# List recent grouping log files
+ls -lth logs_grouping_3hop/*.out | head -20
 
 # Search for errors
-grep -i error slurm-*.out
-
-# Check memory usage in logs
-grep "Mem:" slurm-32368.out
+grep -i error logs_3hop/*.out
 ```
 
 ### Check Result Files
 
 ```bash
 # Count generated result files
-ls scripts/metapaths/results/results_matrix1_*.tsv | wc -l
+ls results_3hop/results_matrix1_*.tsv | wc -l
 
 # List largest result files
-ls -lhS scripts/metapaths/results/results_matrix1_*.tsv | head -10
+ls -lhS results_3hop/results_matrix1_*.tsv | head -10
 
 # Check specific result
-head scripts/metapaths/results/results_matrix1_042.tsv
-wc -l scripts/metapaths/results/results_matrix1_042.tsv
+head results_3hop/results_matrix1_042.tsv
+wc -l results_3hop/results_matrix1_042.tsv
 ```
 
 ## Troubleshooting
@@ -335,10 +332,10 @@ wc -l scripts/metapaths/results/results_matrix1_042.tsv
 ```bash
 # Find OOM jobs in manifest
 jq -r '.[] | select(.error_type == "OOM_MAX_MEMORY")' \
-  scripts/metapaths/results/manifest.json
+  results_3hop/manifest.json
 ```
 
-**Solution:** Orchestrator auto-retries at higher memory (250GB → 500GB → 1TB). If job fails at 1TB, it's marked as permanently failed. These are rare and may need manual investigation.
+**Solution:** Orchestrator auto-retries at higher memory (180GB → 250GB → 500GB → 1TB → 1.5TB). If job fails at max tier, it's marked as permanently failed. These are rare and may need manual investigation.
 
 ### Problem: Job failed with non-OOM error
 
@@ -347,15 +344,15 @@ jq -r '.[] | select(.error_type == "OOM_MAX_MEMORY")' \
 **Check:**
 ```bash
 # View job error log
-cat slurm-<job_id>.out | tail -50
+cat logs_3hop/matrix1_042_mem*.out | tail -50
 
 # Check manifest for error type
-jq '.matrix1_042' scripts/metapaths/results/manifest.json
+jq '.matrix1_042' results_3hop/manifest.json
 ```
 
 **Solution:**
 - If code error: Fix analyze_hop_overlap.py and manually rerun
-- If cluster issue: Manually resubmit: `sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 42`
+- If cluster issue: Manually resubmit: `sbatch --mem=250G scripts/run_single_matrix1.sh 42 3`
 
 ### Problem: Orchestrator crashed
 
@@ -364,22 +361,22 @@ jq '.matrix1_042' scripts/metapaths/results/manifest.json
 **Solution:**
 ```bash
 # Restart orchestrator - it resumes from manifest
-uv run python scripts/metapaths/orchestrate_3hop_analysis.py
+uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 ```
 
 The orchestrator is stateless and restartable. It syncs with SLURM and manifest on startup.
 
 ### Problem: Missing result files after completion
 
-**Symptoms:** merge_results.py reports missing files
+**Symptoms:** Grouping jobs fail due to missing result files
 
 **Check:**
 ```bash
 # Find jobs that completed but have no output file
 for i in {0..2878}; do
   matrix_id=$(printf "matrix1_%03d" $i)
-  file="scripts/metapaths/results/results_${matrix_id}.tsv"
-  status=$(jq -r ".${matrix_id}.status" scripts/metapaths/results/manifest.json)
+  file="results_3hop/results_${matrix_id}.tsv"
+  status=$(jq -r ".${matrix_id}.status" results_3hop/manifest.json)
   if [ "$status" = "completed" ] && [ ! -f "$file" ]; then
     echo "Missing: $matrix_id (marked completed)"
   fi
@@ -396,47 +393,48 @@ done
 Test individual matrices before full run:
 
 ```bash
-# Submit single job
-sbatch --mem=250G scripts/metapaths/run_single_matrix1.sh 42
+# Submit single job (for 3-hop analysis)
+sbatch --mem=250G scripts/run_single_matrix1.sh 42 3
 
 # Submit with higher memory
-sbatch --mem=500G scripts/metapaths/run_single_matrix1.sh 42
+sbatch --mem=500G scripts/run_single_matrix1.sh 42 3
 
 # Check output
-tail -f slurm-<job_id>.out
+tail -f logs_3hop/matrix1_042_mem250.out
 
 # View results
-head scripts/metapaths/results/results_matrix1_042.tsv
+head results_3hop/results_matrix1_042.tsv
 ```
 
 ## File Structure
 
 ```
-scripts/metapaths/
-├── README.md                        # This file
-├── WORKFLOW.md                      # Workflow overview
-├── IMPLEMENTATION_PLAN.md           # Detailed design doc
+metapath-counts/
+├── docs/
+│   └── README.md                    # This file
 │
-├── prepare_analysis.py              # Step 1: Initialize
-├── orchestrate_3hop_analysis.py     # Step 2: Run jobs
-├── merge_results.py                 # Step 3: Merge results
-├── group_by_onehop.py               # Step 4: Group by 1-hop metapath
-├── run_single_matrix1.sh            # SLURM worker script
-├── analyze_hop_overlap.py          # Core analysis
+├── scripts/
+│   ├── prepare_analysis.py          # Step 1: Initialize analysis
+│   ├── orchestrate_hop_analysis.py  # Step 2: Run analysis jobs
+│   ├── prepare_grouping.py          # Step 3: Initialize grouping
+│   ├── orchestrate_grouping.py      # Step 4: Run grouping jobs
+│   ├── run_single_matrix1.sh        # SLURM worker (analysis)
+│   ├── group_single_onehop.sh       # SLURM worker (grouping)
+│   ├── group_single_onehop_worker.py
+│   └── analyze_hop_overlap.py       # Core analysis engine
 │
-├── results/                         # Raw output files (6.9 GB)
+├── results_3hop/                    # Analysis results
 │   ├── manifest.json                # Job tracking (live updates)
-│   ├── results_matrix1_000.tsv      # Per-job results (2,879 files)
-│   ├── results_matrix1_001.tsv
+│   ├── results_matrix1_000.tsv      # Per-job results
 │   ├── ...
-│   └── all_3hop_overlaps.tsv        # Final merged output (after merge)
+│   ├── aggregated_path_counts.json  # Precomputed counts (from prepare_grouping)
+│   └── type_node_counts.json        # Node counts per type
 │
-├── logs/                            # SLURM stdout/stderr (913 MB)
-│   ├── matrix1_000_mem250.out
-│   ├── matrix1_000_mem250.err
-│   └── ...
+├── logs_3hop/                       # SLURM logs (analysis)
 │
-└── grouped_by_1hop/                 # Grouped results (14 GB)
+├── logs_grouping_3hop/              # SLURM logs (grouping)
+│
+└── grouped_by_results_3hop/         # Grouped results
     ├── Drug_has_adverse_event_F_Disease.tsv
     ├── Drug_treats_F_Disease.tsv
     └── ...                          # One file per unique 1-hop metapath
@@ -637,7 +635,7 @@ A: Restart orchestrator after maintenance. It detects incomplete jobs and resubm
 A: Yes. Update manifest status to "pending" and restart orchestrator, or use manual submission.
 
 **Q: How do I rerun everything from scratch?**
-A: See the "Complete Rerun from Scratch" section above for detailed instructions. Short version: clean results/logs/grouped directories, run prepare_analysis.py, then orchestrate_3hop_analysis.py, merge_results.py, and group_by_onehop.py.
+A: See the "Complete Rerun from Scratch" section above for detailed instructions. Short version: clean results/logs/grouped directories, run prepare_analysis.py, orchestrate_hop_analysis.py, prepare_grouping.py, and orchestrate_grouping.py.
 
 **Q: Why max 1 pending job?**
 A: To be a good cluster citizen and avoid filling the queue. Running jobs have no limit.
@@ -645,7 +643,7 @@ A: To be a good cluster citizen and avoid filling the queue. Running jobs have n
 ## Support
 
 For issues or questions:
-1. Check logs (SLURM output files: `slurm-*.out`)
-2. Check manifest status: `jq '.matrix1_XXX' scripts/metapaths/results/manifest.json`
+1. Check logs (SLURM output files in `logs_*hop/` directories)
+2. Check manifest status: `jq '.matrix1_XXX' results_3hop/manifest.json`
 3. Review this README troubleshooting section
 4. Contact: Chris Bizon

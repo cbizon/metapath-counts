@@ -167,6 +167,38 @@ def canonicalize_row(nhop: str, onehop: str) -> Tuple[str, str]:
     return reverse_metapath(nhop), reverse_metapath(onehop)
 
 
+def should_exclude_metapath(metapath: str, excluded_types: set, excluded_predicates: set) -> bool:
+    """
+    Check if a metapath should be excluded based on its types or predicates.
+
+    Args:
+        metapath: The metapath string
+        excluded_types: Set of node types to exclude
+        excluded_predicates: Set of predicates to exclude
+
+    Returns:
+        True if the metapath contains any excluded type or predicate
+    """
+    if not excluded_types and not excluded_predicates:
+        return False
+
+    nodes, predicates, _ = parse_metapath(metapath)
+
+    # Check for excluded types
+    if excluded_types:
+        for node in nodes:
+            if node in excluded_types:
+                return True
+
+    # Check for excluded predicates
+    if excluded_predicates:
+        for predicate in predicates:
+            if predicate in excluded_predicates:
+                return True
+
+    return False
+
+
 def safe_filename(metapath: str) -> str:
     """Convert metapath to safe filename."""
     # Replace | with _ and handle special characters
@@ -363,7 +395,19 @@ def main():
                         help='Perform hierarchical aggregation (expand pseudo-types and aggregate to ancestors). NOTE: Aggregation is now done during SLURM jobs by default, so this is rarely needed.')
     parser.add_argument('--explicit-only', action='store_true',
                         help='DEPRECATED: Aggregation is now off by default')
+    parser.add_argument('--min-count', type=int, default=0,
+                        help='Minimum N-hop count (predictor count) to include in output (default: 0, no filtering)')
+    parser.add_argument('--min-precision', type=float, default=0.0,
+                        help='Minimum precision to include in output (default: 0, no filtering)')
+    parser.add_argument('--exclude-types', type=str, default='Entity,ThingWithTaxon',
+                        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)')
+    parser.add_argument('--exclude-predicates', type=str, default='related_to_at_instance_level,related_to_at_concept_level',
+                        help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)')
     args = parser.parse_args()
+
+    # Build exclusion sets
+    excluded_types = set(t.strip() for t in args.exclude_types.split(',') if t.strip())
+    excluded_predicates = set(p.strip() for p in args.exclude_predicates.split(',') if p.strip())
 
     # Determine aggregation mode
     # NEW DEFAULT: aggregation is OFF (done during SLURM jobs)
@@ -435,10 +479,22 @@ def main():
     # Initialize file handle manager
     print(f"Max open file handles: {args.max_open_files}")
     print(f"Hierarchical aggregation: {'ENABLED (rare, results should already be aggregated)' if do_aggregation else 'DISABLED (default, aggregation done in SLURM jobs)'}")
+    if args.min_count > 0:
+        print(f"Minimum predictor count filter: {args.min_count:,}")
+    if args.min_precision > 0:
+        print(f"Minimum precision filter: {args.min_precision}")
+    if excluded_types:
+        print(f"Excluded node types: {sorted(excluded_types)}")
+    if excluded_predicates:
+        print(f"Excluded predicates: {sorted(excluded_predicates)}")
     file_manager = FileHandleManager(output_dir, enhanced_header, max_open=args.max_open_files)
 
     # Statistics
     total_lines = 0
+    lines_written = 0
+    lines_filtered_count = 0
+    lines_filtered_precision = 0
+    lines_filtered_excluded = 0
     files_processed = 0
     unique_1hop_metapaths = set()
 
@@ -494,11 +550,27 @@ def main():
             if files_processed % 100000 == 0:
                 print(f"  Processed {files_processed:,}/{len(aggregated_results):,} aggregated rows")
 
+            # Filter by excluded types/predicates
+            if should_exclude_metapath(nhop_path, excluded_types, excluded_predicates) or \
+               should_exclude_metapath(onehop_path, excluded_types, excluded_predicates):
+                lines_filtered_excluded += 1
+                continue
+
+            # Filter by minimum count
+            if nhop_count < args.min_count:
+                lines_filtered_count += 1
+                continue
+
             # Canonicalize row
             nhop_path, onehop_path = canonicalize_row(nhop_path, onehop_path)
 
             # Calculate metrics
             metrics = calculate_metrics(nhop_count, onehop_count, overlap, total_possible, full_metrics=True)
+
+            # Filter by minimum precision
+            if metrics['Precision'] < args.min_precision:
+                lines_filtered_precision += 1
+                continue
 
             # Track unique 1-hop metapaths
             unique_1hop_metapaths.add(onehop_path)
@@ -534,6 +606,7 @@ def main():
                 'inf' if math.isinf(metrics['NLR']) else f"{metrics['NLR']:.6f}"
             ])
             handle.write(output_line + '\n')
+            lines_written += 1
 
         # Close file handles
         file_manager.close_all()
@@ -574,11 +647,27 @@ def main():
                         overlap = int(parts[4])
                         total_possible = int(parts[5])
 
+                        # Filter by excluded types/predicates
+                        if should_exclude_metapath(threehop_metapath, excluded_types, excluded_predicates) or \
+                           should_exclude_metapath(onehop_metapath, excluded_types, excluded_predicates):
+                            lines_filtered_excluded += 1
+                            continue
+
+                        # Filter by minimum count
+                        if threehop_count < args.min_count:
+                            lines_filtered_count += 1
+                            continue
+
                         # Canonicalize row: reverse BOTH metapaths if needed to match canonical type pair direction
                         threehop_metapath, onehop_metapath = canonicalize_row(threehop_metapath, onehop_metapath)
 
                         # Calculate metrics
                         metrics = calculate_metrics(threehop_count, onehop_count, overlap, total_possible, full_metrics=True)
+
+                        # Filter by minimum precision
+                        if metrics['Precision'] < args.min_precision:
+                            lines_filtered_precision += 1
+                            continue
 
                         # Track unique 1-hop metapaths
                         unique_1hop_metapaths.add(onehop_metapath)
@@ -614,9 +703,17 @@ def main():
                             'inf' if math.isinf(metrics['NLR']) else f"{metrics['NLR']:.6f}"
                         ])
                         handle.write(output_line + '\n')
+                        lines_written += 1
 
             print(f"\nProcessing complete!")
             print(f"  Total lines processed: {total_lines:,}")
+            print(f"  Lines written: {lines_written:,}")
+            if lines_filtered_excluded > 0:
+                print(f"  Lines filtered (excluded types/predicates): {lines_filtered_excluded:,}")
+            if lines_filtered_count > 0:
+                print(f"  Lines filtered (count < {args.min_count}): {lines_filtered_count:,}")
+            if lines_filtered_precision > 0:
+                print(f"  Lines filtered (precision < {args.min_precision}): {lines_filtered_precision:,}")
             print(f"  Unique 1-hop metapaths: {len(unique_1hop_metapaths)}")
             print(f"  Currently open file handles: {len(file_manager.handles)}")
             print(f"  Output files written to: {output_dir}")
@@ -628,6 +725,13 @@ def main():
     # Final summary
     print(f"\nProcessing complete!")
     print(f"  Mode: {'Aggregated' if do_aggregation else 'Explicit only'}")
+    print(f"  Lines written: {lines_written:,}")
+    if lines_filtered_excluded > 0:
+        print(f"  Lines filtered (excluded types/predicates): {lines_filtered_excluded:,}")
+    if lines_filtered_count > 0:
+        print(f"  Lines filtered (count < {args.min_count}): {lines_filtered_count:,}")
+    if lines_filtered_precision > 0:
+        print(f"  Lines filtered (precision < {args.min_precision}): {lines_filtered_precision:,}")
     print(f"  Unique 1-hop metapaths: {len(unique_1hop_metapaths)}")
     print(f"  Output files written to: {output_dir}")
 
