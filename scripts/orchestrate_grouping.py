@@ -98,7 +98,10 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
     return result_files
 
 
-def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index):
+def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
+                        min_count=0, min_precision=0.0,
+                        exclude_types="Entity,ThingWithTaxon",
+                        exclude_predicates="related_to_at_instance_level,related_to_at_concept_level"):
     """Submit a SLURM job for one type pair.
 
     Args:
@@ -108,6 +111,10 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index):
         memory_gb: Memory to allocate in GB
         n_hops: Number of hops
         job_index: Job index for logging
+        min_count: Minimum N-hop count filter
+        min_precision: Minimum precision filter
+        exclude_types: Comma-separated types to exclude
+        exclude_predicates: Comma-separated predicates to exclude
 
     Returns:
         Job ID string or None if submission failed
@@ -132,7 +139,11 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index):
         type1,
         type2,
         file_list_path,
-        str(n_hops)
+        str(n_hops),
+        str(min_count),
+        str(min_precision),
+        exclude_types,
+        exclude_predicates
     ]
 
     return submit_slurm_job(cmd, job_name=job_name)
@@ -150,7 +161,9 @@ def print_status_summary(manifest, running_jobs):
     print(f"SLURM queue: {len(running_jobs)} total jobs")
 
 
-def orchestrate(n_hops):
+def orchestrate(n_hops, min_count=10, min_precision=0.001,
+                exclude_types="Entity,ThingWithTaxon",
+                exclude_predicates="related_to_at_instance_level,related_to_at_concept_level"):
     """Main orchestration loop."""
     manifest_path = get_grouping_manifest_path(n_hops)
 
@@ -160,6 +173,9 @@ def orchestrate(n_hops):
     print(f"Worker script: {WORKER_SCRIPT}")
     print(f"Poll interval: {POLL_INTERVAL}s")
     print(f"Max concurrent: {MAX_CONCURRENT_JOBS}")
+    print(f"Filters: min_count={min_count}, min_precision={min_precision}")
+    print(f"Excluded types: {exclude_types}")
+    print(f"Excluded predicates: {exclude_predicates}")
     print()
 
     # Load manifests
@@ -289,7 +305,11 @@ def orchestrate(n_hops):
                 file_list = typepair_to_files.get(typepair_key, [])
 
                 print(f"Submitting {job_key} ({type1}, {type2}) with {memory_tier}GB ({len(file_list)} files, attempt {data['attempts'] + 1})...")
-                job_id = submit_grouping_job(type1, type2, file_list, memory_tier, n_hops, job_index)
+                job_id = submit_grouping_job(
+                    type1, type2, file_list, memory_tier, n_hops, job_index,
+                    min_count=min_count, min_precision=min_precision,
+                    exclude_types=exclude_types, exclude_predicates=exclude_predicates
+                )
 
                 if job_id:
                     print(f"  → Job ID: {job_id}")
@@ -343,11 +363,41 @@ def main():
         required=True,
         help='Number of hops (1, 2, or 3)'
     )
+    parser.add_argument(
+        '--min-count',
+        type=int,
+        default=10,
+        help='Minimum N-hop count to include in output (default: 10)'
+    )
+    parser.add_argument(
+        '--min-precision',
+        type=float,
+        default=0.001,
+        help='Minimum precision to include in output (default: 0.001)'
+    )
+    parser.add_argument(
+        '--exclude-types',
+        type=str,
+        default='Entity,ThingWithTaxon',
+        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)'
+    )
+    parser.add_argument(
+        '--exclude-predicates',
+        type=str,
+        default='related_to_at_instance_level,related_to_at_concept_level',
+        help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)'
+    )
 
     args = parser.parse_args()
 
     try:
-        orchestrate(n_hops=args.n_hops)
+        orchestrate(
+            n_hops=args.n_hops,
+            min_count=args.min_count,
+            min_precision=args.min_precision,
+            exclude_types=args.exclude_types,
+            exclude_predicates=args.exclude_predicates
+        )
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")
         print("You can restart later - it will resume from the manifest.")

@@ -128,8 +128,38 @@ def check_type_match(onehop_path, type1, type2):
     return match_forward or match_reverse
 
 
+def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
+    """Check if a metapath should be excluded based on types or predicates."""
+    if not excluded_types and not excluded_predicates:
+        return False
+
+    parts = metapath.split('|')
+    # Extract nodes and predicates from metapath
+    # Format: Node|pred|dir|Node|pred|dir|...
+    nodes = []
+    predicates = []
+    for i, part in enumerate(parts):
+        if i % 3 == 0:  # Node positions: 0, 3, 6, ...
+            nodes.append(part)
+        elif i % 3 == 1:  # Predicate positions: 1, 4, 7, ...
+            predicates.append(part)
+
+    if excluded_types:
+        for node in nodes:
+            if node in excluded_types:
+                return True
+
+    if excluded_predicates:
+        for pred in predicates:
+            if pred in excluded_predicates:
+                return True
+
+    return False
+
+
 def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
-                    aggregated_counts=None, type_node_counts=None):
+                    aggregated_counts=None, type_node_counts=None,
+                    min_count=0, min_precision=0.0, excluded_types=None, excluded_predicates=None):
     """Group all N-hop results for 1-hop metapaths between a type pair.
 
     Args:
@@ -141,9 +171,24 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         aggregate: Whether to do hierarchical aggregation (default: True)
         aggregated_counts: Dict mapping aggregated path -> global count (from prepare_grouping.py)
         type_node_counts: Dict mapping type name -> node count (for total_possible calculation)
+        min_count: Minimum N-hop count to include (default: 0)
+        min_precision: Minimum precision to include (default: 0.0)
+        excluded_types: Set of node types to exclude
+        excluded_predicates: Set of predicates to exclude
     """
+    excluded_types = excluded_types or set()
+    excluded_predicates = excluded_predicates or set()
+
     print(f"Grouping for type pair: ({type1}, {type2})")
     print(f"Aggregation: {'enabled' if aggregate else 'disabled'}")
+    if min_count > 0:
+        print(f"Min count filter: {min_count}")
+    if min_precision > 0:
+        print(f"Min precision filter: {min_precision}")
+    if excluded_types:
+        print(f"Excluded types: {sorted(excluded_types)}")
+    if excluded_predicates:
+        print(f"Excluded predicates: {sorted(excluded_predicates)}")
     if aggregated_counts:
         print(f"Using precomputed counts: {len(aggregated_counts)} paths")
     if type_node_counts:
@@ -250,11 +295,20 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             # No aggregation - just copy data
             aggregated = dict(nhop_data)
 
+        # Check if 1-hop should be excluded
+        if should_exclude_metapath(onehop_path, excluded_types, excluded_predicates):
+            print(f"  Skipping (excluded type/predicate in 1-hop)")
+            continue
+
         # Write output file for this 1-hop
         safe_filename = onehop_path.replace('|', '_').replace(':', '_').replace(' ', '_')
         output_file = f"{output_dir}/{safe_filename}.tsv"
 
-        print(f"  Writing {len(aggregated)} rows to {output_file}...")
+        # Filter and count rows
+        rows_written = 0
+        rows_filtered_excluded = 0
+        rows_filtered_count = 0
+        rows_filtered_precision = 0
 
         with open(output_file, 'w') as out:
             # Header
@@ -265,18 +319,38 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             sorted_items = sorted(aggregated.items(), key=lambda x: x[1][0], reverse=True)
 
             for nhop_path, (overlap, nhop_count) in sorted_items:
-                # nhop_count is now properly aggregated from explicit results, not looked up
+                # Filter by excluded types/predicates
+                if should_exclude_metapath(nhop_path, excluded_types, excluded_predicates):
+                    rows_filtered_excluded += 1
+                    continue
+
+                # Filter by minimum count
+                if nhop_count < min_count:
+                    rows_filtered_count += 1
+                    continue
 
                 # Calculate metrics using type-pair total_possible
                 metrics = calculate_metrics(nhop_count, onehop_count_global, overlap, total_possible_for_pair)
+
+                # Filter by minimum precision
+                if metrics['precision'] < min_precision:
+                    rows_filtered_precision += 1
+                    continue
 
                 # Write row
                 out.write(f"{nhop_path}\t{nhop_count}\t{overlap}\t{total_possible_for_pair}\t")
                 out.write(f"{metrics['precision']:.6f}\t{metrics['recall']:.6f}\t")
                 out.write(f"{metrics['f1']:.6f}\t{metrics['mcc']:.6f}\t")
                 out.write(f"{metrics['specificity']:.6f}\t{metrics['npv']:.6f}\n")
+                rows_written += 1
 
-        print(f"  ✓ Output written")
+        print(f"  Written {rows_written} rows to {output_file}")
+        if rows_filtered_excluded > 0:
+            print(f"    Filtered (excluded): {rows_filtered_excluded}")
+        if rows_filtered_count > 0:
+            print(f"    Filtered (count < {min_count}): {rows_filtered_count}")
+        if rows_filtered_precision > 0:
+            print(f"    Filtered (precision < {min_precision}): {rows_filtered_precision}")
 
     print(f"\n✓ All 1-hop metapaths processed for type pair ({type1}, {type2})")
 
@@ -332,8 +406,36 @@ def main():
         required=True,
         help='Path to type_node_counts.json (from prepare_grouping.py)'
     )
+    parser.add_argument(
+        '--min-count',
+        type=int,
+        default=0,
+        help='Minimum N-hop count to include in output (default: 0)'
+    )
+    parser.add_argument(
+        '--min-precision',
+        type=float,
+        default=0.0,
+        help='Minimum precision to include in output (default: 0)'
+    )
+    parser.add_argument(
+        '--exclude-types',
+        type=str,
+        default='Entity,ThingWithTaxon',
+        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)'
+    )
+    parser.add_argument(
+        '--exclude-predicates',
+        type=str,
+        default='related_to_at_instance_level,related_to_at_concept_level',
+        help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)'
+    )
 
     args = parser.parse_args()
+
+    # Build exclusion sets
+    excluded_types = set(t.strip() for t in args.exclude_types.split(',') if t.strip())
+    excluded_predicates = set(p.strip() for p in args.exclude_predicates.split(',') if p.strip())
 
     # Read file list from file
     with open(args.file_list, 'r') as f:
@@ -351,7 +453,11 @@ def main():
         n_hops=args.n_hops,
         aggregate=not args.explicit_only,
         aggregated_counts=aggregated_counts,
-        type_node_counts=type_node_counts
+        type_node_counts=type_node_counts,
+        min_count=args.min_count,
+        min_precision=args.min_precision,
+        excluded_types=excluded_types,
+        excluded_predicates=excluded_predicates
     )
 
 
