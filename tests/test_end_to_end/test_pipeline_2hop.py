@@ -33,9 +33,11 @@ class Test2HopPrecomputedCounts:
         nhop_counts = pipeline_2hop["aggregated_nhop_counts"]
 
         # Gene_A --regulates--> Gene_B --affects--> Disease_P
-        # This is one explicit 2-hop path
-        path = "Gene|regulates|F|Gene|affects|F|Disease"
-        assert path in nhop_counts, f"Expected path not found: {path}"
+        # This 2-hop path gets canonicalized: "Disease" < "Gene" alphabetically
+        # Original: Gene|regulates|F|Gene|affects|F|Disease
+        # Canonical (reversed): Disease|affects|R|Gene|regulates|R|Gene
+        path = "Disease|affects|R|Gene|regulates|R|Gene"
+        assert path in nhop_counts, f"Expected canonical path not found: {path}"
         assert nhop_counts[path] >= 1
 
     def test_aggregated_2hop_includes_contributions(self, pipeline_2hop):
@@ -138,7 +140,12 @@ class Test2HopMetrics:
                     )
 
     def test_recall_with_overlap(self, pipeline_2hop):
-        """When overlap > 0, recall should be > 0."""
+        """When overlap > 0, recall should be > 0.
+
+        Note: This test may fail if prepare_grouping.py didn't compute counts for all
+        target 1-hop paths. The root cause is when onehop_count=0 but overlap>0,
+        which indicates the target path is missing from precomputed counts.
+        """
         grouped_results = pipeline_2hop["grouped_results"]
 
         for filename, rows in grouped_results.items():
@@ -148,7 +155,9 @@ class Test2HopMetrics:
 
                 if overlap > 0:
                     assert recall > 0, (
-                        f"overlap={overlap} but recall={recall}"
+                        f"overlap={overlap} but recall={recall} in file {filename}. "
+                        f"This usually means the target 1-hop path has onehop_count=0. "
+                        f"Run prepare_grouping.py to fix precomputed counts."
                     )
 
 

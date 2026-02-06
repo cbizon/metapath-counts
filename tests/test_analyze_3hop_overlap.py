@@ -503,8 +503,8 @@ class TestAggregateExplicitResults:
                 nhop, nhop_count, onehop, onehop_count, overlap, total = parts
                 results[(nhop, onehop)] = (int(nhop_count), int(onehop_count), int(overlap), int(total))
 
-            # Original should be preserved
-            assert ("SmallMolecule|affects|F|Gene", "SmallMolecule|affects|F|Gene") in results
+            # Canonical form should be present (Gene < SmallMolecule alphabetically)
+            assert ("Gene|affects|R|SmallMolecule", "Gene|affects|R|SmallMolecule") in results
 
             # ChemicalEntity (ancestor of SmallMolecule) should appear
             chem_variants = [k for k in results.keys() if "ChemicalEntity" in k[0] or "ChemicalEntity" in k[1]]
@@ -528,17 +528,19 @@ class TestAggregateExplicitResults:
             with open(aggregated_file) as f:
                 lines = f.readlines()[1:]
 
-            # Find the original row
+            # Find the canonical form row (Disease < Gene alphabetically)
+            canonical_nhop = "Disease|affects|R|Gene"
+            canonical_onehop = "Disease|affects|R|Gene"
             for line in lines:
                 parts = line.strip().split('\t')
-                if parts[0] == "Gene|affects|F|Disease" and parts[2] == "Gene|affects|F|Disease":
+                if parts[0] == canonical_nhop and parts[2] == canonical_onehop:
                     assert int(parts[1]) == 200  # nhop_count preserved
                     assert int(parts[3]) == 100  # onehop_count preserved
                     assert int(parts[4]) == 50   # overlap preserved
                     assert int(parts[5]) == 5000 # total_possible preserved
                     break
             else:
-                pytest.fail("Original result not found in aggregated output")
+                pytest.fail(f"Canonical result {canonical_nhop} not found in aggregated output")
 
     def test_aggregate_multiple_results_sum_correctly(self):
         """Test that multiple explicit results sum correctly when aggregated."""

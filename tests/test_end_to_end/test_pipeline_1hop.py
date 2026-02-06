@@ -50,55 +50,76 @@ class TestExplicit1HopCounts:
     def test_affects_disease_count(self, pipeline_1hop):
         """Gene affects Disease aggregated count should be 4 (3 explicit + 1 pseudo-type)."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Check either direction - duplicate elimination picks one
-        forward = nhop_counts.get("Gene|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene", 0)
-        # Aggregated: 3 explicit Gene + 1 from Gene+Protein = 4
-        count = max(forward, reverse)
+        # Alphabetically: "Disease" < "Gene", so canonical is reverse direction
+        canonical = "Disease|affects|R|Gene"
+        wrong_direction = "Gene|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         assert count == 4, (
-            f"Expected count=4 (3 explicit + 1 pseudo-type) for Gene-affects-Disease, "
-            f"got forward={forward}, reverse={reverse}"
+            f"Expected count=4 (3 explicit + 1 pseudo-type) for {canonical}, got {count}"
+        )
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_pseudo_type_affects_count(self, pipeline_1hop):
         """Gene+Protein|affects|F|Disease should have count=1."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Gene+Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene+Protein", 0)
-        assert forward == 1 or reverse == 1, (
-            f"Expected count=1 for Gene+Protein-affects-Disease, got forward={forward}, reverse={reverse}"
+        # Alphabetically: "Disease" < "Gene+Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Gene+Protein"
+        wrong_direction = "Gene+Protein|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 1, f"Expected count=1 for {canonical}, got {count}"
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_protein_affects_count(self, pipeline_1hop):
         """Protein affects Disease aggregated count should be 2 (1 explicit + 1 pseudo-type)."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Protein", 0)
-        # Aggregated: 1 explicit Protein + 1 from Gene+Protein = 2
-        count = max(forward, reverse)
+        # Alphabetically: "Disease" < "Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Protein"
+        wrong_direction = "Protein|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         assert count == 2, (
-            f"Expected count=2 (1 explicit + 1 pseudo-type), got forward={forward}, reverse={reverse}"
+            f"Expected count=2 (1 explicit + 1 pseudo-type) for {canonical}, got {count}"
+        )
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_treats_count(self, pipeline_1hop):
         """SmallMolecule|treats|F|Disease should have count=2."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("SmallMolecule|treats|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|treats|R|SmallMolecule", 0)
-        assert forward == 2 or reverse == 2, (
-            f"Expected count=2 for SmallMolecule-treats-Disease, got forward={forward}, reverse={reverse}"
+        # Alphabetically: "Disease" < "SmallMolecule", so canonical is reverse direction
+        canonical = "Disease|treats|R|SmallMolecule"
+        wrong_direction = "SmallMolecule|treats|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 2, f"Expected count=2 for {canonical}, got {count}"
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_gene_regulates_gene_count(self, pipeline_1hop):
-        """Gene|regulates|F|Gene should have count=1."""
+        """Gene|regulates|Gene should have count=1 in both directions."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # For same-type edges, check both directions
-        forward = nhop_counts.get("Gene|regulates|F|Gene", 0)
-        reverse = nhop_counts.get("Gene|regulates|R|Gene", 0)
-        # Each direction should have count 1
-        assert forward == 1 or reverse == 1, (
-            f"Expected count=1 for Gene-regulates-Gene"
-        )
+        # For same-type edges: "Gene" == "Gene", both directions are computed
+        # Forward: Gene_A -> Gene_B
+        forward = "Gene|regulates|F|Gene"
+        # Reverse: Gene_B <- Gene_A (equivalently, looking for Gene_X -> Gene_Y in reverse)
+        reverse = "Gene|regulates|R|Gene"
+
+        forward_count = nhop_counts.get(forward, 0)
+        reverse_count = nhop_counts.get(reverse, 0)
+        assert forward_count == 1, f"Expected count=1 for {forward}, got {forward_count}"
+        assert reverse_count == 1, f"Expected count=1 for {reverse}, got {reverse_count}"
 
 
 class TestAggregated1HopCounts:
@@ -111,43 +132,41 @@ class TestAggregated1HopCounts:
     def test_pseudo_type_contributes_to_gene(self, pipeline_1hop):
         """Gene aggregated affects count should include pseudo-type contribution."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Check either direction
-        forward = nhop_counts.get("Gene|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene", 0)
-        # Aggregated: 3 explicit + 1 from Gene+Protein = 4
-        count = max(forward, reverse)
-        assert count == 4, f"Expected 4 (3 explicit + 1 pseudo-type), got {count}"
+        # Alphabetically: "Disease" < "Gene", so canonical is reverse direction
+        canonical = "Disease|affects|R|Gene"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 4, f"Expected 4 (3 explicit + 1 pseudo-type) for {canonical}, got {count}"
 
     def test_pseudo_type_contributes_to_protein(self, pipeline_1hop):
         """Protein aggregated affects count should include pseudo-type contribution."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Protein", 0)
-        # Aggregated: 1 explicit + 1 from Gene+Protein = 2
-        count = max(forward, reverse)
-        assert count == 2, f"Expected 2 (1 explicit + 1 pseudo-type), got {count}"
+        # Alphabetically: "Disease" < "Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Protein"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 2, f"Expected 2 (1 explicit + 1 pseudo-type) for {canonical}, got {count}"
 
     def test_biological_entity_aggregation(self, pipeline_1hop):
         """BiologicalEntity aggregated should sum all biological entity affects."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Try various combinations of direction
-        count = max(
-            nhop_counts.get("BiologicalEntity|affects|F|Disease", 0),
-            nhop_counts.get("Disease|affects|R|BiologicalEntity", 0),
-            nhop_counts.get("BiologicalEntity|affects|F|DiseaseOrPhenotypicFeature", 0),
-            nhop_counts.get("DiseaseOrPhenotypicFeature|affects|R|BiologicalEntity", 0),
-        )
+        # Alphabetically: "BiologicalEntity" < "Disease" (B < D), so canonical is forward direction
+        canonical = "BiologicalEntity|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         # Gene(3) + Protein(1) + Gene+Protein(1) = 5
-        assert count == 5, f"Expected 5 for BiologicalEntity affects, got {count}"
+        assert count == 5, f"Expected 5 for {canonical}, got {count}"
 
     def test_chemical_entity_aggregation(self, pipeline_1hop):
         """ChemicalEntity aggregated treats count should equal SmallMolecule count."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("ChemicalEntity|treats|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|treats|R|ChemicalEntity", 0)
+        # Alphabetically: "ChemicalEntity" < "Disease" (C < D), so canonical is forward direction
+        # (Re-canonicalized from the explicit Disease|treats|R|SmallMolecule)
+        canonical = "ChemicalEntity|treats|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         # SmallMolecule is only child of ChemicalEntity in our graph
-        count = max(forward, reverse)
-        assert count == 2, f"Expected 2 for ChemicalEntity treats, got {count}"
+        assert count == 2, f"Expected 2 for {canonical}, got {count}"
 
 
 class TestNoPseudoTypesInOutput:

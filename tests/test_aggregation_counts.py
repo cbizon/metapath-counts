@@ -81,8 +81,8 @@ class TestNhopCountNotMultiplied:
         """Verify expand_metapath_with_hierarchy produces expected variants."""
         variants = expand_metapath_with_hierarchy("Gene|affects|F|Disease")
 
-        # Should include the original
-        assert "Gene|affects|F|Disease" in variants
+        # Should include the canonical form (Disease < Gene alphabetically)
+        assert "Disease|affects|R|Gene" in variants
 
         # Should include ancestors
         assert any("Entity" in v for v in variants)
@@ -114,13 +114,13 @@ class TestPrecomputedCountsLogic:
             for variant in variants:
                 aggregated_counts[variant] += count
 
-        # The explicit paths should have their exact counts
-        assert aggregated_counts["Gene|affects|F|Disease"] == 1000
-        assert aggregated_counts["SmallMolecule|treats|F|Disease"] == 500
+        # The canonical paths should have their exact counts
+        assert aggregated_counts["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated_counts["Disease|treats|R|SmallMolecule"] == 500  # Disease < SmallMolecule
 
-        # Entity|related_to|F|Entity should sum BOTH (1000 + 500 = 1500)
-        # because both paths expand to this ancestor
-        entity_key = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should sum BOTH (1000 + 500 = 1500)
+        # because both paths expand to this ancestor (related_to is symmetric, uses direction A)
+        entity_key = "Entity|related_to|A|Entity"
         if entity_key in aggregated_counts:
             assert aggregated_counts[entity_key] == 1500
 
@@ -313,15 +313,15 @@ class TestHierarchicalExpansionCounting:
             for v in variants:
                 aggregated[v] += count
 
-        # Entity|related_to|F|Entity should be 1000 + 500 = 1500
-        # (assuming both expand to this - they should)
-        entity_variant = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should be 1000 + 500 = 1500
+        # (related_to is symmetric, uses direction A)
+        entity_variant = "Entity|related_to|A|Entity"
         if entity_variant in aggregated:
             assert aggregated[entity_variant] == 1500
 
-        # Each original should keep its count
-        assert aggregated["Gene|affects|F|Disease"] == 1000
-        assert aggregated["SmallMolecule|treats|F|Disease"] == 500
+        # Each original (in canonical form) should keep its count
+        assert aggregated["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated["Disease|treats|R|SmallMolecule"] == 500  # Disease < SmallMolecule
 
 
 class TestRealWorldScenario:
@@ -374,12 +374,13 @@ class TestRealWorldScenario:
             for v in variants:
                 aggregated[v] += count
 
-        # Each original keeps its count
-        assert aggregated["Gene|affects|F|Disease"] == 1000
-        assert aggregated["Gene|treats|F|Disease"] == 2000
+        # Each original (in canonical form) keeps its count
+        assert aggregated["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated["Disease|treats|R|Gene"] == 2000  # Disease < Gene
 
-        # Entity|related_to|F|Entity should be sum of all: 1000+2000+3000+4000 = 10000
-        entity_key = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should be sum of all: 1000+2000+3000+4000 = 10000
+        # (related_to is symmetric, uses direction A)
+        entity_key = "Entity|related_to|A|Entity"
         if entity_key in aggregated:
             # Note: might not be exactly 10000 if not all expand to this
             # but it should be the sum of those that do
@@ -429,9 +430,9 @@ class TestPrepareGroupingIntegration:
             # Should have found paths (not empty due to missing direction)
             assert len(counts) > 0, "No paths found - direction field handling broken"
 
-            # Should have the explicit paths with F direction
-            assert "SmallMolecule|treats|F|Disease" in counts
-            assert "Gene|affects|F|Disease" in counts
+            # Should have the explicit paths (in canonical form)
+            assert "Disease|treats|R|SmallMolecule" in counts  # Disease < SmallMolecule
+            assert "Disease|affects|R|Gene" in counts  # Disease < Gene
 
             # Should have hierarchical variants
             assert "ChemicalEntity|treats|F|Disease" in counts
@@ -480,10 +481,10 @@ class TestHierarchicalTypePairExtraction:
         explicit_path = "SmallMolecule|treats|F|Disease"
         variants = expand_metapath_with_hierarchy(explicit_path)
 
-        # Should include the hierarchical variant
-        assert "ChemicalEntity|treats|F|Disease" in variants
-        assert "SmallMolecule|treats|F|DiseaseOrPhenotypicFeature" in variants
-        assert "ChemicalEntity|treats|F|DiseaseOrPhenotypicFeature" in variants
+        # Should include the hierarchical variants (all in canonical form)
+        assert "ChemicalEntity|treats|F|Disease" in variants  # C < D, stays forward
+        assert "DiseaseOrPhenotypicFeature|treats|R|SmallMolecule" in variants  # D < S, reverse
+        assert "ChemicalEntity|treats|F|DiseaseOrPhenotypicFeature" in variants  # C < D, forward
 
     def test_type_pairs_from_aggregated_include_hierarchical(self):
         """Type pairs extracted from aggregated paths should include hierarchical pairs."""

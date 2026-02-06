@@ -96,6 +96,45 @@ def build_metapath(nodes: List[str], predicates: List[str], directions: List[str
     return '|'.join(result)
 
 
+def canonicalize_metapath(nodes: List[str], predicates: List[str], directions: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Ensure metapath is in canonical form based on alphabetical ordering of endpoint types.
+
+    Canonical form: first_type <= last_type (alphabetically).
+    If not in canonical form, reverses the path and flips directions.
+
+    Args:
+        nodes: List of node types
+        predicates: List of predicate names
+        directions: List of directions (F, R, or A)
+
+    Returns:
+        Tuple of (nodes, predicates, directions) in canonical form
+    """
+    first_type = nodes[0]
+    last_type = nodes[-1]
+
+    if first_type <= last_type:
+        # Already canonical
+        return nodes, predicates, directions
+
+    # Not canonical - reverse the path
+    reversed_nodes = list(reversed(nodes))
+    reversed_predicates = list(reversed(predicates))
+
+    # Flip directions: F <-> R, A stays A
+    flipped_directions = []
+    for d in reversed(directions):
+        if d == 'F':
+            flipped_directions.append('R')
+        elif d == 'R':
+            flipped_directions.append('F')
+        else:  # 'A' for symmetric predicates
+            flipped_directions.append('A')
+
+    return reversed_nodes, reversed_predicates, flipped_directions
+
+
 def get_type_variants(type_name: str, include_self: bool = True) -> List[str]:
     """
     Get all type variants for hierarchical aggregation.
@@ -211,8 +250,13 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
                 else:
                     adjusted_directions.append(directions[i])
 
+            # Canonicalize: ensure first_type <= last_type alphabetically
+            canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+                list(node_combo), list(pred_combo), adjusted_directions
+            )
+
             # Build the variant metapath
-            variant = build_metapath(list(node_combo), list(pred_combo), adjusted_directions)
+            variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
             yield variant
 
 
