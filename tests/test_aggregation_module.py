@@ -149,6 +149,54 @@ class TestGenerateMetapathVariants:
         # Should have more than just the original
         assert len(variants) > 10
 
+    def test_symmetric_predicate_direction_becomes_A(self):
+        """When expanding to symmetric predicate ancestor, direction should become 'A'.
+
+        The predicate 'treats' has 'related_to' as an ancestor, and related_to is
+        symmetric. When expanding, Gene|treats|F|Disease should produce
+        Gene|related_to|A|Disease (not Gene|related_to|F|Disease).
+        """
+        variants = list(generate_metapath_variants("Gene|treats|F|Disease"))
+
+        # Should NOT have related_to with F direction
+        wrong_variant = "Gene|related_to|F|Disease"
+        assert wrong_variant not in variants, (
+            f"Symmetric predicate 'related_to' should not have direction 'F'"
+        )
+
+        # Should have related_to with A direction
+        correct_variant = "Gene|related_to|A|Disease"
+        assert correct_variant in variants, (
+            f"Expected '{correct_variant}' in variants but not found"
+        )
+
+    def test_symmetric_predicate_2hop_both_directions_become_A(self):
+        """For 2-hop paths, both symmetric predicates should get direction 'A'.
+
+        Gene|affects|F|Disease|treats|R|SmallMolecule
+        -> When both predicates expand to related_to:
+           Gene|related_to|A|Disease|related_to|A|SmallMolecule
+
+        NOT Gene|related_to|F|Disease|related_to|R|SmallMolecule
+        """
+        variants = list(generate_metapath_variants("Gene|affects|F|Disease|treats|R|SmallMolecule"))
+
+        # related_to is symmetric - should use 'A', not 'F' or 'R'
+        # Look for variants with related_to that have wrong direction
+        for v in variants:
+            if "related_to|F|" in v or "related_to|R|" in v:
+                raise AssertionError(
+                    f"Symmetric predicate 'related_to' has directional marker in: {v}"
+                )
+
+        # Check a specific expected correct variant exists
+        # BiologicalEntity is ancestor of Gene and SmallMolecule, Disease has DiseaseOrPhenotypicFeature
+        # Using actual ancestor types that exist in the biolink hierarchy
+        correct_variant = "BiologicalEntity|related_to|A|DiseaseOrPhenotypicFeature|related_to|A|ChemicalEntity"
+        assert correct_variant in variants, (
+            f"Expected '{correct_variant}' in variants but not found"
+        )
+
 
 class TestExpandMetapathToVariants:
     """Tests for expand_metapath_to_variants function."""

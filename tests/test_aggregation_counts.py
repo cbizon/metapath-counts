@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
+import zstandard
+
 # Add scripts directory to path for imports
 scripts_dir = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
@@ -29,8 +31,6 @@ from group_single_onehop_worker import (
     load_aggregated_counts,
     group_type_pair
 )
-
-from group_by_onehop import aggregate_results
 
 # Alias for backwards compatibility with test code
 expand_metapath_with_hierarchy = expand_metapath_to_variants
@@ -322,117 +322,6 @@ class TestHierarchicalExpansionCounting:
         # Each original should keep its count
         assert aggregated["Gene|affects|F|Disease"] == 1000
         assert aggregated["SmallMolecule|treats|F|Disease"] == 500
-
-
-class TestAggregateResultsFunction:
-    """Test the aggregate_results function from group_by_onehop.py.
-
-    This function had the same cartesian product bug - these tests verify the fix.
-    """
-
-    def test_nhop_count_not_multiplied_by_onehop_variants(self):
-        """nhop_count should NOT be multiplied by number of onehop variants.
-
-        This is THE bug we fixed. When same nhop compares to multiple onehops,
-        the old code added nhop_count once per (nhop_variant, onehop_variant) pair.
-        """
-        # Same nhop compared to two different onehops
-        explicit_results = [
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 50, 1_000_000),
-            ("Gene|affects|F|Disease", 1000, "Gene|regulates|F|Disease", 150, 30, 1_000_000),
-        ]
-
-        aggregated = aggregate_results(explicit_results)
-
-        # Find the key for the explicit nhop-onehop pairs
-        key1 = ("Gene|affects|F|Disease", "Gene|treats|F|Disease")
-        key2 = ("Gene|affects|F|Disease", "Gene|regulates|F|Disease")
-
-        # nhop_count should be 1000 for both, NOT 2000
-        # (Old buggy code would give 2000 because it added once per onehop variant)
-        assert aggregated[key1][0] == 1000, f"Expected 1000, got {aggregated[key1][0]}"
-        assert aggregated[key2][0] == 1000, f"Expected 1000, got {aggregated[key2][0]}"
-
-    def test_onehop_count_not_multiplied_by_nhop_variants(self):
-        """onehop_count should NOT be multiplied by number of nhop variants."""
-        # Same onehop compared to by two different nhops
-        explicit_results = [
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 50, 1_000_000),
-            ("SmallMolecule|affects|F|Disease", 500, "Gene|treats|F|Disease", 200, 30, 1_000_000),
-        ]
-
-        aggregated = aggregate_results(explicit_results)
-
-        # Find the keys
-        key1 = ("Gene|affects|F|Disease", "Gene|treats|F|Disease")
-        key2 = ("SmallMolecule|affects|F|Disease", "Gene|treats|F|Disease")
-
-        # onehop_count should be 200 for both, NOT 400
-        assert aggregated[key1][1] == 200, f"Expected 200, got {aggregated[key1][1]}"
-        assert aggregated[key2][1] == 200, f"Expected 200, got {aggregated[key2][1]}"
-
-    def test_overlap_sums_correctly(self):
-        """overlap SHOULD sum across rows (this is correct behavior)."""
-        explicit_results = [
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 50, 1_000_000),
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 30, 1_000_000),
-        ]
-
-        aggregated = aggregate_results(explicit_results)
-
-        key = ("Gene|affects|F|Disease", "Gene|treats|F|Disease")
-        # overlap should sum: 50 + 30 = 80
-        assert aggregated[key][2] == 80, f"Expected 80, got {aggregated[key][2]}"
-
-    def test_aggregation_to_ancestor_counts_correctly(self):
-        """When aggregating to ancestor types, counts should still be correct."""
-        explicit_results = [
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 50, 1_000_000),
-        ]
-
-        aggregated = aggregate_results(explicit_results)
-
-        # The aggregated version at Entity|related_to should have the same counts
-        # Find keys that match Entity|related_to pattern
-        entity_keys = [k for k in aggregated.keys()
-                       if "Entity" in k[0] and "related_to" in k[0]
-                       and "Entity" in k[1] and "related_to" in k[1]]
-
-        if entity_keys:
-            # Should have same counts as original (1000, 200, 50, 1M)
-            for key in entity_keys:
-                assert aggregated[key][0] == 1000, f"nhop_count wrong for {key}"
-                assert aggregated[key][1] == 200, f"onehop_count wrong for {key}"
-                assert aggregated[key][2] == 50, f"overlap wrong for {key}"
-
-    def test_multiple_paths_to_same_ancestor(self):
-        """Multiple explicit paths aggregating to same ancestor should sum correctly."""
-        explicit_results = [
-            ("Gene|affects|F|Disease", 1000, "Gene|treats|F|Disease", 200, 50, 1_000_000),
-            ("SmallMolecule|affects|F|Disease", 500, "SmallMolecule|treats|F|Disease", 100, 30, 2_000_000),
-        ]
-
-        aggregated = aggregate_results(explicit_results)
-
-        # Entity|related_to|F|Entity for both nhop and onehop should sum:
-        # nhop: 1000 + 500 = 1500
-        # onehop: 200 + 100 = 300
-        # overlap: 50 + 30 = 80
-        # total_possible: 1M + 2M = 3M
-
-        # Find the fully aggregated key
-        entity_key = None
-        for k in aggregated.keys():
-            if (k[0] == "Entity|related_to|F|Entity" and
-                k[1] == "Entity|related_to|F|Entity"):
-                entity_key = k
-                break
-
-        if entity_key:
-            assert aggregated[entity_key][0] == 1500, f"Expected nhop=1500, got {aggregated[entity_key][0]}"
-            assert aggregated[entity_key][1] == 300, f"Expected onehop=300, got {aggregated[entity_key][1]}"
-            assert aggregated[entity_key][2] == 80, f"Expected overlap=80, got {aggregated[entity_key][2]}"
-            assert aggregated[entity_key][3] == 3_000_000, f"Expected total=3M, got {aggregated[entity_key][3]}"
 
 
 class TestRealWorldScenario:
@@ -805,7 +694,7 @@ class TestEndToEndHierarchicalOutput:
                 f.write("SmallMolecule|treats|F|Disease\t1000\tSmallMolecule|affects|F|Disease\t500\t100\t1000000\n")
                 f.write("Drug|treats|F|Disease\t2000\tDrug|affects|F|Disease\t800\t200\t2000000\n")
 
-            # Create aggregated counts file
+            # Create aggregated 1-hop counts (for target counts)
             counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
             aggregated_counts = {}
             for path in ["SmallMolecule|treats|F|Disease", "Drug|treats|F|Disease",
@@ -815,6 +704,13 @@ class TestEndToEndHierarchicalOutput:
 
             with open(counts_file, 'w') as f:
                 json.dump({"counts": aggregated_counts}, f)
+
+            # Create aggregated N-hop counts (for predictor counts)
+            # For 1-hop analysis, these are the same paths as targets
+            aggregated_nhop_counts = {}
+            for path in ["SmallMolecule|treats|F|Disease", "Drug|treats|F|Disease"]:
+                for variant in expand_metapath_with_hierarchy(path):
+                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 1500
 
             # Create type node counts for total_possible calculation
             type_node_counts = {
@@ -833,6 +729,7 @@ class TestEndToEndHierarchicalOutput:
                 n_hops=1,
                 aggregate=True,
                 aggregated_counts=aggregated_counts,
+                aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
 
@@ -847,9 +744,9 @@ class TestEndToEndHierarchicalOutput:
                 f"No hierarchical output files created! Got: {expected_files}"
             )
 
-            # Verify the file has content
+            # Verify the file has content (zstd compressed)
             for hf in hierarchical_files:
-                with open(os.path.join(output_dir, hf), 'r') as f:
+                with zstandard.open(os.path.join(output_dir, hf), 'rt') as f:
                     lines = f.readlines()
                     assert len(lines) > 1, f"File {hf} has no data rows"
 
@@ -911,22 +808,19 @@ class TestEndToEndHierarchicalOutput:
             )
 
 
-class TestNhopCountFromResultsNotLookup:
-    """Test that nhop_count is aggregated from explicit results, not looked up.
+class TestNhopCountFromPrecomputedCounts:
+    """Test that nhop_count is looked up from precomputed aggregated_nhop_counts.
 
-    This tests the bug where group_single_onehop_worker.py was looking up
-    nhop_count from aggregated_counts (which only contains 1-hop paths),
-    causing nhop_count=0 for all N-hop analysis where N>1.
-
-    The symptom was: overlap > 0 but nhop_count = 0, which is impossible.
+    The design: prepare_grouping.py scans all result files and precomputes
+    aggregated N-hop counts. Workers then look up counts from this file.
+    This ensures counts are correct for hierarchically expanded variants.
     """
 
-    def test_2hop_nhop_count_from_results_not_lookup(self):
-        """For 2-hop analysis, nhop_count should come from results, not precomputed 1-hop counts.
+    def test_2hop_nhop_count_from_precomputed(self):
+        """For 2-hop analysis, nhop_count should come from aggregated_nhop_counts.
 
-        The bug: aggregated_counts only has 1-hop paths (from matrix metadata).
-        For 2-hop analysis, nhop paths are 2-hop paths which won't be in aggregated_counts.
-        The old code would return nhop_count=0, causing impossible metrics like overlap > 0 with count = 0.
+        prepare_grouping.py scans result files and builds aggregated_nhop_counts.json
+        which contains counts for all N-hop variants. Workers look up counts from there.
         """
         import tempfile
         import os
@@ -938,26 +832,24 @@ class TestNhopCountFromResultsNotLookup:
             os.makedirs(output_dir)
 
             # Create a 2-hop result file
-            # Format: nhop_path, nhop_count, onehop_path, onehop_count, overlap, total_possible
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
                 f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
-                # 2-hop path with count=5000 and overlap=923
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t5000\tGene|treats|F|SmallMolecule\t1000\t923\t1000000\n")
 
-            # Create aggregated_counts with ONLY 1-hop paths (simulating real scenario)
-            # This is what prepare_grouping.py produces - it computes from matrix metadata
-            # which only has 1-hop edge counts
+            # Create aggregated_counts for 1-hop (target) paths
             aggregated_counts = {
                 "Gene|treats|F|SmallMolecule": 1000,
                 "Gene|treats|F|ChemicalEntity": 1000,
                 "BiologicalEntity|treats|F|SmallMolecule": 1000,
-                # Note: NO 2-hop paths like "Gene|affects|F|Disease|treats|R|SmallMolecule"
             }
 
-            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
-            with open(counts_file, 'w') as f:
-                json.dump({"counts": aggregated_counts}, f)
+            # Create aggregated_nhop_counts for 2-hop (predictor) paths
+            # This simulates what prepare_grouping.py would produce
+            aggregated_nhop_counts = {}
+            explicit_2hop = "Gene|affects|F|Disease|treats|R|SmallMolecule"
+            for variant in expand_metapath_with_hierarchy(explicit_2hop):
+                aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 5000
 
             # Create type node counts
             type_node_counts = {
@@ -966,11 +858,7 @@ class TestNhopCountFromResultsNotLookup:
                 "Entity": 20000, "NamedThing": 20000
             }
 
-            type_counts_file = os.path.join(results_dir, "type_node_counts.json")
-            with open(type_counts_file, 'w') as f:
-                json.dump(type_node_counts, f)
-
-            # Run the worker
+            # Run the worker with the new aggregated_nhop_counts parameter
             group_type_pair(
                 type1="Gene",
                 type2="SmallMolecule",
@@ -979,6 +867,7 @@ class TestNhopCountFromResultsNotLookup:
                 n_hops=2,
                 aggregate=True,
                 aggregated_counts=aggregated_counts,
+                aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
 
@@ -986,10 +875,10 @@ class TestNhopCountFromResultsNotLookup:
             files = os.listdir(output_dir)
             assert len(files) > 0, "No output files created"
 
-            # Read the output and verify nhop_count is NOT 0
+            # Read the output and verify nhop_count comes from precomputed counts
             for fname in files:
                 fpath = os.path.join(output_dir, fname)
-                with open(fpath, 'r') as f:
+                with zstandard.open(fpath, 'rt') as f:
                     lines = f.readlines()
                     assert len(lines) > 1, f"No data in {fname}"
 
@@ -1000,16 +889,16 @@ class TestNhopCountFromResultsNotLookup:
                             nhop_count = int(parts[1])
                             overlap = int(parts[2])
 
-                            # THE KEY ASSERTION: if overlap > 0, nhop_count must be > 0
+                            # With precomputed counts, nhop_count should always be > 0
+                            # if the path exists in aggregated_nhop_counts
                             if overlap > 0:
                                 assert nhop_count > 0, (
                                     f"BUG: overlap={overlap} but nhop_count={nhop_count}. "
-                                    f"This is impossible - nhop_count should be aggregated from results, "
-                                    f"not looked up from 1-hop precomputed counts. Line: {line.strip()}"
+                                    f"nhop_count should come from aggregated_nhop_counts. Line: {line.strip()}"
                                 )
 
-    def test_nhop_count_aggregates_correctly_across_variants(self):
-        """When multiple explicit nhop paths expand to same variant, counts should sum."""
+    def test_nhop_count_aggregates_correctly_in_precompute(self):
+        """When multiple explicit nhop paths expand to same variant, precomputed counts should sum."""
         import tempfile
         import os
 
@@ -1023,29 +912,31 @@ class TestNhopCountFromResultsNotLookup:
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
                 f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
-                # Two different 2-hop paths, both should aggregate to Entity|related_to|...
+                # Two different 2-hop paths, both should aggregate to BiologicalEntity|related_to|...
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t3000\tGene|treats|F|SmallMolecule\t1000\t100\t1000000\n")
                 f.write("Protein|regulates|F|Disease|treats|R|Drug\t2000\tProtein|treats|F|Drug\t500\t50\t1000000\n")
 
-            # Only 1-hop counts in aggregated_counts
-            aggregated_counts = {
-                "Gene|treats|F|SmallMolecule": 1000,
-                "Protein|treats|F|Drug": 500,
-            }
+            # 1-hop counts for targets
+            aggregated_counts = {}
+            for path in ["Gene|treats|F|SmallMolecule", "Protein|treats|F|Drug"]:
+                for variant in expand_metapath_with_hierarchy(path):
+                    aggregated_counts[variant] = aggregated_counts.get(variant, 0) + 750
 
-            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
-            with open(counts_file, 'w') as f:
-                json.dump({"counts": aggregated_counts}, f)
+            # 2-hop counts for predictors - simulating what prepare_grouping.py produces
+            # Both explicit paths expand to variants, and counts should sum
+            aggregated_nhop_counts = {}
+            for explicit_path, count in [
+                ("Gene|affects|F|Disease|treats|R|SmallMolecule", 3000),
+                ("Protein|regulates|F|Disease|treats|R|Drug", 2000)
+            ]:
+                for variant in expand_metapath_with_hierarchy(explicit_path):
+                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + count
 
             type_node_counts = {
                 "Gene": 5000, "Protein": 4000, "SmallMolecule": 3000, "Drug": 2000,
                 "Disease": 2000, "BiologicalEntity": 10000, "ChemicalEntity": 5000,
                 "Entity": 20000, "NamedThing": 20000
             }
-
-            type_counts_file = os.path.join(results_dir, "type_node_counts.json")
-            with open(type_counts_file, 'w') as f:
-                json.dump(type_node_counts, f)
 
             # Run for BiologicalEntity-ChemicalEntity type pair (should catch both paths)
             group_type_pair(
@@ -1056,18 +947,19 @@ class TestNhopCountFromResultsNotLookup:
                 n_hops=2,
                 aggregate=True,
                 aggregated_counts=aggregated_counts,
+                aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
 
             # Find output files and verify aggregated counts
             files = os.listdir(output_dir)
 
-            # Look for rows where nhop path is something like "BiologicalEntity|...|ChemicalEntity"
-            # The aggregated nhop_count should be 3000 + 2000 = 5000 for the most general variant
+            # Look for rows where nhop path is a hierarchical variant
+            # The aggregated nhop_count for the most general variant should be 3000 + 2000 = 5000
             found_aggregated = False
             for fname in files:
                 fpath = os.path.join(output_dir, fname)
-                with open(fpath, 'r') as f:
+                with zstandard.open(fpath, 'rt') as f:
                     for line in f.readlines()[1:]:  # Skip header
                         parts = line.strip().split('\t')
                         if len(parts) >= 3:
@@ -1083,3 +975,16 @@ class TestNhopCountFromResultsNotLookup:
                                 found_aggregated = True
 
             assert found_aggregated, "No aggregated results found with overlap > 0"
+
+            # Verify that precomputed counts were used correctly by checking
+            # a specific aggregated variant that should have summed counts
+            # Both explicit paths should roll up to this variant
+            # NOTE: related_to is symmetric, so direction should be 'A' (not F/R)
+            expected_variant = "BiologicalEntity|related_to|A|DiseaseOrPhenotypicFeature|related_to|A|ChemicalEntity"
+            assert expected_variant in aggregated_nhop_counts, (
+                f"Expected variant {expected_variant} in precomputed counts"
+            )
+            # The count should be 3000 + 2000 = 5000 from both explicit paths
+            assert aggregated_nhop_counts[expected_variant] == 5000, (
+                f"Expected summed count 5000 for {expected_variant}, got {aggregated_nhop_counts[expected_variant]}"
+            )

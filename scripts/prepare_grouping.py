@@ -191,6 +191,104 @@ def precompute_aggregated_counts(matrices_dir, output_path):
     return aggregated_counts
 
 
+def precompute_aggregated_nhop_counts(results_dir, output_path, n_hops):
+    """Precompute aggregated N-hop path counts from result files.
+
+    For each unique N-hop path in the results, expand to all hierarchical
+    variants and sum counts. This allows grouping workers to look up global
+    counts for aggregated N-hop paths like Entity|related_to|F|Entity|related_to|F|NamedThing.
+
+    Args:
+        results_dir: Directory containing result files (results_matrix1_*.tsv)
+        output_path: Path to write the aggregated counts JSON
+        n_hops: Number of hops (for logging)
+
+    Returns:
+        Dict mapping N-hop path variant to global count
+    """
+    import glob
+
+    print(f"\nPrecomputing aggregated {n_hops}-hop counts from result files...")
+
+    # Find all result files
+    pattern = os.path.join(results_dir, "results_matrix1_*.tsv")
+    result_files = sorted(glob.glob(pattern))
+
+    if not result_files:
+        print(f"  WARNING: No result files found matching {pattern}")
+        return {}
+
+    print(f"  Found {len(result_files)} result files")
+
+    # First pass: collect explicit N-hop path counts
+    # Use dict to store first occurrence of each path's count
+    explicit_nhop_counts = {}  # nhop_path -> count
+
+    files_processed = 0
+    rows_processed = 0
+
+    for file_path in result_files:
+        files_processed += 1
+
+        with open(file_path, 'r') as f:
+            # Skip header
+            f.readline()
+
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) < 2:
+                    continue
+
+                nhop_path = parts[0]
+                nhop_count = int(parts[1])
+                rows_processed += 1
+
+                # Take first occurrence (counts should be consistent)
+                if nhop_path not in explicit_nhop_counts:
+                    explicit_nhop_counts[nhop_path] = nhop_count
+
+        if files_processed % 500 == 0:
+            print(f"  Processed {files_processed}/{len(result_files)} files...")
+
+    print(f"  Found {len(explicit_nhop_counts)} unique explicit {n_hops}-hop paths")
+    print(f"  (from {rows_processed:,} total rows)")
+
+    # Second pass: expand each path to variants and aggregate
+    aggregated_counts = defaultdict(int)
+
+    for i, (path, count) in enumerate(explicit_nhop_counts.items()):
+        if (i + 1) % 10000 == 0:
+            print(f"  Expanding path {i+1}/{len(explicit_nhop_counts)}...")
+
+        # Expand to hierarchical variants
+        variants = expand_metapath_to_variants(path)
+
+        for variant in variants:
+            aggregated_counts[variant] += count
+
+    print(f"  Expanded to {len(aggregated_counts)} aggregated {n_hops}-hop paths")
+
+    # Write to file
+    result = {
+        "_metadata": {
+            "created_at": datetime.now().isoformat(),
+            "n_hops": n_hops,
+            "num_result_files": len(result_files),
+            "num_explicit_paths": len(explicit_nhop_counts),
+            "num_aggregated_paths": len(aggregated_counts)
+        },
+        "counts": dict(aggregated_counts)
+    }
+
+    print(f"  Writing to {output_path}...")
+    with open(output_path, 'w') as f:
+        json.dump(result, f, indent=2)
+
+    print(f"  ✓ Precomputed {len(aggregated_counts)} aggregated {n_hops}-hop path counts")
+
+    return dict(aggregated_counts)
+
+
 def create_grouping_manifest(type_pairs, results_dir, n_hops):
     """Create manifest for distributed grouping.
 
@@ -285,9 +383,15 @@ def main():
         json.dump(type_node_counts, f, indent=2)
     print(f"  ✓ Saved type node counts to {type_counts_path}")
 
-    # Precompute aggregated path counts (needed for type pair extraction)
+    # Precompute aggregated 1-hop path counts from matrix metadata
+    # (needed for type pair extraction and target counts in grouping)
     aggregated_counts_path = os.path.join(results_dir, "aggregated_path_counts.json")
     aggregated_counts = precompute_aggregated_counts(args.matrices_dir, aggregated_counts_path)
+
+    # Precompute aggregated N-hop path counts from result files
+    # (needed for predictor counts in grouping)
+    aggregated_nhop_counts_path = os.path.join(results_dir, "aggregated_nhop_counts.json")
+    precompute_aggregated_nhop_counts(results_dir, aggregated_nhop_counts_path, args.n_hops)
 
     # Extract type pairs from AGGREGATED paths (includes all hierarchical types)
     type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
