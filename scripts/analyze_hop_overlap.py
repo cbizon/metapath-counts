@@ -672,6 +672,10 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                     # Format 1-hop metapath
                     onehop_metapath = format_metapath([onehop_src, onehop_tgt], [onehop_pred], [onehop_dir])
 
+                    # Skip zero-overlap rows (optimization: reduces output size significantly)
+                    if overlap_count == 0:
+                        continue
+
                     # Write row
                     f.write(f"{nhop_metapath}\t{nhop_count}\t{onehop_metapath}\t{onehop_count}\t{overlap_count}\t{total_possible}\n")
                     rows_written += 1
@@ -687,10 +691,11 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                         agg_count = agg_matrix.nvals
                         del overlap_matrix
 
-                        agg_metapath = f"{src_type_final}|ANY|A|{tgt_type_final}"
-
-                        f.write(f"{nhop_metapath}\t{nhop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
-                        rows_written += 1
+                        # Skip zero-overlap rows
+                        if overlap_count > 0:
+                            agg_metapath = f"{src_type_final}|ANY|A|{tgt_type_final}"
+                            f.write(f"{nhop_metapath}\t{nhop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
+                            rows_written += 1
 
                 # CRITICAL: Flush after every path (not every 10k rows)
                 f.flush()

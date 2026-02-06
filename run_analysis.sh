@@ -66,9 +66,13 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     uv run python scripts/orchestrate_hop_analysis.py \
         --n-hops "$N_HOPS"
 
-    # Step 3: Prepare distributed grouping (create type pair jobs)
+    # Step 3: Prepare distributed grouping (create type pair jobs + precompute counts)
     echo ""
     echo "Step 3: Preparing distributed grouping..."
+    echo "  - Creating type pair jobs"
+    echo "  - Precomputing aggregated 1-hop counts (from matrix metadata)"
+    echo "  - Precomputing aggregated N-hop counts (from result files)"
+    echo "  - Computing type node counts"
     uv run python scripts/prepare_grouping.py --n-hops "$N_HOPS"
 
     # Step 4: Run distributed grouping (one SLURM job per type pair)
