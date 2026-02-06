@@ -244,11 +244,26 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
         for pred_combo in itertools.product(*predicate_variants):
             # Adjust directions: if predicate is symmetric, direction must be 'A'
             adjusted_directions = []
+            skip_variant = False
+
             for i, pred in enumerate(pred_combo):
                 if pred in symmetric_preds:
                     adjusted_directions.append('A')
+
+                    # BUGFIX: For same-type ORIGINAL paths, avoid double-counting when expanding
+                    # non-symmetric predicates (F/R) to symmetric ancestors (A).
+                    # Only generate variants from the canonical direction (F, not R).
+                    # Check if ORIGINAL path (nodes, not node_combo) has same src/tgt.
+                    if nodes[0] == nodes[-1]:  # Original path has same src and tgt type
+                        if directions[i] == 'R':  # Original was reverse direction
+                            # Skip this variant - the F version will generate it
+                            skip_variant = True
+                            break
                 else:
                     adjusted_directions.append(directions[i])
+
+            if skip_variant:
+                continue
 
             # Canonicalize: ensure first_type <= last_type alphabetically
             canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(

@@ -121,6 +121,39 @@ class TestExplicit1HopCounts:
         assert forward_count == 1, f"Expected count=1 for {forward}, got {forward_count}"
         assert reverse_count == 1, f"Expected count=1 for {reverse}, got {reverse_count}"
 
+    def test_interacts_with_symmetric_count(self, pipeline_1hop):
+        """Gene|interacts_with|A|Protein should have count=3 (2 explicit + 1 from pseudo-type).
+
+        The key insight: For symmetric predicates, pseudo-type expansion can flip direction!
+        - Gene_A ↔ Protein_M (explicit Gene ↔ Protein)
+        - Gene_B ↔ Protein_N (explicit Gene ↔ Protein)
+        - GeneProtein_Z ↔ Gene_B: When Gene+Protein expands to Protein:
+          Protein ↔ Gene = Gene ↔ Protein (symmetric!)
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # Alphabetically: "Gene" < "Protein", so canonical is forward direction
+        # For symmetric predicates, direction should be 'A', not 'F' or 'R'
+        canonical = "Gene|interacts_with|A|Protein"
+        wrong_direction_f = "Gene|interacts_with|F|Protein"
+        wrong_direction_r = "Gene|interacts_with|R|Protein"
+        reverse_canonical = "Protein|interacts_with|A|Gene"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 3, f"Expected count=3 (2 explicit + 1 pseudo-type) for {canonical}, got {count}"
+
+        # Wrong directions (F or R) should not exist for symmetric predicates
+        assert nhop_counts.get(wrong_direction_f, 0) == 0, (
+            f"Symmetric predicate should not use F direction: {wrong_direction_f}"
+        )
+        assert nhop_counts.get(wrong_direction_r, 0) == 0, (
+            f"Symmetric predicate should not use R direction: {wrong_direction_r}"
+        )
+
+        # Reverse direction should not exist due to duplicate elimination
+        assert nhop_counts.get(reverse_canonical, 0) == 0, (
+            f"Non-canonical direction {reverse_canonical} should not exist"
+        )
+
 
 class TestAggregated1HopCounts:
     """Test that hierarchical aggregation produces correct counts.
@@ -167,6 +200,25 @@ class TestAggregated1HopCounts:
         count = nhop_counts.get(canonical, 0)
         # SmallMolecule is only child of ChemicalEntity in our graph
         assert count == 2, f"Expected 2 for {canonical}, got {count}"
+
+    def test_named_thing_related_to_aggregation(self, pipeline_1hop):
+        """NamedThing|related_to|A|NamedThing should aggregate all edges (related_to is symmetric root predicate).
+
+        All edges roll up to NamedThing (top-level type) and related_to (top-level symmetric predicate):
+        - affects: 5 edges
+        - treats: 2 edges
+        - interacts_with: 3 edges
+        - regulates: 1 edge
+        - associated_with: 1 edge
+        Total: 12 edges
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # NamedThing == NamedThing (same type), symmetric predicate uses 'A'
+        canonical = "NamedThing|related_to|A|NamedThing"
+
+        count = nhop_counts.get(canonical, 0)
+        # All 12 edges in the graph roll up to this
+        assert count == 12, f"Expected 12 (all edges) for {canonical}, got {count}"
 
 
 class TestNoPseudoTypesInOutput:
