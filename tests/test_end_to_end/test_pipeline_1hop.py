@@ -201,6 +201,25 @@ class TestAggregated1HopCounts:
         # SmallMolecule is only child of ChemicalEntity in our graph
         assert count == 2, f"Expected 2 for {canonical}, got {count}"
 
+    def test_biological_entity_affects_biological_entity(self, pipeline_1hop):
+        """BiologicalEntity|affects|F|BiologicalEntity aggregation test.
+
+        When different-type paths (e.g. Disease|affects|R|Gene) expand to same-type
+        variants (BiologicalEntity|affects|*|BiologicalEntity), both F and R directions
+        must be generated. The 5 affects edges (Gene→Disease x3, Protein→Disease x1,
+        Gene+Protein→Disease x1) plus pseudo-type expansion to Protein (+1) give 6 total,
+        contributed to both F and R directions.
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        forward = "BiologicalEntity|affects|F|BiologicalEntity"
+        reverse = "BiologicalEntity|affects|R|BiologicalEntity"
+
+        forward_count = nhop_counts.get(forward, 0)
+        reverse_count = nhop_counts.get(reverse, 0)
+
+        assert forward_count == 6, f"Expected 6 for {forward}, got {forward_count}"
+        assert reverse_count == 6, f"Expected 6 for {reverse}, got {reverse_count}"
+
     def test_named_thing_related_to_aggregation(self, pipeline_1hop):
         """NamedThing|related_to|A|NamedThing should aggregate all edges (related_to is symmetric root predicate).
 

@@ -274,6 +274,18 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
             variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
             yield variant
 
+            # Fix: When different-type endpoints expand to same-type endpoints,
+            # the direction was locked by the original alphabetical ordering.
+            # We need to also yield the reversed direction variant.
+            if (nodes[0] != nodes[-1]                      # original had different types
+                    and canon_nodes[0] == canon_nodes[-1]   # variant has same types
+                    and any(d != 'A' for d in canon_dirs)): # not all-symmetric (would be identical)
+                rev_nodes = list(reversed(canon_nodes))
+                rev_preds = list(reversed(canon_preds))
+                rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
+                            for d in reversed(canon_dirs)]
+                yield build_metapath(rev_nodes, rev_preds, rev_dirs)
+
 
 def expand_metapath_to_variants(metapath: str) -> set:
     """
