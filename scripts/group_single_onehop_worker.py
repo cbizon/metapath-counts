@@ -16,6 +16,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
+import zstandard
+
 # Import hierarchy and aggregation functions
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -27,6 +29,7 @@ from metapath_counts.aggregation import expand_metapath_to_variants, calculate_m
 
 # Global caches for precomputed data
 _aggregated_counts_cache = None
+_aggregated_nhop_counts_cache = None
 _type_node_counts_cache = None
 
 
@@ -52,6 +55,30 @@ def load_aggregated_counts(counts_path):
     print(f"  Loaded {len(_aggregated_counts_cache)} aggregated path counts")
 
     return _aggregated_counts_cache
+
+
+def load_aggregated_nhop_counts(counts_path):
+    """Load precomputed aggregated N-hop path counts.
+
+    Args:
+        counts_path: Path to aggregated_nhop_counts.json
+
+    Returns:
+        Dict mapping N-hop path variant to global count
+    """
+    global _aggregated_nhop_counts_cache
+
+    if _aggregated_nhop_counts_cache is not None:
+        return _aggregated_nhop_counts_cache
+
+    print(f"Loading precomputed aggregated N-hop counts from {counts_path}...")
+    with open(counts_path, 'r') as f:
+        data = json.load(f)
+
+    _aggregated_nhop_counts_cache = data.get("counts", {})
+    print(f"  Loaded {len(_aggregated_nhop_counts_cache)} aggregated N-hop path counts")
+
+    return _aggregated_nhop_counts_cache
 
 
 def load_type_node_counts(counts_path):
@@ -128,6 +155,21 @@ def check_type_match(onehop_path, type1, type2):
     return match_forward or match_reverse
 
 
+def contains_pseudo_type(metapath):
+    """Check if a metapath contains any pseudo-type nodes.
+
+    Pseudo-types contain '+' (e.g., Gene+Protein).
+    We filter these out of final output since their counts are
+    already included in the constituent type aggregations.
+    """
+    parts = metapath.split('|')
+    # Check node positions: 0, 3, 6, ...
+    for i in range(0, len(parts), 3):
+        if '+' in parts[i]:
+            return True
+    return False
+
+
 def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
     """Check if a metapath should be excluded based on types or predicates."""
     if not excluded_types and not excluded_predicates:
@@ -158,7 +200,7 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
 
 
 def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
-                    aggregated_counts=None, type_node_counts=None,
+                    aggregated_counts=None, aggregated_nhop_counts=None, type_node_counts=None,
                     min_count=0, min_precision=0.0, excluded_types=None, excluded_predicates=None):
     """Group all N-hop results for 1-hop metapaths between a type pair.
 
@@ -169,7 +211,8 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         output_dir: Output directory for grouped results
         n_hops: Number of hops
         aggregate: Whether to do hierarchical aggregation (default: True)
-        aggregated_counts: Dict mapping aggregated path -> global count (from prepare_grouping.py)
+        aggregated_counts: Dict mapping aggregated 1-hop path -> global count (for target counts)
+        aggregated_nhop_counts: Dict mapping aggregated N-hop path -> global count (for predictor counts)
         type_node_counts: Dict mapping type name -> node count (for total_possible calculation)
         min_count: Minimum N-hop count to include (default: 0)
         min_precision: Minimum precision to include (default: 0.0)
@@ -190,7 +233,9 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
     if excluded_predicates:
         print(f"Excluded predicates: {sorted(excluded_predicates)}")
     if aggregated_counts:
-        print(f"Using precomputed counts: {len(aggregated_counts)} paths")
+        print(f"Using precomputed 1-hop counts: {len(aggregated_counts)} paths")
+    if aggregated_nhop_counts:
+        print(f"Using precomputed N-hop counts: {len(aggregated_nhop_counts)} paths")
     if type_node_counts:
         print(f"Using precomputed type node counts: {len(type_node_counts)} types")
 
@@ -272,56 +317,79 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             onehop_count_global = 0
 
         # Apply hierarchical aggregation if enabled
-        # Data structure: nhop_variant -> [overlap, nhop_count]
-        aggregated = {}
+        # Data structure: nhop_variant -> overlap
+        # NOTE: nhop_count is looked up from aggregated_nhop_counts, NOT accumulated here
+        # This ensures we get the correct global count for each variant
+        aggregated_overlaps = {}
         if aggregate:
             print(f"  Applying hierarchical aggregation...")
 
-            # For each nhop_path, expand and aggregate both overlap and nhop_count
-            final_aggregated = defaultdict(lambda: [0, 0])
+            # For each nhop_path, expand and aggregate overlap only
+            final_aggregated = defaultdict(int)
 
-            for nhop_path, (overlap, nhop_count) in nhop_data.items():
+            for nhop_path, (overlap, _nhop_count) in nhop_data.items():
                 # Expand nhop_path to all hierarchical variants
                 nhop_variants = expand_metapath_to_variants(nhop_path)
 
-                # Add overlap and nhop_count to all variants
+                # Add overlap to all variants
+                # nhop_count will be looked up from aggregated_nhop_counts when writing
                 for variant in nhop_variants:
-                    final_aggregated[variant][0] += overlap
-                    final_aggregated[variant][1] += nhop_count
+                    final_aggregated[variant] += overlap
 
-            aggregated = dict(final_aggregated)
-            print(f"    N-hop paths expanded to {len(aggregated)} aggregated paths")
+            aggregated_overlaps = dict(final_aggregated)
+            print(f"    N-hop paths expanded to {len(aggregated_overlaps)} aggregated paths")
         else:
-            # No aggregation - just copy data
-            aggregated = dict(nhop_data)
+            # No aggregation - extract just the overlap
+            aggregated_overlaps = {k: v[0] for k, v in nhop_data.items()}
 
         # Check if 1-hop should be excluded
         if should_exclude_metapath(onehop_path, excluded_types, excluded_predicates):
             print(f"  Skipping (excluded type/predicate in 1-hop)")
             continue
 
-        # Write output file for this 1-hop
+        # Skip 1-hop paths containing pseudo-types (their counts are in constituent types)
+        if contains_pseudo_type(onehop_path):
+            print(f"  Skipping (pseudo-type in 1-hop)")
+            continue
+
+        # Write output file for this 1-hop (zstd compressed)
         safe_filename = onehop_path.replace('|', '_').replace(':', '_').replace(' ', '_')
-        output_file = f"{output_dir}/{safe_filename}.tsv"
+        output_file = f"{output_dir}/{safe_filename}.tsv.zst"
 
         # Filter and count rows
         rows_written = 0
         rows_filtered_excluded = 0
+        rows_filtered_pseudo = 0
         rows_filtered_count = 0
         rows_filtered_precision = 0
+        rows_missing_nhop_count = 0
 
-        with open(output_file, 'w') as out:
+        with zstandard.open(output_file, 'wt') as out:
             # Header
             out.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
-            # Sort by overlap descending (overlap is first element of tuple)
-            sorted_items = sorted(aggregated.items(), key=lambda x: x[1][0], reverse=True)
+            # Sort by overlap descending
+            sorted_items = sorted(aggregated_overlaps.items(), key=lambda x: x[1], reverse=True)
 
-            for nhop_path, (overlap, nhop_count) in sorted_items:
+            for nhop_path, overlap in sorted_items:
                 # Filter by excluded types/predicates
                 if should_exclude_metapath(nhop_path, excluded_types, excluded_predicates):
                     rows_filtered_excluded += 1
+                    continue
+
+                # Filter out pseudo-types (their counts are in constituent types)
+                if contains_pseudo_type(nhop_path):
+                    rows_filtered_pseudo += 1
+                    continue
+
+                # Look up nhop_count from precomputed aggregated N-hop counts
+                # This gives the correct global count for this variant
+                if aggregated_nhop_counts and nhop_path in aggregated_nhop_counts:
+                    nhop_count = aggregated_nhop_counts[nhop_path]
+                else:
+                    # Path not in precomputed counts - skip
+                    rows_missing_nhop_count += 1
                     continue
 
                 # Filter by minimum count
@@ -347,10 +415,14 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         print(f"  Written {rows_written} rows to {output_file}")
         if rows_filtered_excluded > 0:
             print(f"    Filtered (excluded): {rows_filtered_excluded}")
+        if rows_filtered_pseudo > 0:
+            print(f"    Filtered (pseudo-type): {rows_filtered_pseudo}")
         if rows_filtered_count > 0:
             print(f"    Filtered (count < {min_count}): {rows_filtered_count}")
         if rows_filtered_precision > 0:
             print(f"    Filtered (precision < {min_precision}): {rows_filtered_precision}")
+        if rows_missing_nhop_count > 0:
+            print(f"    WARNING: Skipped {rows_missing_nhop_count} paths missing from aggregated_nhop_counts")
 
     print(f"\n✓ All 1-hop metapaths processed for type pair ({type1}, {type2})")
 
@@ -398,7 +470,13 @@ def main():
         '--aggregated-counts',
         type=str,
         required=True,
-        help='Path to aggregated_path_counts.json (from prepare_grouping.py)'
+        help='Path to aggregated_path_counts.json (1-hop counts from prepare_grouping.py)'
+    )
+    parser.add_argument(
+        '--aggregated-nhop-counts',
+        type=str,
+        required=True,
+        help='Path to aggregated_nhop_counts.json (N-hop counts from prepare_grouping.py)'
     )
     parser.add_argument(
         '--type-node-counts',
@@ -443,6 +521,7 @@ def main():
 
     # Load precomputed data
     aggregated_counts = load_aggregated_counts(args.aggregated_counts)
+    aggregated_nhop_counts = load_aggregated_nhop_counts(args.aggregated_nhop_counts)
     type_node_counts = load_type_node_counts(args.type_node_counts)
 
     group_type_pair(
@@ -453,6 +532,7 @@ def main():
         n_hops=args.n_hops,
         aggregate=not args.explicit_only,
         aggregated_counts=aggregated_counts,
+        aggregated_nhop_counts=aggregated_nhop_counts,
         type_node_counts=type_node_counts,
         min_count=args.min_count,
         min_precision=args.min_precision,

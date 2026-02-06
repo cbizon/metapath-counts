@@ -7,6 +7,7 @@ dependencies = [
     "bmt>=1.4.6",
     "python-graphblas>=2025.2.0",
     "psutil>=7.1.1",
+    "zstandard>=0.22.0",
 ]
 
 [project.optional-dependencies]

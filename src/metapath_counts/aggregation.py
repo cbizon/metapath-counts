@@ -17,6 +17,18 @@ from typing import Iterator, List, Tuple
 
 from .hierarchy import get_type_ancestors, get_predicate_ancestors
 from .type_assignment import is_pseudo_type, parse_pseudo_type
+from .type_utils import get_symmetric_predicates
+
+# Cache symmetric predicates at module load time
+_SYMMETRIC_PREDICATES = None
+
+
+def _get_symmetric_predicates():
+    """Get cached symmetric predicates (lazy initialization)."""
+    global _SYMMETRIC_PREDICATES
+    if _SYMMETRIC_PREDICATES is None:
+        _SYMMETRIC_PREDICATES = get_symmetric_predicates()
+    return _SYMMETRIC_PREDICATES
 
 
 def parse_metapath(metapath: str) -> Tuple[List[str], List[str], List[str]]:
@@ -157,6 +169,9 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
     This expands pseudo-types to constituents and propagates to ancestor
     types and predicates.
 
+    IMPORTANT: When a directional predicate (F/R) is expanded to a symmetric
+    ancestor predicate (like related_to), the direction is changed to 'A'.
+
     Args:
         metapath: Original metapath (may contain pseudo-types)
 
@@ -171,7 +186,7 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
             - "Protein|affects|F|SmallMolecule" (expand pseudo-type)
             - "GeneOrGeneProduct|affects|F|SmallMolecule" (ancestor)
             - "Gene|affects|F|ChemicalEntity" (ancestor)
-            - "Gene|interacts_with|F|SmallMolecule" (predicate ancestor)
+            - "Gene|related_to|A|SmallMolecule" (symmetric ancestor - direction changed to A!)
             - ... (all combinations)
     """
     nodes, predicates, directions = parse_metapath(metapath)
@@ -182,11 +197,22 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
     # Get all variants for each predicate
     predicate_variants = [get_predicate_variants(pred) for pred in predicates]
 
+    # Get symmetric predicates for direction adjustment
+    symmetric_preds = _get_symmetric_predicates()
+
     # Generate all combinations
     for node_combo in itertools.product(*node_variants):
         for pred_combo in itertools.product(*predicate_variants):
+            # Adjust directions: if predicate is symmetric, direction must be 'A'
+            adjusted_directions = []
+            for i, pred in enumerate(pred_combo):
+                if pred in symmetric_preds:
+                    adjusted_directions.append('A')
+                else:
+                    adjusted_directions.append(directions[i])
+
             # Build the variant metapath
-            variant = build_metapath(list(node_combo), list(pred_combo), directions)
+            variant = build_metapath(list(node_combo), list(pred_combo), adjusted_directions)
             yield variant
 
 
