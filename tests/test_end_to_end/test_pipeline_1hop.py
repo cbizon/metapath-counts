@@ -239,6 +239,28 @@ class TestAggregated1HopCounts:
         # All 12 edges in the graph roll up to this
         assert count == 12, f"Expected 12 (all edges) for {canonical}, got {count}"
 
+    def test_biological_entity_related_to_chemical_entity(self, pipeline_1hop):
+        """BiologicalEntity|related_to|A|ChemicalEntity should aggregate treats edges."""
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+
+        # related_to is symmetric, so direction is 'A'
+        # BiologicalEntity < ChemicalEntity alphabetically, but symmetric uses canonical form
+        path = "BiologicalEntity|related_to|A|ChemicalEntity"
+
+        count = nhop_counts.get(path, 0)
+
+        # Expected: 2 treats edges (SmallMolecule→Disease) aggregate to this path
+        # Disease|treats|R|SmallMolecule expands to:
+        # - Disease → BiologicalEntity (type hierarchy)
+        # - SmallMolecule → ChemicalEntity (type hierarchy)
+        # - treats → related_to (predicate hierarchy, becomes 'A' for symmetric)
+        expected_count = 2
+
+        assert count == expected_count, (
+            f"Expected count={expected_count} for {path}, got {count}. "
+            f"Should aggregate treats edges between ChemicalEntity and BiologicalEntity types."
+        )
+
 
 class TestNoPseudoTypesInOutput:
     """Verify pseudo-types are filtered from grouped output."""
