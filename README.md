@@ -73,7 +73,7 @@ Example ROBOKOP graph: `/projects/stars/Data_services/biolink3/graphs/Baseline_N
 
 **Merged results** (`results/all_3hop_overlaps.tsv`):
 ```
-3hop_metapath | 3hop_count | 1hop_metapath | 1hop_count | overlap | total_possible
+predictor_metapath | predictor_count | predicted_metapath | predicted_count | overlap | total_possible
 ```
 
 **Grouped results** (`grouped_by_1hop/*.tsv`):

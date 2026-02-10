@@ -6,7 +6,7 @@ Computes all N-hop metapaths via matrix multiplication, then calculates
 overlap with 1-hop edges to identify which 1-hop edges appear in N-hop paths.
 
 Output format (TSV):
-  Nhop_metapath          | Nhop_count | 1hop_metapath    | 1hop_count | overlap | total_possible
+  predictor_metapath     | predictor_count | predicted_metapath | predicted_count | overlap | total_possible
   SmallMolecule|affects|F|Gene|affects|R|SmallMolecule|affects|F|Gene | 6170000000 | SmallMolecule|regulates|F|Gene | 500000 | 450000 | 201000000000
 
 Metapath format: NodeType|predicate|direction|NodeType|...
@@ -571,7 +571,7 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
 
     # Open output file
     with open(output_file, 'w') as f:
-        f.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+        f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
 
         rows_written = 0
         paths_computed = 0

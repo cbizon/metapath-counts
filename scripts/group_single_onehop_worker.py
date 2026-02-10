@@ -366,7 +366,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
 
         with zstandard.open(output_file, 'wt') as out:
             # Header
-            out.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\toverlap\ttotal_possible\t")
+            out.write("predictor_metapath\tpredictor_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
             # Sort by overlap descending

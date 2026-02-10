@@ -483,7 +483,7 @@ class TestAggregateExplicitResults:
 
             # Write explicit results (SmallMolecule should expand to ChemicalEntity)
             with open(explicit_file, 'w') as f:
-                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 f.write("SmallMolecule|affects|F|Gene\t100\tSmallMolecule|affects|F|Gene\t50\t30\t1000\n")
 
             # Run aggregation
@@ -520,7 +520,7 @@ class TestAggregateExplicitResults:
 
             # Write explicit results
             with open(explicit_file, 'w') as f:
-                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 f.write("Gene|affects|F|Disease\t200\tGene|affects|F|Disease\t100\t50\t5000\n")
 
             aggregate_explicit_results(str(explicit_file), str(aggregated_file))
@@ -552,7 +552,7 @@ class TestAggregateExplicitResults:
 
             # Two different explicit paths that both aggregate to BiologicalEntity
             with open(explicit_file, 'w') as f:
-                f.write("3hop_metapath\t3hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 f.write("Gene|affects|F|Disease\t100\tGene|affects|F|Disease\t50\t25\t1000\n")
                 f.write("Protein|affects|F|Disease\t80\tProtein|affects|F|Disease\t40\t20\t800\n")
 

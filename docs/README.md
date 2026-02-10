@@ -187,7 +187,7 @@ uv run python scripts/orchestrate_grouping.py --n-hops 3 \
 **Time:** ~1-2 hours (distributed across SLURM)
 
 **Output columns:**
-- Original: `3hop_metapath`, `3hop_count`, `1hop_metapath`, `1hop_count`, `overlap`, `total_possible`
+- Original: `predictor_metapath`, `predictor_count`, `predicted_metapath`, `predicted_count`, `overlap`, `total_possible`
 - Added metrics: `TP`, `FP`, `FN`, `TN`, `Total`, `Precision`, `Recall`, `Specificity`, `NPV`, `Accuracy`, `Balanced_Accuracy`, `F1`, `MCC`, `TPR`, `FPR`, `FNR`, `PLR`, `NLR`
 
 ## Complete Rerun from Scratch

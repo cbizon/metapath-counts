@@ -690,7 +690,7 @@ class TestEndToEndHierarchicalOutput:
             # Create a fake result file with explicit data
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("1hop_metapath\t1hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # Explicit 1-hop data
                 f.write("SmallMolecule|treats|F|Disease\t1000\tSmallMolecule|affects|F|Disease\t500\t100\t1000000\n")
                 f.write("Drug|treats|F|Disease\t2000\tDrug|affects|F|Disease\t800\t200\t2000000\n")
@@ -767,7 +767,7 @@ class TestEndToEndHierarchicalOutput:
             # The worker checks onehop_path (column 2) against the type pair
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("1hop_metapath\t1hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # onehop_path (col 2) is SmallMolecule|treats|F|Disease which should match (ChemicalEntity, Disease)
                 f.write("Gene|affects|F|Disease\t500\tSmallMolecule|treats|F|Disease\t1000\t100\t1000000\n")
 
@@ -835,7 +835,7 @@ class TestNhopCountFromPrecomputedCounts:
             # Create a 2-hop result file
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t5000\tGene|treats|F|SmallMolecule\t1000\t923\t1000000\n")
 
             # Create aggregated_counts for 1-hop (target) paths
@@ -912,7 +912,7 @@ class TestNhopCountFromPrecomputedCounts:
             # Create result file with multiple 2-hop paths that expand to same variant
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # Two different 2-hop paths, both should aggregate to BiologicalEntity|related_to|...
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t3000\tGene|treats|F|SmallMolecule\t1000\t100\t1000000\n")
                 f.write("Protein|regulates|F|Disease|treats|R|Drug\t2000\tProtein|treats|F|Drug\t500\t50\t1000000\n")

@@ -148,14 +148,16 @@ def pipeline_1hop(golden_workspace):
             excluded_predicates=set(),
         )
 
-    # Parse grouped results
+    # Parse results
     grouped_results = parse_all_grouped_files(grouped_dir)
+    raw_results = parse_raw_results(result_file)
 
     return {
         "n_hops": n_hops,
         "workspace": workspace,
         "result_file": result_file,
         "results_dir": results_dir,
+        "raw_results": raw_results,
         "aggregated_counts": aggregated_counts,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
@@ -224,12 +226,14 @@ def pipeline_2hop(golden_workspace):
         )
 
     grouped_results = parse_all_grouped_files(grouped_dir)
+    raw_results = parse_raw_results(result_file)
 
     return {
         "n_hops": n_hops,
         "workspace": workspace,
         "result_file": result_file,
         "results_dir": results_dir,
+        "raw_results": raw_results,
         "aggregated_counts": aggregated_counts,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
@@ -249,7 +253,11 @@ def parse_all_grouped_files(grouped_dir):
 
 
 def parse_grouped_output(output_file):
-    """Parse a grouped output TSV file into a list of dicts."""
+    """Parse a grouped output TSV file into a list of dicts.
+
+    Columns: predictor_metapath, predictor_count, overlap, total_possible,
+             precision, recall, f1, mcc, specificity, npv
+    """
     rows = []
     with zstandard.open(output_file, 'rt') as f:
         header = f.readline().strip().split('\t')
@@ -259,7 +267,6 @@ def parse_grouped_output(output_file):
                 row = {}
                 for i, col in enumerate(header):
                     val = parts[i]
-                    # Convert numeric columns
                     if col.endswith('_count') or col in ('overlap', 'total_possible'):
                         row[col] = int(val)
                     elif col in ('precision', 'recall', 'f1', 'mcc', 'specificity', 'npv'):
@@ -271,19 +278,23 @@ def parse_grouped_output(output_file):
 
 
 def parse_raw_results(result_file):
-    """Parse raw analysis output TSV into list of dicts."""
+    """Parse raw analysis output TSV by position.
+
+    Columns: predictor_metapath, predictor_count, predicted_metapath,
+             predicted_count, overlap, total_possible
+    """
     rows = []
     with open(result_file, 'r') as f:
-        header = f.readline().strip().split('\t')
+        f.readline()  # skip header
         for line in f:
             parts = line.strip().split('\t')
-            if len(parts) >= len(header):
-                row = {}
-                for i, col in enumerate(header):
-                    val = parts[i]
-                    if col.endswith('_count') or col in ('overlap', 'total_possible'):
-                        row[col] = int(val)
-                    else:
-                        row[col] = val
-                rows.append(row)
+            if len(parts) == 6:
+                rows.append({
+                    'predictor_path': parts[0],
+                    'predictor_count': int(parts[1]),
+                    'predicted_path': parts[2],
+                    'predicted_count': int(parts[3]),
+                    'overlap': int(parts[4]),
+                    'total_possible': int(parts[5]),
+                })
     return rows
