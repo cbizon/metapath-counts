@@ -8,6 +8,8 @@ dependencies = [
     "python-graphblas>=2025.2.0",
     "psutil>=7.1.1",
     "zstandard>=0.22.0",
+    "matplotlib>=3.10.8",
+    "networkx>=3.6.1",
 ]
 
 [project.optional-dependencies]
