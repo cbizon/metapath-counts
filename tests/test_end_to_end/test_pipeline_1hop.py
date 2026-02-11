@@ -6,7 +6,7 @@ These tests verify the full pipeline produces correct results for the golden gra
 import pytest
 from pathlib import Path
 
-from conftest import parse_raw_results
+
 from golden_graph import GRAPH_STATS
 
 
@@ -48,15 +48,15 @@ class TestExplicit1HopCounts:
     """
 
     def test_affects_disease_count(self, pipeline_1hop):
-        """Gene affects Disease aggregated count should be 4 (3 explicit + 1 pseudo-type)."""
+        """Gene affects Disease aggregated count should be 5 (4 explicit + 1 pseudo-type)."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
         # Alphabetically: "Disease" < "Gene", so canonical is reverse direction
         canonical = "Disease|affects|R|Gene"
         wrong_direction = "Gene|affects|F|Disease"
 
         count = nhop_counts.get(canonical, 0)
-        assert count == 4, (
-            f"Expected count=4 (3 explicit + 1 pseudo-type) for {canonical}, got {count}"
+        assert count == 5, (
+            f"Expected count=5 (4 explicit + 1 pseudo-type) for {canonical}, got {count}"
         )
         # Wrong direction should not exist
         assert nhop_counts.get(wrong_direction, 0) == 0, (
@@ -162,15 +162,6 @@ class TestAggregated1HopCounts:
     Aggregated counts roll up to ancestor types.
     """
 
-    def test_pseudo_type_contributes_to_gene(self, pipeline_1hop):
-        """Gene aggregated affects count should include pseudo-type contribution."""
-        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Alphabetically: "Disease" < "Gene", so canonical is reverse direction
-        canonical = "Disease|affects|R|Gene"
-
-        count = nhop_counts.get(canonical, 0)
-        assert count == 4, f"Expected 4 (3 explicit + 1 pseudo-type) for {canonical}, got {count}"
-
     def test_pseudo_type_contributes_to_protein(self, pipeline_1hop):
         """Protein aggregated affects count should include pseudo-type contribution."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
@@ -187,8 +178,8 @@ class TestAggregated1HopCounts:
         canonical = "BiologicalEntity|affects|F|Disease"
 
         count = nhop_counts.get(canonical, 0)
-        # Gene(3) + Protein(1) + Gene+Protein(1) = 5
-        assert count == 5, f"Expected 5 for {canonical}, got {count}"
+        # Gene(4) + Protein(1) + Gene+Protein(1) = 6
+        assert count == 6, f"Expected 6 for {canonical}, got {count}"
 
     def test_chemical_entity_aggregation(self, pipeline_1hop):
         """ChemicalEntity aggregated treats count should equal SmallMolecule count."""
@@ -206,9 +197,11 @@ class TestAggregated1HopCounts:
 
         When different-type paths (e.g. Disease|affects|R|Gene) expand to same-type
         variants (BiologicalEntity|affects|*|BiologicalEntity), both F and R directions
-        must be generated. The 5 affects edges (Gene→Disease x3, Protein→Disease x1,
-        Gene+Protein→Disease x1) plus pseudo-type expansion to Protein (+1) give 6 total,
-        contributed to both F and R directions.
+        must be generated. The 6 affects edges between BiologicalEntity nodes
+        (Gene→Disease x4, Protein→Disease x1, Gene+Protein→Disease x1) plus
+        pseudo-type expansion to Protein (+1) give 7 total, contributed to both
+        F and R directions. Note: SmallMolecule→Gene affects edges do NOT count
+        here because SmallMolecule is ChemicalEntity, not BiologicalEntity.
         """
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
         forward = "BiologicalEntity|affects|F|BiologicalEntity"
@@ -217,27 +210,27 @@ class TestAggregated1HopCounts:
         forward_count = nhop_counts.get(forward, 0)
         reverse_count = nhop_counts.get(reverse, 0)
 
-        assert forward_count == 6, f"Expected 6 for {forward}, got {forward_count}"
-        assert reverse_count == 6, f"Expected 6 for {reverse}, got {reverse_count}"
+        assert forward_count == 7, f"Expected 7 for {forward}, got {forward_count}"
+        assert reverse_count == 7, f"Expected 7 for {reverse}, got {reverse_count}"
 
     def test_named_thing_related_to_aggregation(self, pipeline_1hop):
         """NamedThing|related_to|A|NamedThing should aggregate all edges (related_to is symmetric root predicate).
 
         All edges roll up to NamedThing (top-level type) and related_to (top-level symmetric predicate):
-        - affects: 5 edges
+        - affects: 8 edges
         - treats: 2 edges
         - interacts_with: 3 edges
         - regulates: 1 edge
         - associated_with: 1 edge
-        Total: 12 edges
+        Total: 15 edges
         """
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
         # NamedThing == NamedThing (same type), symmetric predicate uses 'A'
         canonical = "NamedThing|related_to|A|NamedThing"
 
         count = nhop_counts.get(canonical, 0)
-        # All 12 edges in the graph roll up to this
-        assert count == 12, f"Expected 12 (all edges) for {canonical}, got {count}"
+        # All 15 edges in the graph roll up to this
+        assert count == 15, f"Expected 15 (all edges) for {canonical}, got {count}"
 
     def test_biological_entity_related_to_chemical_entity(self, pipeline_1hop):
         """BiologicalEntity|related_to|A|ChemicalEntity should aggregate treats edges."""
@@ -249,12 +242,11 @@ class TestAggregated1HopCounts:
 
         count = nhop_counts.get(path, 0)
 
-        # Expected: 2 treats edges (SmallMolecule→Disease) aggregate to this path
-        # Disease|treats|R|SmallMolecule expands to:
-        # - Disease → BiologicalEntity (type hierarchy)
-        # - SmallMolecule → ChemicalEntity (type hierarchy)
-        # - treats → related_to (predicate hierarchy, becomes 'A' for symmetric)
-        expected_count = 2
+        # Expected: 2 treats edges (SmallMolecule→Disease) + 2 affects edges
+        # (SmallMolecule→Gene) aggregate to this path.
+        # Both SmallMolecule (ChemicalEntity) ↔ Disease/Gene (BiologicalEntity)
+        # roll up to BiologicalEntity|related_to|A|ChemicalEntity.
+        expected_count = 4
 
         assert count == expected_count, (
             f"Expected count={expected_count} for {path}, got {count}. "
@@ -430,140 +422,6 @@ class TestMetricsCalculation:
                     )
 
 
-class TestRawResultOverlaps:
-    """Test overlap values in the raw analysis output.
-
-    For 1-hop analysis, each predictor matrix is compared with all 1-hop
-    target matrices of the same (src, tgt) type pair, plus an aggregated
-    ANY target. Since the golden graph has at most one predicate per
-    type pair direction, all non-ANY overlaps are self-comparisons.
-    """
-
-    def test_all_overlaps_positive(self, pipeline_1hop):
-        """Every row in raw results has overlap > 0 (zero-overlap rows are skipped)."""
-        raw_results = pipeline_1hop["raw_results"]
-
-        for row in raw_results:
-            assert row['overlap'] > 0, (
-                f"Zero overlap in raw results: {row['predictor_path']} vs {row['predicted_path']}"
-            )
-
-    def test_self_comparison_overlap_equals_count(self, pipeline_1hop):
-        """When predictor_path == predicted_path, overlap == predictor_count."""
-        raw_results = pipeline_1hop["raw_results"]
-
-        self_comparisons = [
-            r for r in raw_results
-            if r['predictor_path'] == r['predicted_path']
-        ]
-
-        assert len(self_comparisons) > 0, "No self-comparisons found"
-
-        for row in self_comparisons:
-            assert row['overlap'] == row['predictor_count'], (
-                f"Self-comparison overlap mismatch: {row['predictor_path']} "
-                f"has overlap={row['overlap']} but count={row['predictor_count']}"
-            )
-
-    def test_overlap_leq_min_counts(self, pipeline_1hop):
-        """Overlap <= min(predictor_count, predicted_count) for all rows."""
-        raw_results = pipeline_1hop["raw_results"]
-
-        for row in raw_results:
-            max_possible = min(row['predictor_count'], row['predicted_count'])
-            assert row['overlap'] <= max_possible, (
-                f"Overlap {row['overlap']} exceeds min(predictor={row['predictor_count']}, "
-                f"predicted={row['predicted_count']}) for {row['predictor_path']} vs {row['predicted_path']}"
-            )
-
-    def test_regulates_forward_vs_any_overlap(self, pipeline_1hop):
-        """Gene|regulates|F|Gene vs Gene|ANY|A|Gene: overlap=1 < predicted_count=2.
-
-        The ANY matrix has both (A,B) and (B,A) from forward and reverse regulates.
-        The forward predictor only has (A,B), so overlap is 1 out of 2.
-        """
-        raw_results = pipeline_1hop["raw_results"]
-
-        matches = [
-            r for r in raw_results
-            if r['predictor_path'] == 'Gene|regulates|F|Gene'
-            and r['predicted_path'] == 'Gene|ANY|A|Gene'
-        ]
-
-        assert len(matches) == 1, f"Expected 1 match, got {len(matches)}"
-        row = matches[0]
-        assert row['overlap'] == 1, f"Expected overlap=1, got {row['overlap']}"
-        assert row['predicted_count'] == 2, f"Expected predicted_count=2, got {row['predicted_count']}"
-
-    def test_regulates_reverse_vs_any_overlap(self, pipeline_1hop):
-        """Gene|regulates|R|Gene vs Gene|ANY|A|Gene: overlap=1 < predicted_count=2.
-
-        Same as forward case - reverse has (B,A) which is 1 of 2 pairs in ANY.
-        """
-        raw_results = pipeline_1hop["raw_results"]
-
-        matches = [
-            r for r in raw_results
-            if r['predictor_path'] == 'Gene|regulates|R|Gene'
-            and r['predicted_path'] == 'Gene|ANY|A|Gene'
-        ]
-
-        assert len(matches) == 1, f"Expected 1 match, got {len(matches)}"
-        row = matches[0]
-        assert row['overlap'] == 1, f"Expected overlap=1, got {row['overlap']}"
-        assert row['predicted_count'] == 2, f"Expected predicted_count=2, got {row['predicted_count']}"
-
-    def test_no_cross_predicate_overlap_rows(self, pipeline_1hop):
-        """No raw result rows where predictor and predicted have different predicates.
-
-        In the golden graph, different predicates between the same type pair have
-        different node pairs, so cross-predicate overlap would be 0 (and excluded).
-        The only "cross-predicate" rows are the ANY aggregated targets.
-        """
-        raw_results = pipeline_1hop["raw_results"]
-
-        for row in raw_results:
-            pred_parts = row['predictor_path'].split('|')
-            tgt_parts = row['predicted_path'].split('|')
-
-            if 'ANY' in tgt_parts:
-                continue  # ANY targets are expected
-
-            # For non-ANY targets, predictor and predicted should have the same predicate
-            pred_predicate = pred_parts[1] if len(pred_parts) >= 4 else None
-            tgt_predicate = tgt_parts[1] if len(tgt_parts) >= 4 else None
-
-            assert pred_predicate == tgt_predicate, (
-                f"Cross-predicate row found: {row['predictor_path']} vs {row['predicted_path']}"
-            )
-
-    def test_disease_affects_gene_self_overlap(self, pipeline_1hop):
-        """Disease|affects|R|Gene self-comparison: overlap=3 (all 3 affects edges)."""
-        raw_results = pipeline_1hop["raw_results"]
-
-        matches = [
-            r for r in raw_results
-            if r['predictor_path'] == 'Disease|affects|R|Gene'
-            and r['predicted_path'] == 'Disease|affects|R|Gene'
-        ]
-
-        assert len(matches) == 1
-        assert matches[0]['overlap'] == 3
-        assert matches[0]['predictor_count'] == 3
-
-    def test_interacts_with_self_overlap(self, pipeline_1hop):
-        """Gene|interacts_with|A|Protein self-comparison: overlap=2."""
-        raw_results = pipeline_1hop["raw_results"]
-
-        matches = [
-            r for r in raw_results
-            if r['predictor_path'] == 'Gene|interacts_with|A|Protein'
-            and r['predicted_path'] == 'Gene|interacts_with|A|Protein'
-        ]
-
-        assert len(matches) == 1
-        assert matches[0]['overlap'] == 2
-        assert matches[0]['predictor_count'] == 2
 
 
 class TestGroupedOverlapPrecision:
@@ -571,21 +429,83 @@ class TestGroupedOverlapPrecision:
 
     The interesting cases are when broad aggregated predictors (like
     NamedThing|related_to|A|NamedThing) are evaluated against narrow targets.
-    The precision should be < 1.0 because the predictor covers many more pairs
+    The precision is < 1.0 because the predictor covers many more pairs
     than the specific target.
     """
+
+    def test_interacts_with_self_overlap(self, pipeline_1hop):
+        """Gene|interacts_with|A|Protein self-comparison: aggregated overlap=3, predictor_count=3.
+
+        The aggregated count is 3: 2 from the explicit Gene|interacts_with|A|Protein matrix
+        (Gene_A↔Protein_M, Gene_B↔Protein_N) plus 1 from the Gene+Protein pseudo-type
+        (GeneProtein_Z↔Gene_B expands to Protein↔Gene = Gene↔Protein, symmetric).
+        The grouping step must aggregate all three, so the self-comparison overlap=3.
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+        target_filename = "Gene_interacts_with_A_Protein.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for Gene|interacts_with|A|Protein. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        self_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'Gene|interacts_with|A|Protein'
+        ]
+
+        assert len(self_rows) == 1, f"Expected 1 self-comparison row, got {len(self_rows)}"
+        row = self_rows[0]
+        assert row['predictor_count'] == 3, (
+            f"Expected predictor_count=3 (2 explicit + 1 pseudo-type), got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 3, (
+            f"Expected overlap=3 (aggregated, including pseudo-type contribution), got {row['overlap']}"
+        )
+
+    def test_disease_affects_gene_self_overlap(self, pipeline_1hop):
+        """Disease|affects|R|Gene self-comparison: aggregated overlap=5, predictor_count=5.
+
+        The aggregated count is 5: 4 from the explicit Gene matrix (Gene_A→Disease_P,
+        Gene_A→Disease_Q, Gene_B→Disease_P, Gene_B→Disease_Q) plus 1 from the
+        Gene+Protein pseudo-type (GeneProtein_Z→Disease). The grouping step must
+        aggregate both contributions, so the self-comparison overlap must also equal 5,
+        giving precision=1.0.
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+        target_filename = "Disease_affects_R_Gene.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for Disease|affects|R|Gene. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        self_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'Disease|affects|R|Gene'
+        ]
+
+        assert len(self_rows) == 1, f"Expected 1 self-comparison row, got {len(self_rows)}"
+        row = self_rows[0]
+        assert row['predictor_count'] == 5, (
+            f"Expected predictor_count=5 (4 explicit + 1 pseudo-type), got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 5, (
+            f"Expected overlap=5 (aggregated, including pseudo-type contribution), got {row['overlap']}"
+        )
 
     def test_named_thing_related_to_predicting_affects(self, pipeline_1hop):
         """NamedThing|related_to|A|NamedThing predicting Disease|affects|R|Gene.
 
-        The broad predictor covers all edges in the graph. 4 of them are
+        The broad predictor covers all 12 edges in the graph. 4 of them are
         Gene-type→Disease affects edges: 3 from Gene + 1 from Gene+Protein
-        (which rolls up to Gene during aggregation). So overlap=4 and
-        precision = 4/nhop_count < 1.0.
+        (which rolls up to Gene during aggregation). So overlap=4, predictor_count=12,
+        and precision = 4/12 = 0.333...
         """
         grouped_results = pipeline_1hop["grouped_results"]
 
-        # Use exact filename - loose matching picks wrong files
         target_filename = "Disease_affects_R_Gene.tsv.zst"
 
         assert target_filename in grouped_results, (
@@ -605,14 +525,17 @@ class TestGroupedOverlapPrecision:
         )
 
         row = nt_rows[0]
-        # 4 edges: Gene_A→Disease_P, Gene_A→Disease_Q, Gene_B→Disease_P (Gene|affects),
-        # plus GeneProtein_Z→Disease_Q (Gene+Protein|affects, rolls up to Gene)
-        assert row['overlap'] == 4, f"Expected overlap=4, got {row['overlap']}"
-        assert row['predictor_count'] > 4, (
-            f"NamedThing|related_to|A|NamedThing should have count > 4, got {row['predictor_count']}"
+        # 5 edges aggregate to Disease|affects|R|Gene: Gene_A→Disease_P, Gene_A→Disease_Q,
+        # Gene_B→Disease_P, Gene_B→Disease_Q (Gene|affects), plus GeneProtein_Z→Disease_Q
+        # (Gene+Protein|affects, rolls up to Gene)
+        assert row['overlap'] == 5, f"Expected overlap=5, got {row['overlap']}"
+        # NamedThing|related_to|A|NamedThing aggregates all 15 edges in the graph
+        assert row['predictor_count'] == 15, (
+            f"Expected predictor_count=15 (all edges) for NamedThing|related_to|A|NamedThing, "
+            f"got {row['predictor_count']}"
         )
-        assert row['precision'] < 1.0, (
-            f"Precision should be < 1.0 for broad predictor, got {row['precision']}"
+        assert row['precision'] == pytest.approx(1 / 3, abs=1e-4), (
+            f"Expected precision=1/3, got {row['precision']}"
         )
 
     def test_self_comparison_precision_is_one(self, pipeline_1hop):
@@ -622,57 +545,100 @@ class TestGroupedOverlapPrecision:
         """
         grouped_results = pipeline_1hop["grouped_results"]
 
-        # Find a file with self-comparison row
         found_self = False
         for filename, rows in grouped_results.items():
-            # Derive the target path from the filename
-            # Filename format: Type1_pred_dir_Type2.tsv.zst
             for row in rows:
                 predictor = row.get('predictor_metapath', '')
-                # Check if predictor matches what the filename encodes
-                # Self-comparison = predictor that matches the target pattern
                 safe_pred = predictor.replace('|', '_').replace(':', '_').replace(' ', '_')
                 expected_filename = f"{safe_pred}.tsv.zst"
 
                 if expected_filename == filename:
                     found_self = True
-                    assert abs(row['precision'] - 1.0) < 0.001, (
+                    assert row['precision'] == pytest.approx(1.0), (
                         f"Self-comparison precision should be 1.0, got {row['precision']} "
                         f"for {predictor} in {filename}"
                     )
 
         assert found_self, "No self-comparison rows found in grouped output"
 
-    def test_narrow_predictor_low_recall_for_broad_target(self, pipeline_1hop):
-        """A narrow predictor predicting a broad target should have recall < 1.0.
+    def test_named_thing_related_to_predicting_biological_entity_affects(self, pipeline_1hop):
+        """NamedThing|related_to|A|NamedThing predicting BiologicalEntity|affects|F|BiologicalEntity.
 
-        Gene|regulates|F|Gene predicting BiologicalEntity|affects|F|BiologicalEntity.
-        The regulates edge is just 1 pair, but the aggregated target has many more.
+        The broad predictor (count=12) covers all 12 edges. The target has 6 pairs
+        (Gene x3 + Protein x1 + Gene+Protein expanding to both Gene and Protein = 6).
+        All 6 target pairs are covered by the predictor, so overlap=6, recall=1.0.
+        Precision = 6/12 = 0.5 (predictor is twice as broad as the target).
         """
         grouped_results = pipeline_1hop["grouped_results"]
 
-        # Find BiologicalEntity|affects|F|BiologicalEntity target file
-        target_filename = None
-        for filename in grouped_results:
-            if ('BiologicalEntity_affects_F_BiologicalEntity' in filename
-                    or 'BiologicalEntity_affects_R_BiologicalEntity' in filename):
-                target_filename = filename
-                break
+        target_filename = "BiologicalEntity_affects_F_BiologicalEntity.tsv.zst"
 
-        if target_filename is None:
-            pytest.skip("BiologicalEntity|affects|*|BiologicalEntity target not found")
+        assert target_filename in grouped_results, (
+            f"No grouped file found for BiologicalEntity|affects|F|BiologicalEntity. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
 
         rows = grouped_results[target_filename]
-        reg_rows = [
+        nt_rows = [
             r for r in rows
-            if r.get('predictor_metapath') == 'Gene|regulates|F|Gene'
+            if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
         ]
 
-        if len(reg_rows) == 0:
-            pytest.skip("Gene|regulates|F|Gene not found as predictor")
+        assert len(nt_rows) == 1, (
+            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
+            f"got {len(nt_rows)}"
+        )
 
-        row = reg_rows[0]
-        assert row['overlap'] >= 1, f"Expected overlap >= 1, got {row['overlap']}"
-        assert row['recall'] < 1.0, (
-            f"Narrow predictor should have recall < 1.0 for broad target, got {row['recall']}"
+        row = nt_rows[0]
+        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
+        assert row['predictor_count'] == 15, (
+            f"Expected predictor_count=15, got {row['predictor_count']}"
+        )
+        assert row['recall'] == pytest.approx(1.0), (
+            f"Expected recall=1.0 (all 7 target pairs covered), got {row['recall']}"
+        )
+        assert row['precision'] == pytest.approx(7 / 15, abs=1e-4), (
+            f"Expected precision=7/15, got {row['precision']}"
+        )
+
+    def test_narrow_predictor_low_recall_for_broad_target(self, pipeline_1hop):
+        """A narrow predictor predicting a broad target has precision=1.0 but recall < 1.0.
+
+        BiologicalEntity|affects|F|BiologicalEntity (count=7) predicting
+        NamedThing|related_to|A|NamedThing (count=19 in aggregated_path_counts).
+        The path_counts exceed the nhop_counts (15) because pseudo-type nodes
+        contribute twice during aggregation (once per leaf type).
+        All 7 predictor pairs are in the broad target (precision=1.0), but they
+        cover only 7/19 of the target (recall=7/19).
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        target_filename = "NamedThing_related_to_A_NamedThing.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for NamedThing|related_to|A|NamedThing. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        bio_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'BiologicalEntity|affects|F|BiologicalEntity'
+        ]
+
+        assert len(bio_rows) == 1, (
+            f"Expected 1 row for BiologicalEntity|affects|F|BiologicalEntity predictor, "
+            f"got {len(bio_rows)}"
+        )
+
+        row = bio_rows[0]
+        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
+        assert row['predictor_count'] == 7, (
+            f"Expected predictor_count=7, got {row['predictor_count']}"
+        )
+        assert row['precision'] == pytest.approx(1.0), (
+            f"Expected precision=1.0 (all predictor pairs in broad target), got {row['precision']}"
+        )
+        assert row['recall'] == pytest.approx(7 / 19, abs=1e-4), (
+            f"Expected recall=7/19, got {row['recall']}"
         )

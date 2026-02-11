@@ -234,22 +234,21 @@ class TestRawResult2HopOverlaps:
     def test_gene_regulates_gene_affects_disease_overlap(self, pipeline_2hop):
         """Gene→Gene→Disease via regulates+affects should overlap with Gene→Disease affects.
 
-        2-hop: Gene_A→Gene_B (regulates), Gene_B→Disease_P (affects) = {(Gene_A, Disease_P)}
-        1-hop target: Gene→Disease affects = {(Gene_A, Disease_P), (Gene_A, Disease_Q), (Gene_B, Disease_P)}
-        Overlap = 1
+        2-hop: Gene_A→Gene_B (regulates), Gene_B→{Disease_P, Disease_Q} (affects)
+             = {(Gene_A, Disease_P), (Gene_A, Disease_Q)}  predictor_count=2
+        1-hop target: Gene→Disease affects (explicit Gene matrix only, 4 pairs)
+             predicted_count=4  (pseudo-type GeneProtein_Z not included in raw result)
+        Overlap = 2  (Gene_A reaches both Disease_P and Disease_Q via the 2-hop)
 
         Note: The path may be canonicalized (reversed) in the output.
         """
         raw_results = pipeline_2hop["raw_results"]
 
-        # Look for this specific predictor→predicted combination
-        # The predictor could be in either canonical direction
         matches = [
             r for r in raw_results
             if 'regulates' in r['predictor_path']
             and 'affects' in r['predictor_path']
             and 'Disease' in r['predictor_path']
-            and 'ANY' not in r['predicted_path']
             and 'affects' in r['predicted_path']
         ]
 
@@ -259,9 +258,15 @@ class TestRawResult2HopOverlaps:
         )
 
         for match in matches:
-            assert match['overlap'] == 1, (
-                f"Expected overlap=1 for {match['predictor_path']} vs {match['predicted_path']}, "
+            assert match['overlap'] == 2, (
+                f"Expected overlap=2 for {match['predictor_path']} vs {match['predicted_path']}, "
                 f"got {match['overlap']}"
+            )
+            assert match['predictor_count'] == 2, (
+                f"Expected predictor_count=2, got {match['predictor_count']}"
+            )
+            assert match['predicted_count'] == 4, (
+                f"Expected predicted_count=4, got {match['predicted_count']}"
             )
 
     def test_gene_affects_disease_affects_gene_overlap(self, pipeline_2hop):
@@ -280,7 +285,6 @@ class TestRawResult2HopOverlaps:
             r for r in raw_results
             if r['predictor_path'].count('affects') == 2  # 2 hops both using affects
             and 'regulates' in r['predicted_path']
-            and 'ANY' not in r['predicted_path']
         ]
 
         assert len(matches) >= 1, (
@@ -311,7 +315,6 @@ class TestRawResult2HopOverlaps:
             and 'Protein' in r['predictor_path']
             and 'Gene' in r['predictor_path']
             and 'interacts_with' in r['predicted_path']
-            and 'ANY' not in r['predicted_path']
         ]
 
         assert len(matches) >= 1, (

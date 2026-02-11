@@ -531,20 +531,6 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
     elif matrix1_index is not None:
         print(f"Processing ONLY Matrix1 index: {matrix1_index}", flush=True)
 
-    # Build aggregated 1-hop matrices
-    print(f"\n[TIMING] Building aggregated 1-hop matrices...", flush=True)
-    agg_start = time.time()
-    aggregated_1hop = {}
-    for src_type, pred, tgt_type, matrix, direction in all_matrices:
-        key = (src_type, tgt_type)
-        if key not in aggregated_1hop:
-            aggregated_1hop[key] = matrix.dup()
-        else:
-            aggregated_1hop[key] = aggregated_1hop[key].ewise_add(matrix, gb.binary.any).new()
-    agg_time = time.time() - agg_start
-
-    print(f"[TIMING] Aggregated matrices built in {agg_time:.1f}s", flush=True)
-    print(f"Created {len(aggregated_1hop):,} aggregated type-pair matrices", flush=True)
 
     # Group by source type for efficient lookup
     by_source_type = defaultdict(list)
@@ -680,24 +666,7 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                     f.write(f"{nhop_metapath}\t{nhop_count}\t{onehop_metapath}\t{onehop_count}\t{overlap_count}\t{total_possible}\n")
                     rows_written += 1
 
-                # Also compare with aggregated 1-hop
-                agg_key = (src_type_final, tgt_type_final)
-                if agg_key in aggregated_1hop:
-                    agg_matrix = aggregated_1hop[agg_key]
-
-                    if accumulated_matrix.nrows == agg_matrix.nrows and accumulated_matrix.ncols == agg_matrix.ncols:
-                        overlap_matrix = accumulated_matrix.ewise_mult(agg_matrix, gb.binary.pair).new()
-                        overlap_count = overlap_matrix.nvals
-                        agg_count = agg_matrix.nvals
-                        del overlap_matrix
-
-                        # Skip zero-overlap rows
-                        if overlap_count > 0:
-                            agg_metapath = f"{src_type_final}|ANY|A|{tgt_type_final}"
-                            f.write(f"{nhop_metapath}\t{nhop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
-                            rows_written += 1
-
-                # CRITICAL: Flush after every path (not every 10k rows)
+# CRITICAL: Flush after every path (not every 10k rows)
                 f.flush()
 
                 # Record path completion
@@ -818,7 +787,6 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
     print(f"\n[TIMING] Total analysis function time: {total_analysis_time:.1f}s ({total_analysis_time/60:.1f}min)", flush=True)
     print(f"[TIMING] Breakdown:", flush=True)
     print(f"  Matrix list build:  {list_build_time:7.1f}s ({list_build_time/total_analysis_time*100:5.1f}%)", flush=True)
-    print(f"  ANY matrix build:   {agg_time:7.1f}s ({agg_time/total_analysis_time*100:5.1f}%)", flush=True)
     print(f"  Main computation:   {computation_time:7.1f}s ({computation_time/total_analysis_time*100:5.1f}%)", flush=True)
 
 
