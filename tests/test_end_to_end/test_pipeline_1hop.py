@@ -605,11 +605,9 @@ class TestGroupedOverlapPrecision:
         """A narrow predictor predicting a broad target has precision=1.0 but recall < 1.0.
 
         BiologicalEntity|affects|F|BiologicalEntity (count=7) predicting
-        NamedThing|related_to|A|NamedThing (count=19 in aggregated_path_counts).
-        The path_counts exceed the nhop_counts (15) because pseudo-type nodes
-        contribute twice during aggregation (once per leaf type).
+        NamedThing|related_to|A|NamedThing (count=15).
         All 7 predictor pairs are in the broad target (precision=1.0), but they
-        cover only 7/19 of the target (recall=7/19).
+        cover only 7/15 of the target (recall=7/15).
         """
         grouped_results = pipeline_1hop["grouped_results"]
 
@@ -639,6 +637,6 @@ class TestGroupedOverlapPrecision:
         assert row['precision'] == pytest.approx(1.0), (
             f"Expected precision=1.0 (all predictor pairs in broad target), got {row['precision']}"
         )
-        assert row['recall'] == pytest.approx(7 / 19, abs=1e-4), (
-            f"Expected recall=7/19, got {row['recall']}"
+        assert row['recall'] == pytest.approx(7 / 15, abs=1e-4), (
+            f"Expected recall=7/15, got {row['recall']}"
         )

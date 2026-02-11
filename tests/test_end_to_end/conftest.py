@@ -21,14 +21,12 @@ from golden_graph import write_golden_graph, GRAPH_STATS
 from analyze_hop_overlap import analyze_nhop_overlap
 from prebuild_matrices import load_node_types, build_matrices
 from prepare_grouping import (
-    precompute_aggregated_counts,
     precompute_aggregated_nhop_counts,
     precompute_type_node_counts,
     extract_type_pairs_from_aggregated_paths,
 )
 from group_single_onehop_worker import (
     group_type_pair,
-    load_aggregated_counts,
     load_aggregated_nhop_counts,
     load_type_node_counts,
 )
@@ -103,34 +101,27 @@ def pipeline_1hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated 1-hop counts
-    aggregated_counts_path = results_dir / "aggregated_path_counts.json"
-    aggregated_counts = precompute_aggregated_counts(
-        str(matrices_dir), str(aggregated_counts_path)
-    )
-
-    # Step 3: Precompute aggregated N-hop counts
+    # Step 2: Precompute aggregated counts from result files
+    # (covers both N-hop predictor paths and 1-hop predicted paths)
     aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
     aggregated_nhop_counts = precompute_aggregated_nhop_counts(
         str(results_dir), str(aggregated_nhop_counts_path), n_hops
     )
 
-    # Step 4: Precompute type node counts
+    # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
     type_node_counts_path = results_dir / "type_node_counts.json"
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 5: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
+    # Step 4: Extract type pairs and run grouping
+    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_nhop_counts)
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()
 
-    # Create file list for workers
     file_list = [str(result_file)]
 
-    # Run grouping for each type pair
     for type1, type2 in type_pairs:
         group_type_pair(
             type1=type1,
@@ -139,7 +130,6 @@ def pipeline_1hop(golden_workspace):
             output_dir=str(grouped_dir),
             n_hops=n_hops,
             aggregate=True,
-            aggregated_counts=load_aggregated_counts(str(aggregated_counts_path)),
             aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
             type_node_counts=load_type_node_counts(str(type_node_counts_path)),
             min_count=0,  # No filtering for tests
@@ -148,7 +138,6 @@ def pipeline_1hop(golden_workspace):
             excluded_predicates=set(),
         )
 
-    # Parse results
     grouped_results = parse_all_grouped_files(grouped_dir)
     raw_results = parse_raw_results(result_file)
 
@@ -158,7 +147,6 @@ def pipeline_1hop(golden_workspace):
         "result_file": result_file,
         "results_dir": results_dir,
         "raw_results": raw_results,
-        "aggregated_counts": aggregated_counts,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,
@@ -182,26 +170,21 @@ def pipeline_2hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated 1-hop counts
-    aggregated_counts_path = results_dir / "aggregated_path_counts.json"
-    aggregated_counts = precompute_aggregated_counts(
-        str(matrices_dir), str(aggregated_counts_path)
-    )
-
-    # Step 3: Precompute aggregated N-hop counts
+    # Step 2: Precompute aggregated counts from result files
+    # (covers both N-hop predictor paths and 1-hop predicted paths)
     aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
     aggregated_nhop_counts = precompute_aggregated_nhop_counts(
         str(results_dir), str(aggregated_nhop_counts_path), n_hops
     )
 
-    # Step 4: Precompute type node counts
+    # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
     type_node_counts_path = results_dir / "type_node_counts.json"
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 5: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
+    # Step 4: Extract type pairs and run grouping
+    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_nhop_counts)
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()
@@ -216,7 +199,6 @@ def pipeline_2hop(golden_workspace):
             output_dir=str(grouped_dir),
             n_hops=n_hops,
             aggregate=True,
-            aggregated_counts=load_aggregated_counts(str(aggregated_counts_path)),
             aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
             type_node_counts=load_type_node_counts(str(type_node_counts_path)),
             min_count=0,
@@ -234,7 +216,6 @@ def pipeline_2hop(golden_workspace):
         "result_file": result_file,
         "results_dir": results_dir,
         "raw_results": raw_results,
-        "aggregated_counts": aggregated_counts,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,
