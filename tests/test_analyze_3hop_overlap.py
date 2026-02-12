@@ -86,14 +86,32 @@ class TestShouldProcessPath:
         ) == False
 
     def test_3hop_uses_size(self):
-        """Test that 3-hop uses size-based elimination."""
+        """Test that 3-hop uses size-based elimination with alphabetical tiebreaker."""
+        # last > first: process regardless of direction
         assert should_process_path(
             n_hops=3,
-            first_matrix_nvals=500,
-            last_matrix_nvals=500,  # Equal is OK
+            first_matrix_nvals=499,
+            last_matrix_nvals=500,
             src_type='Protein',
             tgt_type='Gene'
         ) == True
+
+        # Equal nvals: fall back to alphabetical (Gene < Protein, so Gene→Protein is canonical)
+        assert should_process_path(
+            n_hops=3,
+            first_matrix_nvals=500,
+            last_matrix_nvals=500,
+            src_type='Gene',
+            tgt_type='Protein'  # canonical direction
+        ) == True
+
+        assert should_process_path(
+            n_hops=3,
+            first_matrix_nvals=500,
+            last_matrix_nvals=500,
+            src_type='Protein',
+            tgt_type='Gene'  # non-canonical direction
+        ) == False
 
         assert should_process_path(
             n_hops=3,
