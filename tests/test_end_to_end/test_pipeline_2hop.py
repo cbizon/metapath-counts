@@ -366,17 +366,102 @@ class TestGrouped2HopOverlapMetrics:
                         f"(P={precision}, R={recall}) in {filename}"
                     )
 
-    def test_mcc_positive_when_overlap_positive(self, pipeline_2hop):
-        """When overlap > 0, MCC should be positive (positive association)."""
+
+
+class TestGrouped2HopSpecificPaths:
+    """Test specific known 2-hop overlap paths in grouped output.
+
+    These tests verify exact values for paths we can manually compute
+    from the golden graph structure.
+    """
+
+    def test_chemical_affects_gene_affects_disease_predicts_treats(self, pipeline_2hop):
+        """ChemicalEntity|affects|F|Gene|affects|F|Disease predicts ChemicalEntity|treats|F|Disease.
+
+        From the golden graph:
+          SmallMolecule_X --affects--> Gene_A --affects--> {Disease_P, Disease_Q}
+          SmallMolecule_Y --affects--> Gene_B --affects--> {Disease_P, Disease_Q}
+        predictor_count = 4 (SM→Gene→Disease pairs)
+
+          SmallMolecule_X --treats--> Disease_P
+          SmallMolecule_Y --treats--> Disease_Q
+        onehop_count = 2
+
+        Overlap: (SM_X, Disease_P) and (SM_Y, Disease_Q) = 2
+        precision = 2/4 = 0.5, recall = 2/2 = 1.0
+
+        MCC=0: TP=2, FP=2, FN=0, TN=0 → denominator (TN+FN)=0 → MCC undefined → 0
+        """
         grouped_results = pipeline_2hop["grouped_results"]
 
-        for filename, rows in grouped_results.items():
-            for row in rows:
-                overlap = row.get('overlap', 0)
-                mcc = row.get('mcc', 0)
+        target_file = "ChemicalEntity_treats_F_Disease.tsv.zst"
+        assert target_file in grouped_results, (
+            f"Expected file {target_file} not found. Available: {sorted(grouped_results.keys())}"
+        )
 
-                if overlap > 0:
-                    assert mcc > 0, (
-                        f"overlap={overlap} but mcc={mcc} <= 0 for "
-                        f"{row.get('predictor_metapath', '')} in {filename}"
-                    )
+        rows = grouped_results[target_file]
+        predictor = "ChemicalEntity|affects|F|Gene|affects|F|Disease"
+
+        matches = [r for r in rows if r.get("predictor_metapath") == predictor]
+        assert len(matches) == 1, (
+            f"Expected exactly one row for {predictor}, got {len(matches)}"
+        )
+
+        row = matches[0]
+        assert row["overlap"] == 2, f"Expected overlap=2, got {row['overlap']}"
+        assert row["predictor_count"] == 4, f"Expected predictor_count=4, got {row['predictor_count']}"
+        assert abs(row["precision"] - 0.5) < 0.0001, f"Expected precision=0.5, got {row['precision']}"
+        assert abs(row["recall"] - 1.0) < 0.0001, f"Expected recall=1.0, got {row['recall']}"
+        assert row["mcc"] == 0.0, f"Expected mcc=0.0 (TN=0 → denominator=0), got {row['mcc']}"
+
+    def test_biological_affects_biological_affects_biological_predicts_related_to(self, pipeline_2hop):
+        """BiologicalEntity|affects|F|BiologicalEntity|affects|F|BiologicalEntity predicts
+        BiologicalEntity|related_to|A|BiologicalEntity.
+
+        Genes, Proteins, and Disease nodes are all BiologicalEntity. All explicit
+        affects edges (Gene→Disease, Protein→Disease, GeneProtein_Z→Disease,
+        SmallMolecule→Gene) roll up to BiologicalEntity|affects paths.
+
+        The 2-hop BiologicalEntity→BiologicalEntity→BiologicalEntity path (count=2)
+        comes from SmallMolecule_X/Y --affects--> Gene_A/B. Both SM_X and SM_Y
+        are SmallMolecule (not BiologicalEntity), so they DON'T contribute.
+        Only pure biological affects-affects chains contribute. The explicit
+        Gene|affects|F|Gene|affects|R|Gene has count=2
+        (Gene_A→Disease_P→Gene_A, Gene_A→Disease_Q→Gene_A = same endpoint, unique).
+
+        With 7 BiologicalEntity nodes (Gene_A, Gene_B, GeneProtein_Z, Protein_M,
+        Protein_N, Disease_P, Disease_Q), total_possible = 7×7 = 49.
+
+        overlap=2, predictor_count=2 → precision=1.0
+        onehop_count=15: sum of all explicit 1-hop paths that roll up to
+        BiologicalEntity|related_to|A|BiologicalEntity from the raw results:
+        Gene|regulates|F|Gene(1) + Protein|interacts_with|A|Gene(2) +
+        Disease|affects|R|Gene(4) + Gene+Protein|interacts_with|A|Gene(1) +
+        Protein|affects|F|Disease(1) + Protein|associated_with|A|Disease(1) +
+        Gene+Protein|affects|F|Disease(1) + Gene|affects|F|Disease(4) = 15
+        recall = 2/15 ≈ 0.1333
+        """
+        grouped_results = pipeline_2hop["grouped_results"]
+
+        target_file = "BiologicalEntity_related_to_A_BiologicalEntity.tsv.zst"
+        assert target_file in grouped_results, (
+            f"Expected file {target_file} not found. Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_file]
+        predictor = "BiologicalEntity|affects|F|BiologicalEntity|affects|F|BiologicalEntity"
+
+        matches = [r for r in rows if r.get("predictor_metapath") == predictor]
+        assert len(matches) == 1, (
+            f"Expected exactly one row for {predictor}, got {len(matches)}"
+        )
+
+        row = matches[0]
+        assert row["overlap"] == 2, f"Expected overlap=2, got {row['overlap']}"
+        assert row["predictor_count"] == 2, f"Expected predictor_count=2, got {row['predictor_count']}"
+        assert abs(row["precision"] - 1.0) < 0.0001, f"Expected precision=1.0, got {row['precision']}"
+        expected_recall = 2 / 15
+        assert abs(row["recall"] - expected_recall) < 0.0001, (
+            f"Expected recall={expected_recall:.6f} (2/15), got {row['recall']}"
+        )
+        assert row["mcc"] > 0, f"Expected mcc > 0, got {row['mcc']}"

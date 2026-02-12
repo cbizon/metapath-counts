@@ -235,7 +235,10 @@ def should_process_path(n_hops: int, first_matrix_nvals: int, last_matrix_nvals:
     if n_hops == 1:
         return is_canonical_direction(src_type, tgt_type)
     else:
-        return last_matrix_nvals >= first_matrix_nvals
+        if last_matrix_nvals != first_matrix_nvals:
+            return last_matrix_nvals > first_matrix_nvals
+        # Tie-break equal sizes with canonical direction (same as 1-hop)
+        return is_canonical_direction(src_type, tgt_type)
 
 
 def format_metapath(node_types, predicates, directions):
@@ -610,10 +613,13 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                 src_type_final = node_types[0]
                 tgt_type_final = node_types[-1]
 
-                # Check if we should process this path (duplicate elimination)
-                if not should_process_path(n_hops, first_matrix_nvals, accumulated_matrix.nvals,
-                                          src_type_final, tgt_type_final):
-                    return
+                # For n_hops == 1: duplicate elimination (alphabetical) happens here
+                # because there is no recursive step. For n_hops > 1 the check already
+                # happened before the final multiplication (see recursive case below).
+                if n_hops == 1:
+                    if not should_process_path(1, first_matrix_nvals, accumulated_matrix.nvals,
+                                              src_type_final, tgt_type_final):
+                        return
 
                 # Generate path ID for tracking
                 if enable_path_tracking and matrix1_index is not None:
@@ -686,6 +692,15 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                 # Check dimension compatibility
                 if accumulated_matrix.ncols != matrix.nrows:
                     continue
+
+                # For the final hop: duplicate elimination before multiplying.
+                # Compare the last hop matrix nvals against the first matrix nvals
+                # to decide which direction is canonical. This avoids doing the
+                # expensive matrix multiplication for the non-canonical direction.
+                if depth == n_hops - 1:
+                    if not should_process_path(n_hops, first_matrix_nvals, matrix.nvals,
+                                              node_types[0], tgt_type):
+                        continue
 
                 # Build next path segment for tracking
                 next_node_types = node_types + [tgt_type]

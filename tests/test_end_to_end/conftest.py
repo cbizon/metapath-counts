@@ -114,8 +114,25 @@ def pipeline_1hop(golden_workspace):
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 4: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_nhop_counts)
+    # Step 4: Run grouping for exactly the type pairs present in the golden graph.
+    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
+    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
+    # explosion. Instead hardcode the pairs we actually test.
+    type_pairs = [
+        # Explicit leaf type pairs from the golden graph
+        ("Disease", "Gene"),
+        ("Disease", "Protein"),
+        ("Disease", "SmallMolecule"),
+        ("Gene", "Gene"),
+        ("Gene", "Protein"),
+        ("Gene", "SmallMolecule"),
+        # Hierarchical pairs explicitly tested in test_pipeline_1hop.py
+        ("BiologicalEntity", "BiologicalEntity"),
+        ("BiologicalEntity", "ChemicalEntity"),
+        ("BiologicalEntity", "Disease"),
+        ("ChemicalEntity", "Disease"),
+        ("NamedThing", "NamedThing"),
+    ]
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()
@@ -183,8 +200,22 @@ def pipeline_2hop(golden_workspace):
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 4: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_nhop_counts)
+    # Step 4: Run grouping for exactly the type pairs present in the golden graph.
+    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
+    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
+    # explosion. Instead hardcode the pairs we actually test.
+    type_pairs = [
+        # Explicit leaf type pairs from the golden graph
+        ("Disease", "Gene"),
+        ("Disease", "Protein"),
+        ("Disease", "SmallMolecule"),
+        ("Gene", "Gene"),
+        ("Gene", "Protein"),
+        ("Gene", "SmallMolecule"),
+        # Hierarchical pairs explicitly tested in test_pipeline_2hop.py
+        ("BiologicalEntity", "BiologicalEntity"),
+        ("ChemicalEntity", "Disease"),
+    ]
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()

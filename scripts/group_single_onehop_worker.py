@@ -27,12 +27,6 @@ from metapath_counts.type_assignment import is_pseudo_type, parse_pseudo_type
 from metapath_counts.aggregation import expand_metapath_to_variants, calculate_metrics
 
 
-# Global caches for precomputed data
-_aggregated_nhop_counts_cache = None
-_type_node_counts_cache = None
-
-
-
 def load_aggregated_nhop_counts(counts_path):
     """Load precomputed aggregated N-hop path counts.
 
@@ -42,19 +36,13 @@ def load_aggregated_nhop_counts(counts_path):
     Returns:
         Dict mapping N-hop path variant to global count
     """
-    global _aggregated_nhop_counts_cache
-
-    if _aggregated_nhop_counts_cache is not None:
-        return _aggregated_nhop_counts_cache
-
     print(f"Loading precomputed aggregated N-hop counts from {counts_path}...")
     with open(counts_path, 'r') as f:
         data = json.load(f)
 
-    _aggregated_nhop_counts_cache = data.get("counts", {})
-    print(f"  Loaded {len(_aggregated_nhop_counts_cache)} aggregated N-hop path counts")
-
-    return _aggregated_nhop_counts_cache
+    counts = data.get("counts", {})
+    print(f"  Loaded {len(counts)} aggregated N-hop path counts")
+    return counts
 
 
 def load_type_node_counts(counts_path):
@@ -66,18 +54,12 @@ def load_type_node_counts(counts_path):
     Returns:
         Dict mapping type name to node count
     """
-    global _type_node_counts_cache
-
-    if _type_node_counts_cache is not None:
-        return _type_node_counts_cache
-
     print(f"Loading precomputed type node counts from {counts_path}...")
     with open(counts_path, 'r') as f:
-        _type_node_counts_cache = json.load(f)
+        counts = json.load(f)
 
-    print(f"  Loaded {len(_type_node_counts_cache)} type node counts")
-
-    return _type_node_counts_cache
+    print(f"  Loaded {len(counts)} type node counts")
+    return counts
 
 
 def compute_total_possible(type1, type2, type_node_counts):
