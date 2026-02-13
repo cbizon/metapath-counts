@@ -7,12 +7,7 @@ Tests path ID generation, tracking files, and downstream path enumeration.
 import pytest
 import tempfile
 import shutil
-from pathlib import Path
-import sys
-
-# Add scripts to path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
-from path_tracker import (
+from library.path_tracker import (
     generate_path_id,
     parse_path_id,
     load_completed_paths,

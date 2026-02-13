@@ -24,7 +24,7 @@ import json
 import random
 from collections import defaultdict
 import graphblas as gb
-from metapath_counts import get_most_specific_type
+from library import get_most_specific_type
 
 
 SYMMETRIC_PREDICATES = {

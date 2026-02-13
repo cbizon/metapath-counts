@@ -6,7 +6,7 @@ Tests the core functions for metapath parsing, building, and variant generation.
 """
 
 import pytest
-from metapath_counts import (
+from library import (
     parse_metapath,
     build_metapath,
     get_type_variants,

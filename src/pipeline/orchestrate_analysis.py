@@ -23,10 +23,8 @@ import time
 from datetime import datetime
 from collections import defaultdict
 
-# Import path tracking functions and shared utilities
-sys.path.insert(0, os.path.dirname(__file__))
-from path_tracker import get_path_statistics as get_path_stats_from_tracker
-from slurm_utils import (
+from library.path_tracker import get_path_statistics as get_path_stats_from_tracker
+from library.slurm import (
     load_manifest,
     save_manifest,
     update_job_status,
@@ -40,7 +38,7 @@ from slurm_utils import (
 )
 
 
-WORKER_SCRIPT = "scripts/run_single_matrix1.sh"
+WORKER_SCRIPT = "src/pipeline/workers/run_overlap.sh"
 POLL_INTERVAL = 30  # seconds
 
 

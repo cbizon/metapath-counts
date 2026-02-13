@@ -1,7 +1,7 @@
 """Tests for type_utils module."""
 
 import pytest
-from metapath_counts import get_most_specific_type, get_symmetric_predicates
+from library import get_most_specific_type, get_symmetric_predicates
 
 
 def test_get_most_specific_type_basic():

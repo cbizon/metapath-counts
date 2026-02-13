@@ -22,19 +22,38 @@ The primary use case is generating metapath statistics that can be used for rule
 
 ```
 metapath-counts/
-├── src/metapath_counts/         # Source code (library)
-│   ├── __init__.py
-│   ├── type_utils.py            # Biolink type utilities
-│   ├── type_assignment.py       # Single-type-per-node assignment
-│   └── hierarchy.py             # Hierarchy inference for aggregation
-├── scripts/                     # Analysis scripts (CLI)
-│   ├── prebuild_matrices.py     # Pre-build matrices (one-time setup)
-│   ├── analyze_hop_overlap.py  # Core analysis engine
-│   ├── prepare_analysis.py      # Initialize SLURM job manifest
-│   ├── orchestrate_hop_analysis.py # SLURM orchestrator
-│   ├── merge_results.py         # Combine result files
-│   ├── group_by_onehop.py       # Group by 1-hop metapath
-│   └── run_single_matrix1.sh    # SLURM worker script
+├── src/
+│   ├── library/                 # Importable library (was src/metapath_counts/)
+│   │   ├── __init__.py
+│   │   ├── type_utils.py        # Biolink type utilities
+│   │   ├── type_assignment.py   # Single-type-per-node assignment
+│   │   ├── hierarchy.py         # Hierarchy inference for aggregation
+│   │   ├── aggregation.py       # Metapath aggregation logic
+│   │   ├── slurm.py             # SLURM orchestration utilities
+│   │   └── path_tracker.py      # Per-path OOM recovery tracking
+│   ├── pipeline/                # Analysis workflow scripts
+│   │   ├── prebuild_matrices.py # Pre-build matrices (one-time setup)
+│   │   ├── prepare_analysis.py  # Initialize SLURM job manifest
+│   │   ├── orchestrate_analysis.py # SLURM orchestrator
+│   │   ├── prepare_grouping.py  # Precompute aggregated counts
+│   │   ├── orchestrate_grouping.py # Distributed grouping orchestrator
+│   │   ├── merge_results.py     # Combine result files
+│   │   └── workers/
+│   │       ├── run_overlap.py   # Core analysis engine (was analyze_hop_overlap.py)
+│   │       ├── run_grouping.py  # Grouping worker (was group_single_onehop_worker.py)
+│   │       ├── run_overlap.sh   # SLURM worker script
+│   │       └── run_grouping.sh  # SLURM grouping worker script
+│   └── analysis/                # Exploratory/one-off scripts
+│       ├── estimate_runtime.py
+│       ├── analyze_direction_perf.py
+│       ├── generate_test_data.py
+│       ├── interrogate_graph.py
+│       ├── visualize_golden_graph.py
+│       └── benchmark/
+│           ├── generate_samples.py
+│           ├── run_samples.py
+│           ├── plot_memory_ratio.py
+│           └── plot_time_ratio.py
 ├── tests/                       # Test suite
 ├── docs/                        # Documentation
 │   ├── README.md                # Main workflow documentation
@@ -77,25 +96,25 @@ See `docs/README.md` for detailed instructions. Basic workflow:
 
 ```bash
 # 0. One-time: Pre-build matrices (only needs to be done once per KG)
-uv run python scripts/prebuild_matrices.py \
+uv run python src/pipeline/prebuild_matrices.py \
   --edges /path/to/edges.jsonl \
   --nodes /path/to/nodes.jsonl \
   --output matrices
 
 # 1. Initialize (creates manifest and directories)
-uv run python scripts/prepare_analysis.py \
+uv run python src/pipeline/prepare_analysis.py \
   --matrices-dir matrices \
   --n-hops 3
 
 # 2. Run orchestrator (submit and monitor SLURM jobs)
-uv run python scripts/orchestrate_hop_analysis.py \
+uv run python src/pipeline/orchestrate_analysis.py \
   --n-hops 3
 
 # 3. Prepare grouping (precomputes aggregated counts for hierarchical expansion)
-uv run python scripts/prepare_grouping.py --n-hops 3
+uv run python src/pipeline/prepare_grouping.py --n-hops 3
 
 # 4. Run distributed grouping with filters
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
   --min-count 10 --min-precision 0.001
 ```
 
@@ -197,17 +216,17 @@ Total count for this variant: 100 + 200 = 300
 **CLI Usage:**
 ```bash
 # Pre-build matrices (fast, no explosion)
-uv run python scripts/prebuild_matrices.py \
+uv run python src/pipeline/prebuild_matrices.py \
   --edges edges.jsonl \
   --nodes nodes.jsonl \
   --output matrices
 
 # Run analysis (explicit results only)
-uv run python scripts/group_by_onehop.py --n-hops 3
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3
 
 # Aggregation happens automatically during grouping (default behavior)
 # To disable aggregation for debugging:
-uv run python scripts/group_by_onehop.py --n-hops 3 --explicit-only
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 --explicit-only
 ```
 
 ### Per-Path OOM Recovery

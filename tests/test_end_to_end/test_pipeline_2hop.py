@@ -7,8 +7,8 @@ and properly aggregates across all paths.
 import pytest
 from pathlib import Path
 
-from conftest import parse_raw_results
-from golden_graph import GRAPH_STATS
+from .conftest import parse_raw_results
+from .golden_graph import GRAPH_STATS
 
 
 class Test2HopAnalysisRuns:

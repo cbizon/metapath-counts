@@ -98,7 +98,7 @@ echo ""
 mkdir -p "$OUTPUT_DIR"
 
 # Run Python worker
-uv run python scripts/group_single_onehop_worker.py \
+uv run python src/pipeline/workers/run_grouping.py \
     --type1 "$TYPE1" \
     --type2 "$TYPE2" \
     --file-list "$FILE_LIST_PATH" \

@@ -20,10 +20,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from metapath_counts import expand_metapath_to_variants, is_pseudo_type
+from library import expand_metapath_to_variants, is_pseudo_type
 
 
 def extract_type_pairs_from_aggregated_paths(aggregated_counts):
@@ -101,7 +98,7 @@ def precompute_type_node_counts(matrices_dir):
 
     for explicit_type, count in explicit_type_counts.items():
         # Get all ancestors (includes self)
-        from metapath_counts.hierarchy import get_type_ancestors
+        from library.hierarchy import get_type_ancestors
         ancestors = get_type_ancestors(explicit_type)
 
         for ancestor in ancestors:

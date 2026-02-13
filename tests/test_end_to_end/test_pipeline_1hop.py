@@ -7,7 +7,7 @@ import pytest
 from pathlib import Path
 
 
-from golden_graph import GRAPH_STATS
+from .golden_graph import GRAPH_STATS
 
 
 class TestGoldenGraphSetup:
@@ -375,7 +375,7 @@ class TestSymmetricPredicateDirections:
 
     def test_no_symmetric_predicates_with_F_or_R(self, pipeline_1hop):
         """Symmetric predicates should never have F or R direction."""
-        from metapath_counts import get_symmetric_predicates
+        from library import get_symmetric_predicates
 
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
         symmetric_preds = get_symmetric_predicates()

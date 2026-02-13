@@ -4,17 +4,13 @@ Unit tests for orchestrator path statistics integration.
 
 import json
 import os
-import sys
 import tempfile
 import shutil
 from pathlib import Path
 import pytest
 
-# Add scripts directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
-
-from orchestrate_hop_analysis import get_path_statistics
-from path_tracker import (
+from pipeline.orchestrate_analysis import get_path_statistics
+from library.path_tracker import (
     record_completed_path,
     record_failed_path,
     get_tracking_dir
@@ -60,7 +56,7 @@ def test_path_statistics_completed_only():
         # Call get_path_statistics by constructing the right results_dir
         # We need to mock this since it constructs results_dir from n_hops
         # Instead, let's directly call the path_tracker functions
-        from path_tracker import get_path_statistics as get_stats
+        from library.path_tracker import get_path_statistics as get_stats
 
         stats_raw = get_stats(temp_dir, matrix1_index)
         assert stats_raw['completed'] == 10
@@ -88,7 +84,7 @@ def test_path_statistics_failed_at_different_tiers():
             record_failed_path(path_id, temp_dir, matrix1_index, memory_gb=250, reason="oom")
 
         # Get stats from path_tracker
-        from path_tracker import get_path_statistics as get_stats
+        from library.path_tracker import get_path_statistics as get_stats
 
         stats_raw = get_stats(temp_dir, matrix1_index)
         assert stats_raw['completed'] == 5

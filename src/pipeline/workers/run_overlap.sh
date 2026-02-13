@@ -49,7 +49,7 @@ echo "Using pre-built matrices from: $MATRICES_DIR"
 # Activate environment and run analysis
 source .venv/bin/activate
 
-uv run python scripts/analyze_hop_overlap.py \
+uv run python src/pipeline/workers/run_overlap.py \
   --matrix1-index $MATRIX1_INDEX \
   --matrices-dir $MATRICES_DIR \
   --n-hops $N_HOPS \

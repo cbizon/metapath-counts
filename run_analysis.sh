@@ -31,7 +31,7 @@ if [ ! -d "$MATRICES_DIR" ] || [ ! -f "$MATRICES_DIR/manifest.json" ]; then
     echo "Uses single-type assignment (fast, no explosion)."
     echo "Hierarchical aggregation happens during grouping step."
     echo ""
-    uv run python scripts/prebuild_matrices.py \
+    uv run python src/pipeline/prebuild_matrices.py \
         --edges "$EDGES" \
         --nodes "$NODES" \
         --output "$MATRICES_DIR"
@@ -53,7 +53,7 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
 
     # Step 1: Prepare analysis (create manifest)
     echo "Step 1: Preparing ${N_HOPS}-hop analysis..."
-    uv run python scripts/prepare_analysis.py \
+    uv run python src/pipeline/prepare_analysis.py \
         --matrices-dir "$MATRICES_DIR" \
         --n-hops "$N_HOPS"
 
@@ -63,7 +63,7 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "This will submit jobs to SLURM and monitor progress."
     echo "You can Ctrl+C and restart later - it will resume from the manifest."
     echo ""
-    uv run python scripts/orchestrate_hop_analysis.py \
+    uv run python src/pipeline/orchestrate_analysis.py \
         --n-hops "$N_HOPS"
 
     # Step 3: Prepare distributed grouping (create type pair jobs + precompute counts)
@@ -73,7 +73,7 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "  - Precomputing aggregated 1-hop counts (from matrix metadata)"
     echo "  - Precomputing aggregated N-hop counts (from result files)"
     echo "  - Computing type node counts"
-    uv run python scripts/prepare_grouping.py --n-hops "$N_HOPS"
+    uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS"
 
     # Step 4: Run distributed grouping (one SLURM job per type pair)
     echo ""
@@ -87,7 +87,7 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "  - Excluded predicates: related_to_at_instance_level, related_to_at_concept_level"
     echo "  - You can Ctrl+C and restart later - it will resume from the manifest"
     echo ""
-    uv run python scripts/orchestrate_grouping.py --n-hops "$N_HOPS" \
+    uv run python src/pipeline/orchestrate_grouping.py --n-hops "$N_HOPS" \
         --min-count 10 \
         --min-precision 0.001
 

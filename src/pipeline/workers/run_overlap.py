@@ -33,14 +33,13 @@ import json
 from collections import defaultdict
 import psutil
 import os
-import sys
 import time
 import gc
 import numpy as np
 from pathlib import Path
 import graphblas as gb
 import itertools
-from metapath_counts import (
+from library import (
     get_symmetric_predicates,
     is_pseudo_type,
     parse_pseudo_type,
@@ -51,9 +50,7 @@ from metapath_counts import (
     generate_metapath_variants
 )
 
-# Add path_tracker module
-sys.path.insert(0, os.path.dirname(__file__))
-from path_tracker import (
+from library.path_tracker import (
     generate_path_id,
     load_completed_paths,
     load_failed_paths,

@@ -12,14 +12,14 @@ Tests cover:
 """
 
 import pytest
-from metapath_counts.hierarchy import (
+from library.hierarchy import (
     get_type_ancestors,
     get_type_parents,
     get_predicate_ancestors,
     get_predicate_parents,
     get_qualifier_ancestors
 )
-from metapath_counts.type_assignment import is_pseudo_type
+from library.type_assignment import is_pseudo_type
 
 
 class TestGetTypeAncestors:
