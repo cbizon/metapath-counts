@@ -20,7 +20,7 @@ import zstandard
 
 from library.hierarchy import get_type_ancestors, get_predicate_ancestors
 from library.type_assignment import is_pseudo_type, parse_pseudo_type
-from library.aggregation import expand_metapath_to_variants, calculate_metrics
+from library.aggregation import expand_metapath_to_variants, calculate_metrics, parse_compound_predicate
 
 
 def load_aggregated_nhop_counts(counts_path):
@@ -147,7 +147,11 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
 
     if excluded_predicates:
         for pred in predicates:
+            # For compound predicates, also check if the base predicate is excluded
             if pred in excluded_predicates:
+                return True
+            base_pred = parse_compound_predicate(pred)[0]
+            if base_pred != pred and base_pred in excluded_predicates:
                 return True
 
     return False

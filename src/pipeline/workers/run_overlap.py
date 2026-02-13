@@ -47,7 +47,8 @@ from library import (
     get_predicate_ancestors,
     parse_metapath,
     build_metapath,
-    generate_metapath_variants
+    generate_metapath_variants,
+    parse_compound_predicate
 )
 
 from library.path_tracker import (
@@ -262,7 +263,8 @@ def is_palindromic_path(node_types, predicates, directions, symmetric_predicates
     """
     n = len(predicates)
     # Compute effective directions (symmetric predicates always use 'A')
-    eff_dirs = ['A' if predicates[i] in symmetric_predicates else directions[i]
+    # For compound predicates, symmetry is determined by the base predicate
+    eff_dirs = ['A' if parse_compound_predicate(predicates[i])[0] in symmetric_predicates else directions[i]
                 for i in range(n)]
     # Reverse the path (same logic as canonicalize_metapath)
     rev_nodes = list(reversed(node_types))
@@ -297,7 +299,8 @@ def format_metapath(node_types, predicates, directions):
             parts.append(pred)
 
             # Use 'A' for symmetric predicates, otherwise use the provided direction
-            if pred in symmetric_predicates:
+            # For compound predicates, symmetry is determined by the base predicate
+            if parse_compound_predicate(pred)[0] in symmetric_predicates:
                 parts.append('A')
             else:
                 parts.append(directions[i])
@@ -338,7 +341,8 @@ def determine_needed_matrices(manifest_path: Path, n_hops: int, matrix1_spec: tu
         all_directed.append((src_type, pred, 'F', tgt_type))
 
         # Reverse (if not symmetric)
-        if pred not in symmetric_predicates:
+        # For compound predicates, symmetry is determined by the base predicate
+        if parse_compound_predicate(pred)[0] not in symmetric_predicates:
             all_directed.append((tgt_type, pred, 'R', src_type))
 
     print(f"Total directed matrices: {len(all_directed):,}", flush=True)
@@ -519,7 +523,8 @@ def build_matrix_list(matrices):
         matrix_metadata[(src_type, pred, tgt_type, 'F')] = matrix
 
         # Reverse (if not symmetric)
-        is_symmetric = pred in symmetric_predicates
+        # For compound predicates, symmetry is determined by the base predicate
+        is_symmetric = parse_compound_predicate(pred)[0] in symmetric_predicates
         if not is_symmetric:
             all_matrices.append((tgt_type, pred, src_type, matrix.T, 'R'))
             matrix_metadata[(tgt_type, pred, src_type, 'R')] = matrix.T

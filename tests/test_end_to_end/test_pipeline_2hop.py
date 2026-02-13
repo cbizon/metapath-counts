@@ -333,11 +333,23 @@ class TestRawResult2HopOverlaps:
     def test_total_raw_result_count(self, pipeline_2hop):
         """Verify exact number of raw result rows as regression guard.
 
-        The golden graph produces exactly 15 raw 2-hop result rows (with overlap > 0).
+        The golden graph produces exactly 18 raw 2-hop result rows (with overlap > 0).
+
+        The count is 18 rather than 15 (pre-qualifier) because SmallMolecule_X's
+        qualified edge (affects--increased--activity) creates a
+        separate matrix from SmallMolecule_Y's plain affects edge.  This has
+        three effects (+1 each):
+        1. Predictor split: SmallMolecule|affects|F|Gene|affects|F|Disease
+           splits into two rows (plain affects and qualified affects).
+        2. Direction flip: Disease|treats|R|SmallMolecule|affects|F|Gene (1 row)
+           is replaced by two Gene-first rows because the smaller nvals
+           matrices flip should_process_path's direction decision.
+        3. Extra 1-hop target: SmallMolecule|treats|F|Disease|affects|R|Gene
+           now matches two 1-hop SM→Gene matrices instead of one.
         """
         raw_results = pipeline_2hop["raw_results"]
-        assert len(raw_results) == 15, (
-            f"Expected 15 raw result rows, got {len(raw_results)}. "
+        assert len(raw_results) == 18, (
+            f"Expected 18 raw result rows, got {len(raw_results)}. "
             f"Paths: {[r['predictor_path'] for r in raw_results]}"
         )
 
@@ -616,3 +628,44 @@ class TestGrouped2HopSpecificPaths:
         predicted_path = "GeneOrGeneProduct|interacts_with|A|GeneOrGeneProduct"
         predicted_count = pipeline_2hop["aggregated_nhop_counts"].get(predicted_path)
         assert predicted_count == 4, f"Expected predicted_count=4, got {predicted_count}"
+
+    def test_qualified_affects_gene_affects_disease_predicts_treats(self, pipeline_2hop):
+        """Disease|affects|R|Gene|affects----activity_or_abundance|R|SmallMolecule predicts
+        Disease|treats|R|SmallMolecule.
+
+        Tests qualifier aggregation: the golden graph edge uses the specific compound
+        predicate affects--increased--activity (SmallMolecule_X→Gene_A). During
+        grouping, this rolls up to affects----activity_or_abundance (direction
+        qualifier dropped, aspect qualifier activity → activity_or_abundance).
+        Paths are canonicalized Disease-first (Disease < SmallMolecule).
+
+        The raw 2-hop path SmallMolecule_X→Gene_A→{Disease_P, Disease_Q} produces
+        predictor_count=2.
+
+        Target: SmallMolecule→Disease treats = {(SM_X, Disease_P), (SM_Y, Disease_Q)}
+        onehop_count=2
+
+        Overlap: (SM_X, Disease_P) in both → overlap=1
+        precision = 1/2 = 0.5, recall = 1/2 = 0.5
+        """
+        grouped_results = pipeline_2hop["grouped_results"]
+
+        target_file = "Disease_treats_R_SmallMolecule.tsv.zst"
+        assert target_file in grouped_results, (
+            f"Expected file {target_file} not found. Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_file]
+        predictor = "Disease|affects|R|Gene|affects----activity_or_abundance|R|SmallMolecule"
+
+        matches = [r for r in rows if r.get("predictor_metapath") == predictor]
+        assert len(matches) == 1, (
+            f"Expected exactly one row for {predictor}, got {len(matches)}. "
+            f"Available: {[r.get('predictor_metapath') for r in rows]}"
+        )
+
+        row = matches[0]
+        assert row["predictor_count"] == 2, f"Expected predictor_count=2, got {row['predictor_count']}"
+        assert row["overlap"] == 1, f"Expected overlap=1, got {row['overlap']}"
+        assert abs(row["precision"] - 0.5) < 0.0001, f"Expected precision=0.5, got {row['precision']}"
+        assert abs(row["recall"] - 0.5) < 0.0001, f"Expected recall=0.5, got {row['recall']}"
