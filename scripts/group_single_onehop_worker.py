@@ -27,36 +27,6 @@ from metapath_counts.type_assignment import is_pseudo_type, parse_pseudo_type
 from metapath_counts.aggregation import expand_metapath_to_variants, calculate_metrics
 
 
-# Global caches for precomputed data
-_aggregated_counts_cache = None
-_aggregated_nhop_counts_cache = None
-_type_node_counts_cache = None
-
-
-def load_aggregated_counts(counts_path):
-    """Load precomputed aggregated path counts.
-
-    Args:
-        counts_path: Path to aggregated_path_counts.json
-
-    Returns:
-        Dict mapping path string to global count
-    """
-    global _aggregated_counts_cache
-
-    if _aggregated_counts_cache is not None:
-        return _aggregated_counts_cache
-
-    print(f"Loading precomputed aggregated counts from {counts_path}...")
-    with open(counts_path, 'r') as f:
-        data = json.load(f)
-
-    _aggregated_counts_cache = data.get("counts", {})
-    print(f"  Loaded {len(_aggregated_counts_cache)} aggregated path counts")
-
-    return _aggregated_counts_cache
-
-
 def load_aggregated_nhop_counts(counts_path):
     """Load precomputed aggregated N-hop path counts.
 
@@ -66,19 +36,13 @@ def load_aggregated_nhop_counts(counts_path):
     Returns:
         Dict mapping N-hop path variant to global count
     """
-    global _aggregated_nhop_counts_cache
-
-    if _aggregated_nhop_counts_cache is not None:
-        return _aggregated_nhop_counts_cache
-
     print(f"Loading precomputed aggregated N-hop counts from {counts_path}...")
     with open(counts_path, 'r') as f:
         data = json.load(f)
 
-    _aggregated_nhop_counts_cache = data.get("counts", {})
-    print(f"  Loaded {len(_aggregated_nhop_counts_cache)} aggregated N-hop path counts")
-
-    return _aggregated_nhop_counts_cache
+    counts = data.get("counts", {})
+    print(f"  Loaded {len(counts)} aggregated N-hop path counts")
+    return counts
 
 
 def load_type_node_counts(counts_path):
@@ -90,18 +54,12 @@ def load_type_node_counts(counts_path):
     Returns:
         Dict mapping type name to node count
     """
-    global _type_node_counts_cache
-
-    if _type_node_counts_cache is not None:
-        return _type_node_counts_cache
-
     print(f"Loading precomputed type node counts from {counts_path}...")
     with open(counts_path, 'r') as f:
-        _type_node_counts_cache = json.load(f)
+        counts = json.load(f)
 
-    print(f"  Loaded {len(_type_node_counts_cache)} type node counts")
-
-    return _type_node_counts_cache
+    print(f"  Loaded {len(counts)} type node counts")
+    return counts
 
 
 def compute_total_possible(type1, type2, type_node_counts):
@@ -200,7 +158,7 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
 
 
 def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
-                    aggregated_counts=None, aggregated_nhop_counts=None, type_node_counts=None,
+                    aggregated_nhop_counts=None, type_node_counts=None,
                     min_count=0, min_precision=0.0, excluded_types=None, excluded_predicates=None):
     """Group all N-hop results for 1-hop metapaths between a type pair.
 
@@ -211,8 +169,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         output_dir: Output directory for grouped results
         n_hops: Number of hops
         aggregate: Whether to do hierarchical aggregation (default: True)
-        aggregated_counts: Dict mapping aggregated 1-hop path -> global count (for target counts)
-        aggregated_nhop_counts: Dict mapping aggregated N-hop path -> global count (for predictor counts)
+        aggregated_nhop_counts: Dict mapping path variant -> global count (for both predictor and target counts)
         type_node_counts: Dict mapping type name -> node count (for total_possible calculation)
         min_count: Minimum N-hop count to include (default: 0)
         min_precision: Minimum precision to include (default: 0.0)
@@ -232,8 +189,6 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         print(f"Excluded types: {sorted(excluded_types)}")
     if excluded_predicates:
         print(f"Excluded predicates: {sorted(excluded_predicates)}")
-    if aggregated_counts:
-        print(f"Using precomputed 1-hop counts: {len(aggregated_counts)} paths")
     if aggregated_nhop_counts:
         print(f"Using precomputed N-hop counts: {len(aggregated_nhop_counts)} paths")
     if type_node_counts:
@@ -309,8 +264,8 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
         print(f"  {len(nhop_data)} unique N-hop paths")
 
         # Get onehop_count from precomputed lookup
-        if aggregated_counts and onehop_path in aggregated_counts:
-            onehop_count_global = aggregated_counts[onehop_path]
+        if aggregated_nhop_counts and onehop_path in aggregated_nhop_counts:
+            onehop_count_global = aggregated_nhop_counts[onehop_path]
         else:
             # Fallback: this shouldn't happen if prepare_grouping.py was run
             print(f"  WARNING: No precomputed count for {onehop_path}, using 0")
@@ -366,7 +321,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
 
         with zstandard.open(output_file, 'wt') as out:
             # Header
-            out.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\toverlap\ttotal_possible\t")
+            out.write("predictor_metapath\tpredictor_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
             # Sort by overlap descending
@@ -467,12 +422,6 @@ def main():
         help='Disable hierarchical aggregation (explicit results only)'
     )
     parser.add_argument(
-        '--aggregated-counts',
-        type=str,
-        required=True,
-        help='Path to aggregated_path_counts.json (1-hop counts from prepare_grouping.py)'
-    )
-    parser.add_argument(
         '--aggregated-nhop-counts',
         type=str,
         required=True,
@@ -520,7 +469,6 @@ def main():
         file_list = [line.strip() for line in f if line.strip()]
 
     # Load precomputed data
-    aggregated_counts = load_aggregated_counts(args.aggregated_counts)
     aggregated_nhop_counts = load_aggregated_nhop_counts(args.aggregated_nhop_counts)
     type_node_counts = load_type_node_counts(args.type_node_counts)
 
@@ -531,7 +479,6 @@ def main():
         output_dir=args.output_dir,
         n_hops=args.n_hops,
         aggregate=not args.explicit_only,
-        aggregated_counts=aggregated_counts,
         aggregated_nhop_counts=aggregated_nhop_counts,
         type_node_counts=type_node_counts,
         min_count=args.min_count,

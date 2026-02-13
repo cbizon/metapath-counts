@@ -141,8 +141,8 @@ class TestNHopAnalysis:
         # Should have header
         assert len(lines) >= 1
         header = lines[0].strip()
-        assert '1hop_metapath' in header
-        assert '1hop_count' in header
+        assert 'predictor_metapath' in header
+        assert 'predicted_metapath' in header
 
     def test_2hop_analysis_output_format(self, tiny_graph):
         """Test 2-hop analysis produces valid output."""
@@ -158,7 +158,7 @@ class TestNHopAnalysis:
 
         assert len(lines) >= 1
         header = lines[0].strip()
-        assert '2hop_metapath' in header
+        assert 'predictor_metapath' in header
 
     def test_3hop_analysis_finds_path(self, tiny_graph):
         """Test 3-hop analysis finds the expected path."""

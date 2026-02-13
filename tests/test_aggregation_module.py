@@ -127,9 +127,10 @@ class TestGenerateMetapathVariants:
     """Tests for generate_metapath_variants function."""
 
     def test_generates_original(self):
-        """Should include the original metapath."""
+        """Should include the canonical form of the input metapath."""
         variants = list(generate_metapath_variants("Gene|affects|F|Disease"))
-        assert "Gene|affects|F|Disease" in variants
+        # "Disease" < "Gene" alphabetically, so canonical is reverse direction
+        assert "Disease|affects|R|Gene" in variants
 
     def test_generates_type_ancestors(self):
         """Should include type ancestor variants."""
@@ -153,19 +154,18 @@ class TestGenerateMetapathVariants:
         """When expanding to symmetric predicate ancestor, direction should become 'A'.
 
         The predicate 'treats' has 'related_to' as an ancestor, and related_to is
-        symmetric. When expanding, Gene|treats|F|Disease should produce
-        Gene|related_to|A|Disease (not Gene|related_to|F|Disease).
+        symmetric. Input Gene|treats|F|Disease is canonicalized to Disease|treats|R|Gene
+        (since Disease < Gene), then when expanded to related_to, produces
+        Disease|related_to|A|Gene (direction becomes A, canonical order preserved).
         """
         variants = list(generate_metapath_variants("Gene|treats|F|Disease"))
 
-        # Should NOT have related_to with F direction
-        wrong_variant = "Gene|related_to|F|Disease"
-        assert wrong_variant not in variants, (
-            f"Symmetric predicate 'related_to' should not have direction 'F'"
-        )
+        # Should NOT have related_to with F or R direction
+        assert "Gene|related_to|F|Disease" not in variants
+        assert "Disease|related_to|R|Gene" not in variants
 
-        # Should have related_to with A direction
-        correct_variant = "Gene|related_to|A|Disease"
+        # Should have related_to with A direction in canonical form (Disease < Gene)
+        correct_variant = "Disease|related_to|A|Gene"
         assert correct_variant in variants, (
             f"Expected '{correct_variant}' in variants but not found"
         )
@@ -207,9 +207,10 @@ class TestExpandMetapathToVariants:
         assert isinstance(result, set)
 
     def test_contains_original(self):
-        """Should contain the original metapath."""
+        """Should contain the canonical form of the original metapath."""
         result = expand_metapath_to_variants("Gene|affects|F|Disease")
-        assert "Gene|affects|F|Disease" in result
+        # "Disease" < "Gene" alphabetically, so canonical is reverse direction
+        assert "Disease|affects|R|Gene" in result
 
     def test_same_as_set_of_generator(self):
         """Should be equivalent to set of generate_metapath_variants."""

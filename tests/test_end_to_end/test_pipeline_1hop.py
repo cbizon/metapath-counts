@@ -6,7 +6,7 @@ These tests verify the full pipeline produces correct results for the golden gra
 import pytest
 from pathlib import Path
 
-from conftest import parse_raw_results
+
 from golden_graph import GRAPH_STATS
 
 
@@ -48,56 +48,110 @@ class TestExplicit1HopCounts:
     """
 
     def test_affects_disease_count(self, pipeline_1hop):
-        """Gene affects Disease aggregated count should be 4 (3 explicit + 1 pseudo-type)."""
+        """Gene affects Disease aggregated count should be 5 (4 explicit + 1 pseudo-type)."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Check either direction - duplicate elimination picks one
-        forward = nhop_counts.get("Gene|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene", 0)
-        # Aggregated: 3 explicit Gene + 1 from Gene+Protein = 4
-        count = max(forward, reverse)
-        assert count == 4, (
-            f"Expected count=4 (3 explicit + 1 pseudo-type) for Gene-affects-Disease, "
-            f"got forward={forward}, reverse={reverse}"
+        # Alphabetically: "Disease" < "Gene", so canonical is reverse direction
+        canonical = "Disease|affects|R|Gene"
+        wrong_direction = "Gene|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 5, (
+            f"Expected count=5 (4 explicit + 1 pseudo-type) for {canonical}, got {count}"
+        )
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_pseudo_type_affects_count(self, pipeline_1hop):
         """Gene+Protein|affects|F|Disease should have count=1."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Gene+Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene+Protein", 0)
-        assert forward == 1 or reverse == 1, (
-            f"Expected count=1 for Gene+Protein-affects-Disease, got forward={forward}, reverse={reverse}"
+        # Alphabetically: "Disease" < "Gene+Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Gene+Protein"
+        wrong_direction = "Gene+Protein|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 1, f"Expected count=1 for {canonical}, got {count}"
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_protein_affects_count(self, pipeline_1hop):
         """Protein affects Disease aggregated count should be 2 (1 explicit + 1 pseudo-type)."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Protein", 0)
-        # Aggregated: 1 explicit Protein + 1 from Gene+Protein = 2
-        count = max(forward, reverse)
+        # Alphabetically: "Disease" < "Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Protein"
+        wrong_direction = "Protein|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         assert count == 2, (
-            f"Expected count=2 (1 explicit + 1 pseudo-type), got forward={forward}, reverse={reverse}"
+            f"Expected count=2 (1 explicit + 1 pseudo-type) for {canonical}, got {count}"
+        )
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_treats_count(self, pipeline_1hop):
         """SmallMolecule|treats|F|Disease should have count=2."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("SmallMolecule|treats|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|treats|R|SmallMolecule", 0)
-        assert forward == 2 or reverse == 2, (
-            f"Expected count=2 for SmallMolecule-treats-Disease, got forward={forward}, reverse={reverse}"
+        # Alphabetically: "Disease" < "SmallMolecule", so canonical is reverse direction
+        canonical = "Disease|treats|R|SmallMolecule"
+        wrong_direction = "SmallMolecule|treats|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 2, f"Expected count=2 for {canonical}, got {count}"
+        # Wrong direction should not exist
+        assert nhop_counts.get(wrong_direction, 0) == 0, (
+            f"Non-canonical direction {wrong_direction} should not exist"
         )
 
     def test_gene_regulates_gene_count(self, pipeline_1hop):
-        """Gene|regulates|F|Gene should have count=1."""
+        """Gene|regulates|Gene should have count=1 in both directions."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # For same-type edges, check both directions
-        forward = nhop_counts.get("Gene|regulates|F|Gene", 0)
-        reverse = nhop_counts.get("Gene|regulates|R|Gene", 0)
-        # Each direction should have count 1
-        assert forward == 1 or reverse == 1, (
-            f"Expected count=1 for Gene-regulates-Gene"
+        # For same-type edges: "Gene" == "Gene", both directions are computed
+        # Forward: Gene_A -> Gene_B
+        forward = "Gene|regulates|F|Gene"
+        # Reverse: Gene_B <- Gene_A (equivalently, looking for Gene_X -> Gene_Y in reverse)
+        reverse = "Gene|regulates|R|Gene"
+
+        forward_count = nhop_counts.get(forward, 0)
+        reverse_count = nhop_counts.get(reverse, 0)
+        assert forward_count == 1, f"Expected count=1 for {forward}, got {forward_count}"
+        assert reverse_count == 1, f"Expected count=1 for {reverse}, got {reverse_count}"
+
+    def test_interacts_with_symmetric_count(self, pipeline_1hop):
+        """Gene|interacts_with|A|Protein should have count=3 (2 explicit + 1 from pseudo-type).
+
+        The key insight: For symmetric predicates, pseudo-type expansion can flip direction!
+        - Gene_A ↔ Protein_M (explicit Gene ↔ Protein)
+        - Gene_B ↔ Protein_N (explicit Gene ↔ Protein)
+        - GeneProtein_Z ↔ Gene_B: When Gene+Protein expands to Protein:
+          Protein ↔ Gene = Gene ↔ Protein (symmetric!)
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # Alphabetically: "Gene" < "Protein", so canonical is forward direction
+        # For symmetric predicates, direction should be 'A', not 'F' or 'R'
+        canonical = "Gene|interacts_with|A|Protein"
+        wrong_direction_f = "Gene|interacts_with|F|Protein"
+        wrong_direction_r = "Gene|interacts_with|R|Protein"
+        reverse_canonical = "Protein|interacts_with|A|Gene"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 3, f"Expected count=3 (2 explicit + 1 pseudo-type) for {canonical}, got {count}"
+
+        # Wrong directions (F or R) should not exist for symmetric predicates
+        assert nhop_counts.get(wrong_direction_f, 0) == 0, (
+            f"Symmetric predicate should not use F direction: {wrong_direction_f}"
+        )
+        assert nhop_counts.get(wrong_direction_r, 0) == 0, (
+            f"Symmetric predicate should not use R direction: {wrong_direction_r}"
+        )
+
+        # Reverse direction should not exist due to duplicate elimination
+        assert nhop_counts.get(reverse_canonical, 0) == 0, (
+            f"Non-canonical direction {reverse_canonical} should not exist"
         )
 
 
@@ -108,46 +162,96 @@ class TestAggregated1HopCounts:
     Aggregated counts roll up to ancestor types.
     """
 
-    def test_pseudo_type_contributes_to_gene(self, pipeline_1hop):
-        """Gene aggregated affects count should include pseudo-type contribution."""
-        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Check either direction
-        forward = nhop_counts.get("Gene|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Gene", 0)
-        # Aggregated: 3 explicit + 1 from Gene+Protein = 4
-        count = max(forward, reverse)
-        assert count == 4, f"Expected 4 (3 explicit + 1 pseudo-type), got {count}"
-
     def test_pseudo_type_contributes_to_protein(self, pipeline_1hop):
         """Protein aggregated affects count should include pseudo-type contribution."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("Protein|affects|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|affects|R|Protein", 0)
-        # Aggregated: 1 explicit + 1 from Gene+Protein = 2
-        count = max(forward, reverse)
-        assert count == 2, f"Expected 2 (1 explicit + 1 pseudo-type), got {count}"
+        # Alphabetically: "Disease" < "Protein", so canonical is reverse direction
+        canonical = "Disease|affects|R|Protein"
+
+        count = nhop_counts.get(canonical, 0)
+        assert count == 2, f"Expected 2 (1 explicit + 1 pseudo-type) for {canonical}, got {count}"
 
     def test_biological_entity_aggregation(self, pipeline_1hop):
         """BiologicalEntity aggregated should sum all biological entity affects."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        # Try various combinations of direction
-        count = max(
-            nhop_counts.get("BiologicalEntity|affects|F|Disease", 0),
-            nhop_counts.get("Disease|affects|R|BiologicalEntity", 0),
-            nhop_counts.get("BiologicalEntity|affects|F|DiseaseOrPhenotypicFeature", 0),
-            nhop_counts.get("DiseaseOrPhenotypicFeature|affects|R|BiologicalEntity", 0),
-        )
-        # Gene(3) + Protein(1) + Gene+Protein(1) = 5
-        assert count == 5, f"Expected 5 for BiologicalEntity affects, got {count}"
+        # Alphabetically: "BiologicalEntity" < "Disease" (B < D), so canonical is forward direction
+        canonical = "BiologicalEntity|affects|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
+        # Gene(4) + Protein(1) + Gene+Protein(1) = 6
+        assert count == 6, f"Expected 6 for {canonical}, got {count}"
 
     def test_chemical_entity_aggregation(self, pipeline_1hop):
         """ChemicalEntity aggregated treats count should equal SmallMolecule count."""
         nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
-        forward = nhop_counts.get("ChemicalEntity|treats|F|Disease", 0)
-        reverse = nhop_counts.get("Disease|treats|R|ChemicalEntity", 0)
+        # Alphabetically: "ChemicalEntity" < "Disease" (C < D), so canonical is forward direction
+        # (Re-canonicalized from the explicit Disease|treats|R|SmallMolecule)
+        canonical = "ChemicalEntity|treats|F|Disease"
+
+        count = nhop_counts.get(canonical, 0)
         # SmallMolecule is only child of ChemicalEntity in our graph
-        count = max(forward, reverse)
-        assert count == 2, f"Expected 2 for ChemicalEntity treats, got {count}"
+        assert count == 2, f"Expected 2 for {canonical}, got {count}"
+
+    def test_biological_entity_affects_biological_entity(self, pipeline_1hop):
+        """BiologicalEntity|affects|F|BiologicalEntity aggregation test.
+
+        When different-type paths (e.g. Disease|affects|R|Gene) expand to same-type
+        variants (BiologicalEntity|affects|*|BiologicalEntity), both F and R directions
+        must be generated. The 6 affects edges between BiologicalEntity nodes
+        (Gene→Disease x4, Protein→Disease x1, Gene+Protein→Disease x1) plus
+        pseudo-type expansion to Protein (+1) give 7 total, contributed to both
+        F and R directions. Note: SmallMolecule→Gene affects edges do NOT count
+        here because SmallMolecule is ChemicalEntity, not BiologicalEntity.
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        forward = "BiologicalEntity|affects|F|BiologicalEntity"
+        reverse = "BiologicalEntity|affects|R|BiologicalEntity"
+
+        forward_count = nhop_counts.get(forward, 0)
+        reverse_count = nhop_counts.get(reverse, 0)
+
+        assert forward_count == 7, f"Expected 7 for {forward}, got {forward_count}"
+        assert reverse_count == 7, f"Expected 7 for {reverse}, got {reverse_count}"
+
+    def test_named_thing_related_to_aggregation(self, pipeline_1hop):
+        """NamedThing|related_to|A|NamedThing should aggregate all edges (related_to is symmetric root predicate).
+
+        All edges roll up to NamedThing (top-level type) and related_to (top-level symmetric predicate):
+        - affects: 8 edges
+        - treats: 2 edges
+        - interacts_with: 3 edges
+        - regulates: 1 edge
+        - associated_with: 1 edge
+        Total: 15 edges
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # NamedThing == NamedThing (same type), symmetric predicate uses 'A'
+        canonical = "NamedThing|related_to|A|NamedThing"
+
+        count = nhop_counts.get(canonical, 0)
+        # All 15 edges in the graph roll up to this
+        assert count == 15, f"Expected 15 (all edges) for {canonical}, got {count}"
+
+    def test_biological_entity_related_to_chemical_entity(self, pipeline_1hop):
+        """BiologicalEntity|related_to|A|ChemicalEntity should aggregate treats edges."""
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+
+        # related_to is symmetric, so direction is 'A'
+        # BiologicalEntity < ChemicalEntity alphabetically, but symmetric uses canonical form
+        path = "BiologicalEntity|related_to|A|ChemicalEntity"
+
+        count = nhop_counts.get(path, 0)
+
+        # Expected: 2 treats edges (SmallMolecule→Disease) + 2 affects edges
+        # (SmallMolecule→Gene) aggregate to this path.
+        # Both SmallMolecule (ChemicalEntity) ↔ Disease/Gene (BiologicalEntity)
+        # roll up to BiologicalEntity|related_to|A|ChemicalEntity.
+        expected_count = 4
+
+        assert count == expected_count, (
+            f"Expected count={expected_count} for {path}, got {count}. "
+            f"Should aggregate treats edges between ChemicalEntity and BiologicalEntity types."
+        )
 
 
 class TestNoPseudoTypesInOutput:
@@ -166,7 +270,7 @@ class TestNoPseudoTypesInOutput:
 
         for filename, rows in grouped_results.items():
             for row in rows:
-                nhop_path = row.get("1hop_metapath", "")
+                nhop_path = row.get("predictor_metapath", "")
                 assert '+' not in nhop_path, (
                     f"Pseudo-type in predictor path: {nhop_path} (file: {filename})"
                 )
@@ -308,7 +412,7 @@ class TestMetricsCalculation:
 
         for filename, rows in grouped_results.items():
             for row in rows:
-                nhop_path = row.get("1hop_metapath", "")
+                nhop_path = row.get("predictor_metapath", "")
                 precision = row.get("precision", 0)
 
                 # Only check paths without "related_to" (explicit predicates)
@@ -316,3 +420,223 @@ class TestMetricsCalculation:
                     assert precision <= 1.001, (
                         f"Precision > 1.0 for explicit path: {nhop_path} has {precision}"
                     )
+
+
+
+
+class TestGroupedOverlapPrecision:
+    """Test that grouped output overlap and metrics reflect hierarchical aggregation.
+
+    The interesting cases are when broad aggregated predictors (like
+    NamedThing|related_to|A|NamedThing) are evaluated against narrow targets.
+    The precision is < 1.0 because the predictor covers many more pairs
+    than the specific target.
+    """
+
+    def test_interacts_with_self_overlap(self, pipeline_1hop):
+        """Gene|interacts_with|A|Protein self-comparison: aggregated overlap=3, predictor_count=3.
+
+        The aggregated count is 3: 2 from the explicit Gene|interacts_with|A|Protein matrix
+        (Gene_A↔Protein_M, Gene_B↔Protein_N) plus 1 from the Gene+Protein pseudo-type
+        (GeneProtein_Z↔Gene_B expands to Protein↔Gene = Gene↔Protein, symmetric).
+        The grouping step must aggregate all three, so the self-comparison overlap=3.
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+        target_filename = "Gene_interacts_with_A_Protein.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for Gene|interacts_with|A|Protein. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        self_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'Gene|interacts_with|A|Protein'
+        ]
+
+        assert len(self_rows) == 1, f"Expected 1 self-comparison row, got {len(self_rows)}"
+        row = self_rows[0]
+        assert row['predictor_count'] == 3, (
+            f"Expected predictor_count=3 (2 explicit + 1 pseudo-type), got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 3, (
+            f"Expected overlap=3 (aggregated, including pseudo-type contribution), got {row['overlap']}"
+        )
+
+    def test_disease_affects_gene_self_overlap(self, pipeline_1hop):
+        """Disease|affects|R|Gene self-comparison: aggregated overlap=5, predictor_count=5.
+
+        The aggregated count is 5: 4 from the explicit Gene matrix (Gene_A→Disease_P,
+        Gene_A→Disease_Q, Gene_B→Disease_P, Gene_B→Disease_Q) plus 1 from the
+        Gene+Protein pseudo-type (GeneProtein_Z→Disease). The grouping step must
+        aggregate both contributions, so the self-comparison overlap must also equal 5,
+        giving precision=1.0.
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+        target_filename = "Disease_affects_R_Gene.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for Disease|affects|R|Gene. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        self_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'Disease|affects|R|Gene'
+        ]
+
+        assert len(self_rows) == 1, f"Expected 1 self-comparison row, got {len(self_rows)}"
+        row = self_rows[0]
+        assert row['predictor_count'] == 5, (
+            f"Expected predictor_count=5 (4 explicit + 1 pseudo-type), got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 5, (
+            f"Expected overlap=5 (aggregated, including pseudo-type contribution), got {row['overlap']}"
+        )
+
+    def test_named_thing_related_to_predicting_affects(self, pipeline_1hop):
+        """NamedThing|related_to|A|NamedThing predicting Disease|affects|R|Gene.
+
+        The broad predictor covers all 12 edges in the graph. 4 of them are
+        Gene-type→Disease affects edges: 3 from Gene + 1 from Gene+Protein
+        (which rolls up to Gene during aggregation). So overlap=4, predictor_count=12,
+        and precision = 4/12 = 0.333...
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        target_filename = "Disease_affects_R_Gene.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for Disease|affects|R|Gene. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        nt_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
+        ]
+
+        assert len(nt_rows) == 1, (
+            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
+            f"got {len(nt_rows)}"
+        )
+
+        row = nt_rows[0]
+        # 5 edges aggregate to Disease|affects|R|Gene: Gene_A→Disease_P, Gene_A→Disease_Q,
+        # Gene_B→Disease_P, Gene_B→Disease_Q (Gene|affects), plus GeneProtein_Z→Disease_Q
+        # (Gene+Protein|affects, rolls up to Gene)
+        assert row['overlap'] == 5, f"Expected overlap=5, got {row['overlap']}"
+        # NamedThing|related_to|A|NamedThing aggregates all 15 edges in the graph
+        assert row['predictor_count'] == 15, (
+            f"Expected predictor_count=15 (all edges) for NamedThing|related_to|A|NamedThing, "
+            f"got {row['predictor_count']}"
+        )
+        assert row['precision'] == pytest.approx(1 / 3, abs=1e-4), (
+            f"Expected precision=1/3, got {row['precision']}"
+        )
+
+    def test_self_comparison_precision_is_one(self, pipeline_1hop):
+        """When predictor variant matches the target, precision should be 1.0.
+
+        For example, Disease|affects|R|Gene predicting Disease|affects|R|Gene.
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        found_self = False
+        for filename, rows in grouped_results.items():
+            for row in rows:
+                predictor = row.get('predictor_metapath', '')
+                safe_pred = predictor.replace('|', '_').replace(':', '_').replace(' ', '_')
+                expected_filename = f"{safe_pred}.tsv.zst"
+
+                if expected_filename == filename:
+                    found_self = True
+                    assert row['precision'] == pytest.approx(1.0), (
+                        f"Self-comparison precision should be 1.0, got {row['precision']} "
+                        f"for {predictor} in {filename}"
+                    )
+
+        assert found_self, "No self-comparison rows found in grouped output"
+
+    def test_named_thing_related_to_predicting_biological_entity_affects(self, pipeline_1hop):
+        """NamedThing|related_to|A|NamedThing predicting BiologicalEntity|affects|F|BiologicalEntity.
+
+        The broad predictor (count=12) covers all 12 edges. The target has 6 pairs
+        (Gene x3 + Protein x1 + Gene+Protein expanding to both Gene and Protein = 6).
+        All 6 target pairs are covered by the predictor, so overlap=6, recall=1.0.
+        Precision = 6/12 = 0.5 (predictor is twice as broad as the target).
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        target_filename = "BiologicalEntity_affects_F_BiologicalEntity.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for BiologicalEntity|affects|F|BiologicalEntity. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        nt_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
+        ]
+
+        assert len(nt_rows) == 1, (
+            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
+            f"got {len(nt_rows)}"
+        )
+
+        row = nt_rows[0]
+        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
+        assert row['predictor_count'] == 15, (
+            f"Expected predictor_count=15, got {row['predictor_count']}"
+        )
+        assert row['recall'] == pytest.approx(1.0), (
+            f"Expected recall=1.0 (all 7 target pairs covered), got {row['recall']}"
+        )
+        assert row['precision'] == pytest.approx(7 / 15, abs=1e-4), (
+            f"Expected precision=7/15, got {row['precision']}"
+        )
+
+    def test_narrow_predictor_low_recall_for_broad_target(self, pipeline_1hop):
+        """A narrow predictor predicting a broad target has precision=1.0 but recall < 1.0.
+
+        BiologicalEntity|affects|F|BiologicalEntity (count=7) predicting
+        NamedThing|related_to|A|NamedThing (count=15).
+        All 7 predictor pairs are in the broad target (precision=1.0), but they
+        cover only 7/15 of the target (recall=7/15).
+        """
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        target_filename = "NamedThing_related_to_A_NamedThing.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for NamedThing|related_to|A|NamedThing. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        bio_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'BiologicalEntity|affects|F|BiologicalEntity'
+        ]
+
+        assert len(bio_rows) == 1, (
+            f"Expected 1 row for BiologicalEntity|affects|F|BiologicalEntity predictor, "
+            f"got {len(bio_rows)}"
+        )
+
+        row = bio_rows[0]
+        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
+        assert row['predictor_count'] == 7, (
+            f"Expected predictor_count=7, got {row['predictor_count']}"
+        )
+        assert row['precision'] == pytest.approx(1.0), (
+            f"Expected precision=1.0 (all predictor pairs in broad target), got {row['precision']}"
+        )
+        assert row['recall'] == pytest.approx(7 / 15, abs=1e-4), (
+            f"Expected recall=7/15, got {row['recall']}"
+        )

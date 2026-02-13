@@ -91,8 +91,10 @@ uv run python scripts/prepare_analysis.py \
 uv run python scripts/orchestrate_hop_analysis.py \
   --n-hops 3
 
-# 3. Prepare and run distributed grouping with filters
+# 3. Prepare grouping (precomputes aggregated counts for hierarchical expansion)
 uv run python scripts/prepare_grouping.py --n-hops 3
+
+# 4. Run distributed grouping with filters
 uv run python scripts/orchestrate_grouping.py --n-hops 3 \
   --min-count 10 --min-precision 0.001
 ```
@@ -148,20 +150,43 @@ Each node is assigned to a single type or pseudo-type:
 After explicit metapath computation, results are aggregated during grouping:
 
 1. **Pseudo-Type Expansion:** `Gene+SmallMolecule` contributes to both `Gene` and `SmallMolecule` paths
-2. **Type Hierarchy:** Results propagate to ancestor types (e.g., `SmallMolecule` → `ChemicalEntity`)
+2. **Type Hierarchy:** ALL node types (source AND target) propagate to ancestors (e.g., `SmallMolecule` → `ChemicalEntity`, `Disease` → `NamedThing`)
 3. **Predicate Hierarchy:** Results propagate to ancestor predicates (e.g., `treats` → `related_to`)
 
-**Example:**
-```
-Explicit: Gene+SmallMolecule|affects|F|Disease (count: 100)
+**How Variant Counts are Computed:**
 
-Aggregated to:
-- Gene|affects|F|Disease (100)
-- SmallMolecule|affects|F|Disease (100)
-- BiologicalEntity|affects|F|Disease (100)  # Gene ancestor
-- ChemicalEntity|affects|F|Disease (100)    # SmallMolecule ancestor
-- ... (all combinations of ancestors)
+Each explicit path contributes its count to ALL hierarchical variants. The count for a variant is the **sum of all explicit paths that roll up to it**.
+
+**Example - Single Explicit Path:**
 ```
+Explicit: SmallMolecule|treats|F|Disease (count: 100)
+
+Contributes 100 to each of these variants:
+- SmallMolecule|treats|F|Disease (original)
+- SmallMolecule|treats|F|DiseaseOrPhenotypicFeature (target ancestor)
+- SmallMolecule|treats|F|NamedThing (target ancestor)
+- ChemicalEntity|treats|F|Disease (source ancestor)
+- ChemicalEntity|treats|F|NamedThing (both ancestors)
+- ChemicalEntity|related_to|F|NamedThing (all ancestors)
+- ... (all combinations)
+```
+
+**Example - Multiple Explicit Paths Summing:**
+```
+Explicit paths:
+- SmallMolecule|treats|F|Disease (count: 100)
+- Drug|affects|F|Gene (count: 200)
+
+Both roll up to: ChemicalEntity|related_to|F|NamedThing
+Total count for this variant: 100 + 200 = 300
+```
+
+**Precomputed Count Files:**
+
+`prepare_grouping.py` generates these files for efficient lookups during grouping:
+- `aggregated_path_counts.json`: 1-hop path variant → count (from matrix metadata)
+- `aggregated_nhop_counts.json`: N-hop path variant → count (from result files)
+- `type_node_counts.json`: type → node count (for total_possible calculation)
 
 **Performance:**
 - Matrix count: No explosion (linear with edges)

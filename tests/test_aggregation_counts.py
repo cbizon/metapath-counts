@@ -28,7 +28,7 @@ sys.path.insert(0, str(scripts_dir))
 from metapath_counts import expand_metapath_to_variants, calculate_metrics
 
 from group_single_onehop_worker import (
-    load_aggregated_counts,
+    load_aggregated_nhop_counts,
     group_type_pair
 )
 
@@ -81,8 +81,8 @@ class TestNhopCountNotMultiplied:
         """Verify expand_metapath_with_hierarchy produces expected variants."""
         variants = expand_metapath_with_hierarchy("Gene|affects|F|Disease")
 
-        # Should include the original
-        assert "Gene|affects|F|Disease" in variants
+        # Should include the canonical form (Disease < Gene alphabetically)
+        assert "Disease|affects|R|Gene" in variants
 
         # Should include ancestors
         assert any("Entity" in v for v in variants)
@@ -114,13 +114,13 @@ class TestPrecomputedCountsLogic:
             for variant in variants:
                 aggregated_counts[variant] += count
 
-        # The explicit paths should have their exact counts
-        assert aggregated_counts["Gene|affects|F|Disease"] == 1000
-        assert aggregated_counts["SmallMolecule|treats|F|Disease"] == 500
+        # The canonical paths should have their exact counts
+        assert aggregated_counts["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated_counts["Disease|treats|R|SmallMolecule"] == 500  # Disease < SmallMolecule
 
-        # Entity|related_to|F|Entity should sum BOTH (1000 + 500 = 1500)
-        # because both paths expand to this ancestor
-        entity_key = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should sum BOTH (1000 + 500 = 1500)
+        # because both paths expand to this ancestor (related_to is symmetric, uses direction A)
+        entity_key = "Entity|related_to|A|Entity"
         if entity_key in aggregated_counts:
             assert aggregated_counts[entity_key] == 1500
 
@@ -142,16 +142,16 @@ class TestPrecomputedCountsLogic:
         try:
             # Reset cache
             import group_single_onehop_worker
-            group_single_onehop_worker._aggregated_counts_cache = None
+            group_single_onehop_worker._aggregated_nhop_counts_cache = None
 
-            counts = load_aggregated_counts(temp_path)
+            counts = load_aggregated_nhop_counts(temp_path)
 
             assert counts["Gene|affects|F|Disease"] == 1000
             assert counts["Entity|related_to|F|Entity"] == 5000
         finally:
             os.unlink(temp_path)
             # Reset cache again
-            group_single_onehop_worker._aggregated_counts_cache = None
+            group_single_onehop_worker._aggregated_nhop_counts_cache = None
 
 
 class TestCountIndependence:
@@ -313,15 +313,15 @@ class TestHierarchicalExpansionCounting:
             for v in variants:
                 aggregated[v] += count
 
-        # Entity|related_to|F|Entity should be 1000 + 500 = 1500
-        # (assuming both expand to this - they should)
-        entity_variant = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should be 1000 + 500 = 1500
+        # (related_to is symmetric, uses direction A)
+        entity_variant = "Entity|related_to|A|Entity"
         if entity_variant in aggregated:
             assert aggregated[entity_variant] == 1500
 
-        # Each original should keep its count
-        assert aggregated["Gene|affects|F|Disease"] == 1000
-        assert aggregated["SmallMolecule|treats|F|Disease"] == 500
+        # Each original (in canonical form) should keep its count
+        assert aggregated["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated["Disease|treats|R|SmallMolecule"] == 500  # Disease < SmallMolecule
 
 
 class TestRealWorldScenario:
@@ -374,12 +374,13 @@ class TestRealWorldScenario:
             for v in variants:
                 aggregated[v] += count
 
-        # Each original keeps its count
-        assert aggregated["Gene|affects|F|Disease"] == 1000
-        assert aggregated["Gene|treats|F|Disease"] == 2000
+        # Each original (in canonical form) keeps its count
+        assert aggregated["Disease|affects|R|Gene"] == 1000  # Disease < Gene
+        assert aggregated["Disease|treats|R|Gene"] == 2000  # Disease < Gene
 
-        # Entity|related_to|F|Entity should be sum of all: 1000+2000+3000+4000 = 10000
-        entity_key = "Entity|related_to|F|Entity"
+        # Entity|related_to|A|Entity should be sum of all: 1000+2000+3000+4000 = 10000
+        # (related_to is symmetric, uses direction A)
+        entity_key = "Entity|related_to|A|Entity"
         if entity_key in aggregated:
             # Note: might not be exactly 10000 if not all expand to this
             # but it should be the sum of those that do
@@ -391,71 +392,51 @@ class TestRealWorldScenario:
 # =============================================================================
 
 class TestPrepareGroupingIntegration:
-    """Test that prepare_grouping.py correctly reads matrix manifest and creates jobs."""
+    """Test that prepare_grouping.py correctly reads result files and creates jobs."""
 
-    def test_precompute_handles_missing_direction_field(self):
-        """Matrix manifest may not have direction field - should default to F."""
+    def test_precompute_reads_result_files(self):
+        """precompute_aggregated_nhop_counts should read result files and expand to hierarchical paths."""
         import tempfile
         scripts_dir = Path(__file__).parent.parent / "scripts"
         sys.path.insert(0, str(scripts_dir))
-        from prepare_grouping import precompute_aggregated_counts
+        from prepare_grouping import precompute_aggregated_nhop_counts
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a matrix manifest WITHOUT direction field (like the real one)
-            manifest = {
-                "matrices": [
-                    {
-                        "src_type": "SmallMolecule",
-                        "predicate": "treats",
-                        "tgt_type": "Disease",
-                        "nvals": 1000
-                    },
-                    {
-                        "src_type": "Gene",
-                        "predicate": "affects",
-                        "tgt_type": "Disease",
-                        "nvals": 500
-                    }
-                ]
-            }
-
-            manifest_path = os.path.join(tmpdir, "manifest.json")
-            with open(manifest_path, 'w') as f:
-                json.dump(manifest, f)
+            # Create result files with explicit paths
+            result_file = os.path.join(tmpdir, "results_matrix1_000.tsv")
+            with open(result_file, 'w') as f:
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
+                f.write("SmallMolecule|treats|F|Disease\t1000\tSmallMolecule|affects|F|Disease\t500\t100\t1000000\n")
+                f.write("Gene|affects|F|Disease\t500\tGene|regulates|F|Gene\t300\t50\t1000000\n")
 
             output_path = os.path.join(tmpdir, "counts.json")
-            counts = precompute_aggregated_counts(tmpdir, output_path)
+            counts = precompute_aggregated_nhop_counts(tmpdir, output_path, n_hops=1)
 
-            # Should have found paths (not empty due to missing direction)
-            assert len(counts) > 0, "No paths found - direction field handling broken"
+            # Should have found paths
+            assert len(counts) > 0, "No paths found"
 
-            # Should have the explicit paths with F direction
-            assert "SmallMolecule|treats|F|Disease" in counts
-            assert "Gene|affects|F|Disease" in counts
+            # Should have the explicit paths (in canonical form, from both predictor and predicted cols)
+            assert "Disease|treats|R|SmallMolecule" in counts  # Disease < SmallMolecule
+            assert "Disease|affects|R|Gene" in counts  # Disease < Gene
 
             # Should have hierarchical variants
             assert "ChemicalEntity|treats|F|Disease" in counts
 
     def test_type_pairs_created_from_aggregated_counts(self):
-        """Type pairs should be extracted from aggregated counts, not matrix manifest."""
+        """Type pairs should be extracted from aggregated counts produced from result files."""
         import tempfile
         scripts_dir = Path(__file__).parent.parent / "scripts"
         sys.path.insert(0, str(scripts_dir))
-        from prepare_grouping import precompute_aggregated_counts, extract_type_pairs_from_aggregated_paths
+        from prepare_grouping import precompute_aggregated_nhop_counts, extract_type_pairs_from_aggregated_paths
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            manifest = {
-                "matrices": [
-                    {"src_type": "SmallMolecule", "predicate": "treats", "tgt_type": "Disease", "nvals": 1000}
-                ]
-            }
-
-            manifest_path = os.path.join(tmpdir, "manifest.json")
-            with open(manifest_path, 'w') as f:
-                json.dump(manifest, f)
+            result_file = os.path.join(tmpdir, "results_matrix1_000.tsv")
+            with open(result_file, 'w') as f:
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
+                f.write("SmallMolecule|treats|F|Disease\t1000\tSmallMolecule|affects|F|Disease\t500\t100\t1000000\n")
 
             output_path = os.path.join(tmpdir, "counts.json")
-            counts = precompute_aggregated_counts(tmpdir, output_path)
+            counts = precompute_aggregated_nhop_counts(tmpdir, output_path, n_hops=1)
             type_pairs = extract_type_pairs_from_aggregated_paths(counts)
 
             # Should include hierarchical type pairs
@@ -480,10 +461,10 @@ class TestHierarchicalTypePairExtraction:
         explicit_path = "SmallMolecule|treats|F|Disease"
         variants = expand_metapath_with_hierarchy(explicit_path)
 
-        # Should include the hierarchical variant
-        assert "ChemicalEntity|treats|F|Disease" in variants
-        assert "SmallMolecule|treats|F|DiseaseOrPhenotypicFeature" in variants
-        assert "ChemicalEntity|treats|F|DiseaseOrPhenotypicFeature" in variants
+        # Should include the hierarchical variants (all in canonical form)
+        assert "ChemicalEntity|treats|F|Disease" in variants  # C < D, stays forward
+        assert "DiseaseOrPhenotypicFeature|treats|R|SmallMolecule" in variants  # D < S, reverse
+        assert "ChemicalEntity|treats|F|DiseaseOrPhenotypicFeature" in variants  # C < D, forward
 
     def test_type_pairs_from_aggregated_include_hierarchical(self):
         """Type pairs extracted from aggregated paths should include hierarchical pairs."""
@@ -689,28 +670,17 @@ class TestEndToEndHierarchicalOutput:
             # Create a fake result file with explicit data
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("1hop_metapath\t1hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # Explicit 1-hop data
                 f.write("SmallMolecule|treats|F|Disease\t1000\tSmallMolecule|affects|F|Disease\t500\t100\t1000000\n")
                 f.write("Drug|treats|F|Disease\t2000\tDrug|affects|F|Disease\t800\t200\t2000000\n")
 
-            # Create aggregated 1-hop counts (for target counts)
-            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
-            aggregated_counts = {}
+            # aggregated_nhop_counts covers both predictor and target paths
+            aggregated_nhop_counts = {}
             for path in ["SmallMolecule|treats|F|Disease", "Drug|treats|F|Disease",
                          "SmallMolecule|affects|F|Disease", "Drug|affects|F|Disease"]:
                 for variant in expand_metapath_with_hierarchy(path):
-                    aggregated_counts[variant] = aggregated_counts.get(variant, 0) + 1000
-
-            with open(counts_file, 'w') as f:
-                json.dump({"counts": aggregated_counts}, f)
-
-            # Create aggregated N-hop counts (for predictor counts)
-            # For 1-hop analysis, these are the same paths as targets
-            aggregated_nhop_counts = {}
-            for path in ["SmallMolecule|treats|F|Disease", "Drug|treats|F|Disease"]:
-                for variant in expand_metapath_with_hierarchy(path):
-                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 1500
+                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 1000
 
             # Create type node counts for total_possible calculation
             type_node_counts = {
@@ -728,7 +698,6 @@ class TestEndToEndHierarchicalOutput:
                 output_dir=output_dir,
                 n_hops=1,
                 aggregate=True,
-                aggregated_counts=aggregated_counts,
                 aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
@@ -766,20 +735,16 @@ class TestEndToEndHierarchicalOutput:
             # The worker checks onehop_path (column 2) against the type pair
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("1hop_metapath\t1hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # onehop_path (col 2) is SmallMolecule|treats|F|Disease which should match (ChemicalEntity, Disease)
                 f.write("Gene|affects|F|Disease\t500\tSmallMolecule|treats|F|Disease\t1000\t100\t1000000\n")
 
             # Create minimal aggregated counts
             # Include counts for both nhop and onehop paths
-            counts_file = os.path.join(results_dir, "aggregated_path_counts.json")
-            aggregated_counts = {}
+            aggregated_nhop_counts = {}
             for path in ["SmallMolecule|treats|F|Disease", "Gene|affects|F|Disease"]:
                 for variant in expand_metapath_with_hierarchy(path):
-                    aggregated_counts[variant] = aggregated_counts.get(variant, 0) + 1000
-
-            with open(counts_file, 'w') as f:
-                json.dump({"counts": aggregated_counts}, f)
+                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 1000
 
             # Create type node counts for total_possible calculation
             type_node_counts = {
@@ -795,7 +760,7 @@ class TestEndToEndHierarchicalOutput:
                 output_dir=output_dir,
                 n_hops=1,
                 aggregate=True,
-                aggregated_counts=aggregated_counts,
+                aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
 
@@ -834,19 +799,16 @@ class TestNhopCountFromPrecomputedCounts:
             # Create a 2-hop result file
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t5000\tGene|treats|F|SmallMolecule\t1000\t923\t1000000\n")
 
-            # Create aggregated_counts for 1-hop (target) paths
-            aggregated_counts = {
+            # aggregated_nhop_counts covers both predictor (2-hop) and target (1-hop) paths
+            # This simulates what prepare_grouping.py would produce
+            aggregated_nhop_counts = {
                 "Gene|treats|F|SmallMolecule": 1000,
                 "Gene|treats|F|ChemicalEntity": 1000,
                 "BiologicalEntity|treats|F|SmallMolecule": 1000,
             }
-
-            # Create aggregated_nhop_counts for 2-hop (predictor) paths
-            # This simulates what prepare_grouping.py would produce
-            aggregated_nhop_counts = {}
             explicit_2hop = "Gene|affects|F|Disease|treats|R|SmallMolecule"
             for variant in expand_metapath_with_hierarchy(explicit_2hop):
                 aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 5000
@@ -858,7 +820,6 @@ class TestNhopCountFromPrecomputedCounts:
                 "Entity": 20000, "NamedThing": 20000
             }
 
-            # Run the worker with the new aggregated_nhop_counts parameter
             group_type_pair(
                 type1="Gene",
                 type2="SmallMolecule",
@@ -866,7 +827,6 @@ class TestNhopCountFromPrecomputedCounts:
                 output_dir=output_dir,
                 n_hops=2,
                 aggregate=True,
-                aggregated_counts=aggregated_counts,
                 aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )
@@ -911,20 +871,17 @@ class TestNhopCountFromPrecomputedCounts:
             # Create result file with multiple 2-hop paths that expand to same variant
             result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
             with open(result_file, 'w') as f:
-                f.write("2hop_metapath\t2hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+                f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
                 # Two different 2-hop paths, both should aggregate to BiologicalEntity|related_to|...
                 f.write("Gene|affects|F|Disease|treats|R|SmallMolecule\t3000\tGene|treats|F|SmallMolecule\t1000\t100\t1000000\n")
                 f.write("Protein|regulates|F|Disease|treats|R|Drug\t2000\tProtein|treats|F|Drug\t500\t50\t1000000\n")
 
-            # 1-hop counts for targets
-            aggregated_counts = {}
+            # aggregated_nhop_counts covers both predictor (2-hop) and target (1-hop) paths
+            # This simulates what prepare_grouping.py would produce
+            aggregated_nhop_counts = {}
             for path in ["Gene|treats|F|SmallMolecule", "Protein|treats|F|Drug"]:
                 for variant in expand_metapath_with_hierarchy(path):
-                    aggregated_counts[variant] = aggregated_counts.get(variant, 0) + 750
-
-            # 2-hop counts for predictors - simulating what prepare_grouping.py produces
-            # Both explicit paths expand to variants, and counts should sum
-            aggregated_nhop_counts = {}
+                    aggregated_nhop_counts[variant] = aggregated_nhop_counts.get(variant, 0) + 750
             for explicit_path, count in [
                 ("Gene|affects|F|Disease|treats|R|SmallMolecule", 3000),
                 ("Protein|regulates|F|Disease|treats|R|Drug", 2000)
@@ -946,7 +903,6 @@ class TestNhopCountFromPrecomputedCounts:
                 output_dir=output_dir,
                 n_hops=2,
                 aggregate=True,
-                aggregated_counts=aggregated_counts,
                 aggregated_nhop_counts=aggregated_nhop_counts,
                 type_node_counts=type_node_counts
             )

@@ -6,6 +6,7 @@ This graph is carefully designed to exercise:
 3. Pseudo-type expansion (Gene+Protein contributes to both Gene and Protein)
 4. Multiple paths contributing to same aggregated variant
 5. Symmetric predicates (interacts_with uses direction 'A')
+6. Triangle structures for 2-hop overlap tests (SmallMolecule→Gene→Disease ∩ SmallMolecule→Disease)
 
 Graph Structure:
 ===============
@@ -21,13 +22,16 @@ Nodes (9 total):
   Protein_M       - pure Protein
   Protein_N       - pure Protein
 
-Edges (12 total):
-  affects (5 edges):
+Edges (15 total):
+  affects (8 edges):
     Gene_A         --affects--> Disease_P
     Gene_A         --affects--> Disease_Q
     Gene_B         --affects--> Disease_P
+    Gene_B         --affects--> Disease_Q   # Creates triangle with SmallMolecule_Y
     Protein_M      --affects--> Disease_P
     GeneProtein_Z  --affects--> Disease_Q   # Pseudo-type!
+    SmallMolecule_X --affects--> Gene_A     # Creates SmallMolecule→Gene→Disease triangle
+    SmallMolecule_Y --affects--> Gene_B     # Creates SmallMolecule→Gene→Disease triangle
 
   treats (2 edges):
     SmallMolecule_X --treats--> Disease_P
@@ -101,12 +105,15 @@ NODES = [
 
 # Edge definitions
 EDGES = [
-    # affects edges (5)
+    # affects edges (8)
     {"subject": "TEST:Gene_A", "predicate": "biolink:affects", "object": "TEST:Disease_P"},
     {"subject": "TEST:Gene_A", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
     {"subject": "TEST:Gene_B", "predicate": "biolink:affects", "object": "TEST:Disease_P"},
+    {"subject": "TEST:Gene_B", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
     {"subject": "TEST:Protein_M", "predicate": "biolink:affects", "object": "TEST:Disease_P"},
     {"subject": "TEST:GeneProtein_Z", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
+    {"subject": "TEST:SmallMolecule_X", "predicate": "biolink:affects", "object": "TEST:Gene_A"},
+    {"subject": "TEST:SmallMolecule_Y", "predicate": "biolink:affects", "object": "TEST:Gene_B"},
 
     # treats edges (2)
     {"subject": "TEST:SmallMolecule_X", "predicate": "biolink:treats", "object": "TEST:Disease_P"},
@@ -150,7 +157,7 @@ GRAPH_STATS = {
     "num_edges": len(EDGES),
     "num_pseudo_type_nodes": 1,  # GeneProtein_Z
     "edges_by_predicate": {
-        "affects": 5,
+        "affects": 8,
         "treats": 2,
         "interacts_with": 3,
         "regulates": 1,

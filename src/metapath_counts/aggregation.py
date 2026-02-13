@@ -96,6 +96,45 @@ def build_metapath(nodes: List[str], predicates: List[str], directions: List[str
     return '|'.join(result)
 
 
+def canonicalize_metapath(nodes: List[str], predicates: List[str], directions: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Ensure metapath is in canonical form based on alphabetical ordering of endpoint types.
+
+    Canonical form: first_type <= last_type (alphabetically).
+    If not in canonical form, reverses the path and flips directions.
+
+    Args:
+        nodes: List of node types
+        predicates: List of predicate names
+        directions: List of directions (F, R, or A)
+
+    Returns:
+        Tuple of (nodes, predicates, directions) in canonical form
+    """
+    first_type = nodes[0]
+    last_type = nodes[-1]
+
+    if first_type <= last_type:
+        # Already canonical
+        return nodes, predicates, directions
+
+    # Not canonical - reverse the path
+    reversed_nodes = list(reversed(nodes))
+    reversed_predicates = list(reversed(predicates))
+
+    # Flip directions: F <-> R, A stays A
+    flipped_directions = []
+    for d in reversed(directions):
+        if d == 'F':
+            flipped_directions.append('R')
+        elif d == 'R':
+            flipped_directions.append('F')
+        else:  # 'A' for symmetric predicates
+            flipped_directions.append('A')
+
+    return reversed_nodes, reversed_predicates, flipped_directions
+
+
 def get_type_variants(type_name: str, include_self: bool = True) -> List[str]:
     """
     Get all type variants for hierarchical aggregation.
@@ -205,15 +244,47 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
         for pred_combo in itertools.product(*predicate_variants):
             # Adjust directions: if predicate is symmetric, direction must be 'A'
             adjusted_directions = []
+            skip_variant = False
+
             for i, pred in enumerate(pred_combo):
                 if pred in symmetric_preds:
                     adjusted_directions.append('A')
+
+                    # BUGFIX: For same-type ORIGINAL paths, avoid double-counting when expanding
+                    # non-symmetric predicates (F/R) to symmetric ancestors (A).
+                    # Only generate variants from the canonical direction (F, not R).
+                    # Check if ORIGINAL path (nodes, not node_combo) has same src/tgt.
+                    if nodes[0] == nodes[-1]:  # Original path has same src and tgt type
+                        if directions[i] == 'R':  # Original was reverse direction
+                            # Skip this variant - the F version will generate it
+                            skip_variant = True
+                            break
                 else:
                     adjusted_directions.append(directions[i])
 
+            if skip_variant:
+                continue
+
+            # Canonicalize: ensure first_type <= last_type alphabetically
+            canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+                list(node_combo), list(pred_combo), adjusted_directions
+            )
+
             # Build the variant metapath
-            variant = build_metapath(list(node_combo), list(pred_combo), adjusted_directions)
+            variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
             yield variant
+
+            # Fix: When different-type endpoints expand to same-type endpoints,
+            # the direction was locked by the original alphabetical ordering.
+            # We need to also yield the reversed direction variant.
+            if (nodes[0] != nodes[-1]                      # original had different types
+                    and canon_nodes[0] == canon_nodes[-1]   # variant has same types
+                    and any(d != 'A' for d in canon_dirs)): # not all-symmetric (would be identical)
+                rev_nodes = list(reversed(canon_nodes))
+                rev_preds = list(reversed(canon_preds))
+                rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
+                            for d in reversed(canon_dirs)]
+                yield build_metapath(rev_nodes, rev_preds, rev_dirs)
 
 
 def expand_metapath_to_variants(metapath: str) -> set:

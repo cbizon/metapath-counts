@@ -21,14 +21,12 @@ from golden_graph import write_golden_graph, GRAPH_STATS
 from analyze_hop_overlap import analyze_nhop_overlap
 from prebuild_matrices import load_node_types, build_matrices
 from prepare_grouping import (
-    precompute_aggregated_counts,
     precompute_aggregated_nhop_counts,
     precompute_type_node_counts,
     extract_type_pairs_from_aggregated_paths,
 )
 from group_single_onehop_worker import (
     group_type_pair,
-    load_aggregated_counts,
     load_aggregated_nhop_counts,
     load_type_node_counts,
 )
@@ -103,34 +101,44 @@ def pipeline_1hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated 1-hop counts
-    aggregated_counts_path = results_dir / "aggregated_path_counts.json"
-    aggregated_counts = precompute_aggregated_counts(
-        str(matrices_dir), str(aggregated_counts_path)
-    )
-
-    # Step 3: Precompute aggregated N-hop counts
+    # Step 2: Precompute aggregated counts from result files
+    # (covers both N-hop predictor paths and 1-hop predicted paths)
     aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
     aggregated_nhop_counts = precompute_aggregated_nhop_counts(
         str(results_dir), str(aggregated_nhop_counts_path), n_hops
     )
 
-    # Step 4: Precompute type node counts
+    # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
     type_node_counts_path = results_dir / "type_node_counts.json"
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 5: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
+    # Step 4: Run grouping for exactly the type pairs present in the golden graph.
+    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
+    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
+    # explosion. Instead hardcode the pairs we actually test.
+    type_pairs = [
+        # Explicit leaf type pairs from the golden graph
+        ("Disease", "Gene"),
+        ("Disease", "Protein"),
+        ("Disease", "SmallMolecule"),
+        ("Gene", "Gene"),
+        ("Gene", "Protein"),
+        ("Gene", "SmallMolecule"),
+        # Hierarchical pairs explicitly tested in test_pipeline_1hop.py
+        ("BiologicalEntity", "BiologicalEntity"),
+        ("BiologicalEntity", "ChemicalEntity"),
+        ("BiologicalEntity", "Disease"),
+        ("ChemicalEntity", "Disease"),
+        ("NamedThing", "NamedThing"),
+    ]
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()
 
-    # Create file list for workers
     file_list = [str(result_file)]
 
-    # Run grouping for each type pair
     for type1, type2 in type_pairs:
         group_type_pair(
             type1=type1,
@@ -139,7 +147,6 @@ def pipeline_1hop(golden_workspace):
             output_dir=str(grouped_dir),
             n_hops=n_hops,
             aggregate=True,
-            aggregated_counts=load_aggregated_counts(str(aggregated_counts_path)),
             aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
             type_node_counts=load_type_node_counts(str(type_node_counts_path)),
             min_count=0,  # No filtering for tests
@@ -148,15 +155,15 @@ def pipeline_1hop(golden_workspace):
             excluded_predicates=set(),
         )
 
-    # Parse grouped results
     grouped_results = parse_all_grouped_files(grouped_dir)
+    raw_results = parse_raw_results(result_file)
 
     return {
         "n_hops": n_hops,
         "workspace": workspace,
         "result_file": result_file,
         "results_dir": results_dir,
-        "aggregated_counts": aggregated_counts,
+        "raw_results": raw_results,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,
@@ -180,26 +187,36 @@ def pipeline_2hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated 1-hop counts
-    aggregated_counts_path = results_dir / "aggregated_path_counts.json"
-    aggregated_counts = precompute_aggregated_counts(
-        str(matrices_dir), str(aggregated_counts_path)
-    )
-
-    # Step 3: Precompute aggregated N-hop counts
+    # Step 2: Precompute aggregated counts from result files
+    # (covers both N-hop predictor paths and 1-hop predicted paths)
     aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
     aggregated_nhop_counts = precompute_aggregated_nhop_counts(
         str(results_dir), str(aggregated_nhop_counts_path), n_hops
     )
 
-    # Step 4: Precompute type node counts
+    # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
     type_node_counts_path = results_dir / "type_node_counts.json"
     with open(type_node_counts_path, 'w') as f:
         json.dump(type_node_counts, f)
 
-    # Step 5: Extract type pairs and run grouping
-    type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)
+    # Step 4: Run grouping for exactly the type pairs present in the golden graph.
+    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
+    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
+    # explosion. Instead hardcode the pairs we actually test.
+    type_pairs = [
+        # Explicit leaf type pairs from the golden graph
+        ("Disease", "Gene"),
+        ("Disease", "Protein"),
+        ("Disease", "SmallMolecule"),
+        ("Gene", "Gene"),
+        ("Gene", "Protein"),
+        ("Gene", "SmallMolecule"),
+        # Hierarchical pairs explicitly tested in test_pipeline_2hop.py
+        ("BiologicalEntity", "BiologicalEntity"),
+        ("ChemicalEntity", "Disease"),
+        ("GeneOrGeneProduct", "GeneOrGeneProduct"),
+    ]
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"
     grouped_dir.mkdir()
@@ -214,7 +231,6 @@ def pipeline_2hop(golden_workspace):
             output_dir=str(grouped_dir),
             n_hops=n_hops,
             aggregate=True,
-            aggregated_counts=load_aggregated_counts(str(aggregated_counts_path)),
             aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
             type_node_counts=load_type_node_counts(str(type_node_counts_path)),
             min_count=0,
@@ -224,13 +240,14 @@ def pipeline_2hop(golden_workspace):
         )
 
     grouped_results = parse_all_grouped_files(grouped_dir)
+    raw_results = parse_raw_results(result_file)
 
     return {
         "n_hops": n_hops,
         "workspace": workspace,
         "result_file": result_file,
         "results_dir": results_dir,
-        "aggregated_counts": aggregated_counts,
+        "raw_results": raw_results,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,
@@ -249,7 +266,11 @@ def parse_all_grouped_files(grouped_dir):
 
 
 def parse_grouped_output(output_file):
-    """Parse a grouped output TSV file into a list of dicts."""
+    """Parse a grouped output TSV file into a list of dicts.
+
+    Columns: predictor_metapath, predictor_count, overlap, total_possible,
+             precision, recall, f1, mcc, specificity, npv
+    """
     rows = []
     with zstandard.open(output_file, 'rt') as f:
         header = f.readline().strip().split('\t')
@@ -259,7 +280,6 @@ def parse_grouped_output(output_file):
                 row = {}
                 for i, col in enumerate(header):
                     val = parts[i]
-                    # Convert numeric columns
                     if col.endswith('_count') or col in ('overlap', 'total_possible'):
                         row[col] = int(val)
                     elif col in ('precision', 'recall', 'f1', 'mcc', 'specificity', 'npv'):
@@ -271,19 +291,23 @@ def parse_grouped_output(output_file):
 
 
 def parse_raw_results(result_file):
-    """Parse raw analysis output TSV into list of dicts."""
+    """Parse raw analysis output TSV by position.
+
+    Columns: predictor_metapath, predictor_count, predicted_metapath,
+             predicted_count, overlap, total_possible
+    """
     rows = []
     with open(result_file, 'r') as f:
-        header = f.readline().strip().split('\t')
+        f.readline()  # skip header
         for line in f:
             parts = line.strip().split('\t')
-            if len(parts) >= len(header):
-                row = {}
-                for i, col in enumerate(header):
-                    val = parts[i]
-                    if col.endswith('_count') or col in ('overlap', 'total_possible'):
-                        row[col] = int(val)
-                    else:
-                        row[col] = val
-                rows.append(row)
+            if len(parts) == 6:
+                rows.append({
+                    'predictor_path': parts[0],
+                    'predictor_count': int(parts[1]),
+                    'predicted_path': parts[2],
+                    'predicted_count': int(parts[3]),
+                    'overlap': int(parts[4]),
+                    'total_possible': int(parts[5]),
+                })
     return rows

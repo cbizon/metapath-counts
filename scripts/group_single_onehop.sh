@@ -43,6 +43,7 @@ fi
 OUTPUT_DIR="grouped_by_results_${N_HOPS}hop"
 RESULTS_DIR="results_${N_HOPS}hop"
 AGGREGATED_COUNTS="${RESULTS_DIR}/aggregated_path_counts.json"
+AGGREGATED_NHOP_COUNTS="${RESULTS_DIR}/aggregated_nhop_counts.json"
 TYPE_NODE_COUNTS="${RESULTS_DIR}/type_node_counts.json"
 
 echo "=========================================="
@@ -52,7 +53,8 @@ echo "Type pair: ($TYPE1, $TYPE2)"
 echo "File list: $FILE_LIST_PATH"
 echo "N-hops: $N_HOPS"
 echo "Output dir: $OUTPUT_DIR"
-echo "Aggregated counts: $AGGREGATED_COUNTS"
+echo "Aggregated 1-hop counts: $AGGREGATED_COUNTS"
+echo "Aggregated N-hop counts: $AGGREGATED_NHOP_COUNTS"
 echo "Type node counts: $TYPE_NODE_COUNTS"
 echo "Min count: $MIN_COUNT"
 echo "Min precision: $MIN_PRECISION"
@@ -68,7 +70,14 @@ fi
 
 # Check if aggregated counts file exists
 if [ ! -f "$AGGREGATED_COUNTS" ]; then
-    echo "ERROR: Aggregated counts file not found: $AGGREGATED_COUNTS"
+    echo "ERROR: Aggregated 1-hop counts file not found: $AGGREGATED_COUNTS"
+    echo "Run prepare_grouping.py first to generate this file."
+    exit 1
+fi
+
+# Check if aggregated N-hop counts file exists
+if [ ! -f "$AGGREGATED_NHOP_COUNTS" ]; then
+    echo "ERROR: Aggregated N-hop counts file not found: $AGGREGATED_NHOP_COUNTS"
     echo "Run prepare_grouping.py first to generate this file."
     exit 1
 fi
@@ -96,6 +105,7 @@ uv run python scripts/group_single_onehop_worker.py \
     --output-dir "$OUTPUT_DIR" \
     --n-hops "$N_HOPS" \
     --aggregated-counts "$AGGREGATED_COUNTS" \
+    --aggregated-nhop-counts "$AGGREGATED_NHOP_COUNTS" \
     --type-node-counts "$TYPE_NODE_COUNTS" \
     --min-count "$MIN_COUNT" \
     --min-precision "$MIN_PRECISION" \

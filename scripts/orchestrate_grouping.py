@@ -100,7 +100,7 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
 
 def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
                         min_count=0, min_precision=0.0,
-                        exclude_types="Entity,ThingWithTaxon",
+                        exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent",
                         exclude_predicates="related_to_at_instance_level,related_to_at_concept_level"):
     """Submit a SLURM job for one type pair.
 
@@ -378,8 +378,8 @@ def main():
     parser.add_argument(
         '--exclude-types',
         type=str,
-        default='Entity,ThingWithTaxon',
-        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)'
+        default='Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent',
+        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent)'
     )
     parser.add_argument(
         '--exclude-predicates',

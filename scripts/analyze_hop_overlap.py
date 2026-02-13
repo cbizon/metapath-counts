@@ -6,7 +6,7 @@ Computes all N-hop metapaths via matrix multiplication, then calculates
 overlap with 1-hop edges to identify which 1-hop edges appear in N-hop paths.
 
 Output format (TSV):
-  Nhop_metapath          | Nhop_count | 1hop_metapath    | 1hop_count | overlap | total_possible
+  predictor_metapath     | predictor_count | predicted_metapath | predicted_count | overlap | total_possible
   SmallMolecule|affects|F|Gene|affects|R|SmallMolecule|affects|F|Gene | 6170000000 | SmallMolecule|regulates|F|Gene | 500000 | 450000 | 201000000000
 
 Metapath format: NodeType|predicate|direction|NodeType|...
@@ -235,7 +235,46 @@ def should_process_path(n_hops: int, first_matrix_nvals: int, last_matrix_nvals:
     if n_hops == 1:
         return is_canonical_direction(src_type, tgt_type)
     else:
-        return last_matrix_nvals >= first_matrix_nvals
+        if last_matrix_nvals != first_matrix_nvals:
+            return last_matrix_nvals > first_matrix_nvals
+        # Tie-break equal sizes with canonical direction (same as 1-hop)
+        return is_canonical_direction(src_type, tgt_type)
+
+
+def is_palindromic_path(node_types, predicates, directions, symmetric_predicates):
+    """
+    Check if an N-hop path is palindromic (reads the same forward and backward).
+
+    A palindromic path produces a symmetric accumulated matrix, meaning every entry
+    (i,j) has a corresponding (j,i). This causes double-counting of undirected pairs
+    that should_process_path cannot handle (since the path and its reverse are identical).
+
+    Uses the same reversal pattern as canonicalize_metapath in aggregation.py:
+    reverse nodes, reverse predicates, flip F<->R directions.
+
+    Symmetric predicates use effective direction 'A' (opposite of 'A' is 'A').
+
+    Args:
+        node_types: List of node types in the path
+        predicates: List of predicates in the path
+        directions: List of raw directions ('F' or 'R') in the path
+        symmetric_predicates: Set of predicate names that are symmetric
+
+    Returns:
+        True if the path is palindromic
+    """
+    n = len(predicates)
+    # Compute effective directions (symmetric predicates always use 'A')
+    eff_dirs = ['A' if predicates[i] in symmetric_predicates else directions[i]
+                for i in range(n)]
+    # Reverse the path (same logic as canonicalize_metapath)
+    rev_nodes = list(reversed(node_types))
+    rev_preds = list(reversed(predicates))
+    rev_dirs = [{'F': 'R', 'R': 'F', 'A': 'A'}[d] for d in reversed(eff_dirs)]
+    # Path is palindromic if it equals its reverse
+    return (list(node_types) == rev_nodes
+            and list(predicates) == rev_preds
+            and eff_dirs == rev_dirs)
 
 
 def format_metapath(node_types, predicates, directions):
@@ -516,6 +555,9 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
 
     start_time = time.time()
 
+    # Fetch symmetric predicates once (used by process_path closure for palindrome detection)
+    symmetric_predicates = get_symmetric_predicates()
+
     # Build extended matrix list with inverses
     print(f"[TIMING] Building matrix list...", flush=True)
     list_build_start = time.time()
@@ -531,20 +573,6 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
     elif matrix1_index is not None:
         print(f"Processing ONLY Matrix1 index: {matrix1_index}", flush=True)
 
-    # Build aggregated 1-hop matrices
-    print(f"\n[TIMING] Building aggregated 1-hop matrices...", flush=True)
-    agg_start = time.time()
-    aggregated_1hop = {}
-    for src_type, pred, tgt_type, matrix, direction in all_matrices:
-        key = (src_type, tgt_type)
-        if key not in aggregated_1hop:
-            aggregated_1hop[key] = matrix.dup()
-        else:
-            aggregated_1hop[key] = aggregated_1hop[key].ewise_add(matrix, gb.binary.any).new()
-    agg_time = time.time() - agg_start
-
-    print(f"[TIMING] Aggregated matrices built in {agg_time:.1f}s", flush=True)
-    print(f"Created {len(aggregated_1hop):,} aggregated type-pair matrices", flush=True)
 
     # Group by source type for efficient lookup
     by_source_type = defaultdict(list)
@@ -571,7 +599,7 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
 
     # Open output file
     with open(output_file, 'w') as f:
-        f.write(f"{n_hops}hop_metapath\t{n_hops}hop_count\t1hop_metapath\t1hop_count\toverlap\ttotal_possible\n")
+        f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
 
         rows_written = 0
         paths_computed = 0
@@ -624,10 +652,13 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                 src_type_final = node_types[0]
                 tgt_type_final = node_types[-1]
 
-                # Check if we should process this path (duplicate elimination)
-                if not should_process_path(n_hops, first_matrix_nvals, accumulated_matrix.nvals,
-                                          src_type_final, tgt_type_final):
-                    return
+                # For n_hops == 1: duplicate elimination (alphabetical) happens here
+                # because there is no recursive step. For n_hops > 1 the check already
+                # happened before the final multiplication (see recursive case below).
+                if n_hops == 1:
+                    if not should_process_path(1, first_matrix_nvals, accumulated_matrix.nvals,
+                                              src_type_final, tgt_type_final):
+                        return
 
                 # Generate path ID for tracking
                 if enable_path_tracking and matrix1_index is not None:
@@ -644,9 +675,25 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                     # Record that we're computing this path
                     record_path_in_progress(path_id, results_dir, matrix1_index, n_hops, current_memory_gb)
 
+                # Deduplicate same-type endpoint paths:
+                # - Self-pairs (diagonal): a node reaching itself is meaningless
+                # - Palindromic paths: symmetric matrix means (i,j) and (j,i) both
+                #   exist, double-counting undirected pairs. Use upper triangle.
+                work_matrix = accumulated_matrix
+                if src_type_final == tgt_type_final:
+                    if is_palindromic_path(node_types, predicates, directions, symmetric_predicates):
+                        # Palindromic: matrix is symmetric. triu(k=1) removes diagonal
+                        # AND deduplicates symmetric pairs in one operation.
+                        work_matrix = accumulated_matrix.select(gb.select.triu, 1).new()
+                    else:
+                        # Non-palindromic same-type: only remove self-pairs (diagonal)
+                        work_matrix = accumulated_matrix.select(gb.select.offdiag).new()
+                    if work_matrix.nvals == 0:
+                        return
+
                 # Format N-hop metapath
                 nhop_metapath = format_metapath(node_types, predicates, directions)
-                nhop_count = accumulated_matrix.nvals
+                nhop_count = work_matrix.nvals
                 total_possible = accumulated_matrix.nrows * accumulated_matrix.ncols
 
                 paths_computed += 1
@@ -660,11 +707,11 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                     if onehop_src != src_type_final or onehop_tgt != tgt_type_final:
                         continue
 
-                    if accumulated_matrix.nrows != onehop_matrix.nrows or accumulated_matrix.ncols != onehop_matrix.ncols:
+                    if work_matrix.nrows != onehop_matrix.nrows or work_matrix.ncols != onehop_matrix.ncols:
                         continue
 
-                    # Calculate overlap
-                    overlap_matrix = accumulated_matrix.ewise_mult(onehop_matrix, gb.binary.pair).new()
+                    # Calculate overlap (using deduplicated work_matrix)
+                    overlap_matrix = work_matrix.ewise_mult(onehop_matrix, gb.binary.pair).new()
                     overlap_count = overlap_matrix.nvals
                     onehop_count = onehop_matrix.nvals
                     del overlap_matrix
@@ -672,27 +719,15 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                     # Format 1-hop metapath
                     onehop_metapath = format_metapath([onehop_src, onehop_tgt], [onehop_pred], [onehop_dir])
 
+                    # Skip zero-overlap rows (optimization: reduces output size significantly)
+                    if overlap_count == 0:
+                        continue
+
                     # Write row
                     f.write(f"{nhop_metapath}\t{nhop_count}\t{onehop_metapath}\t{onehop_count}\t{overlap_count}\t{total_possible}\n")
                     rows_written += 1
 
-                # Also compare with aggregated 1-hop
-                agg_key = (src_type_final, tgt_type_final)
-                if agg_key in aggregated_1hop:
-                    agg_matrix = aggregated_1hop[agg_key]
-
-                    if accumulated_matrix.nrows == agg_matrix.nrows and accumulated_matrix.ncols == agg_matrix.ncols:
-                        overlap_matrix = accumulated_matrix.ewise_mult(agg_matrix, gb.binary.pair).new()
-                        overlap_count = overlap_matrix.nvals
-                        agg_count = agg_matrix.nvals
-                        del overlap_matrix
-
-                        agg_metapath = f"{src_type_final}|ANY|A|{tgt_type_final}"
-
-                        f.write(f"{nhop_metapath}\t{nhop_count}\t{agg_metapath}\t{agg_count}\t{overlap_count}\t{total_possible}\n")
-                        rows_written += 1
-
-                # CRITICAL: Flush after every path (not every 10k rows)
+# CRITICAL: Flush after every path (not every 10k rows)
                 f.flush()
 
                 # Record path completion
@@ -712,6 +747,15 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
                 # Check dimension compatibility
                 if accumulated_matrix.ncols != matrix.nrows:
                     continue
+
+                # For the final hop: duplicate elimination before multiplying.
+                # Compare the last hop matrix nvals against the first matrix nvals
+                # to decide which direction is canonical. This avoids doing the
+                # expensive matrix multiplication for the non-canonical direction.
+                if depth == n_hops - 1:
+                    if not should_process_path(n_hops, first_matrix_nvals, matrix.nvals,
+                                              node_types[0], tgt_type):
+                        continue
 
                 # Build next path segment for tracking
                 next_node_types = node_types + [tgt_type]
@@ -813,7 +857,6 @@ def analyze_nhop_overlap(matrices, output_file, n_hops=3, matrix1_index=None, ma
     print(f"\n[TIMING] Total analysis function time: {total_analysis_time:.1f}s ({total_analysis_time/60:.1f}min)", flush=True)
     print(f"[TIMING] Breakdown:", flush=True)
     print(f"  Matrix list build:  {list_build_time:7.1f}s ({list_build_time/total_analysis_time*100:5.1f}%)", flush=True)
-    print(f"  ANY matrix build:   {agg_time:7.1f}s ({agg_time/total_analysis_time*100:5.1f}%)", flush=True)
     print(f"  Main computation:   {computation_time:7.1f}s ({computation_time/total_analysis_time*100:5.1f}%)", flush=True)
 
 
