@@ -15,7 +15,7 @@ here to avoid duplication.
 import itertools
 from typing import Iterator, List, Tuple
 
-from .hierarchy import get_type_ancestors, get_predicate_ancestors
+from .hierarchy import get_type_ancestors, get_predicate_ancestors, get_qualifier_ancestors
 from .type_assignment import is_pseudo_type, parse_pseudo_type
 from .type_utils import get_symmetric_predicates
 
@@ -29,6 +29,75 @@ def _get_symmetric_predicates():
     if _SYMMETRIC_PREDICATES is None:
         _SYMMETRIC_PREDICATES = get_symmetric_predicates()
     return _SYMMETRIC_PREDICATES
+
+
+def build_compound_predicate(predicate: str, direction: str = None, aspect: str = None) -> str:
+    """
+    Build a compound predicate string encoding qualifier information.
+
+    Format: ``base--direction--aspect`` when qualifiers are present,
+    or plain ``base`` when neither qualifier is given.
+
+    Args:
+        predicate: Base predicate name (e.g., "causes")
+        direction: Direction qualifier (e.g., "decreased") or None
+        aspect: Aspect qualifier (e.g., "activity_or_abundance") or None
+
+    Returns:
+        Compound predicate string, or plain predicate if no qualifiers
+
+    Examples:
+        >>> build_compound_predicate("causes", "decreased", "activity_or_abundance")
+        'causes--decreased--activity_or_abundance'
+        >>> build_compound_predicate("causes", "decreased", None)
+        'causes--decreased--'
+        >>> build_compound_predicate("treats")
+        'treats'
+    """
+    if not direction and not aspect:
+        return predicate
+    return f"{predicate}--{direction or ''}--{aspect or ''}"
+
+
+def parse_compound_predicate(compound: str) -> Tuple[str, str, str]:
+    """
+    Parse a compound predicate into its components.
+
+    Args:
+        compound: Predicate string (plain or compound)
+
+    Returns:
+        Tuple of (base_predicate, direction_qualifier, aspect_qualifier)
+        where direction and aspect are None when absent
+
+    Examples:
+        >>> parse_compound_predicate("causes--decreased--activity_or_abundance")
+        ('causes', 'decreased', 'activity_or_abundance')
+        >>> parse_compound_predicate("causes--decreased--")
+        ('causes', 'decreased', None)
+        >>> parse_compound_predicate("treats")
+        ('treats', None, None)
+    """
+    if '--' not in compound:
+        return (compound, None, None)
+    parts = compound.split('--', 2)
+    base = parts[0]
+    direction = parts[1] if parts[1] else None
+    aspect = parts[2] if len(parts) > 2 and parts[2] else None
+    return (base, direction, aspect)
+
+
+def is_compound_predicate(predicate: str) -> bool:
+    """
+    Check if a predicate string encodes qualifier information.
+
+    Args:
+        predicate: Predicate string
+
+    Returns:
+        True if the predicate contains '--' separator (is compound)
+    """
+    return '--' in predicate
 
 
 def parse_metapath(metapath: str) -> Tuple[List[str], List[str], List[str]]:
@@ -175,28 +244,65 @@ def get_predicate_variants(predicate: str, include_self: bool = True) -> List[st
     """
     Get all predicate variants for hierarchical aggregation.
 
+    For plain predicates: returns self + ancestor predicates.
+
+    For compound predicates (``base--direction--aspect``): returns a cross-product
+    of base predicate ancestors × direction qualifier ancestors (+ None) × aspect
+    qualifier ancestors (+ None).  Each combination is built with
+    ``build_compound_predicate``; when both qualifiers are None the result
+    collapses to a plain predicate.
+
     Args:
-        predicate: Predicate name (with or without biolink: prefix)
+        predicate: Predicate name (plain or compound, with or without biolink: prefix)
         include_self: Whether to include the predicate itself
 
     Returns:
-        List of predicate variants (includes predicate and its ancestors, all without biolink: prefix)
+        List of predicate variants (all without biolink: prefix)
     """
+    if not is_compound_predicate(predicate):
+        # Plain predicate path (original logic)
+        variants = []
+        clean_predicate = predicate.replace('biolink:', '')
+        if include_self:
+            variants.append(clean_predicate)
+        ancestors = get_predicate_ancestors(predicate)
+        for ancestor in ancestors:
+            if ancestor not in variants:
+                variants.append(ancestor)
+        return variants
+
+    # Compound predicate path
+    base, direction, aspect = parse_compound_predicate(predicate)
+
+    # Base predicate variants: self + ancestors
+    base_variants = [base] + [a for a in get_predicate_ancestors(base) if a != base]
+
+    # Direction qualifier variants: self + ancestors + None (drop qualifier)
+    if direction:
+        dir_ancestors = get_qualifier_ancestors(direction)
+        dir_variants = list(dict.fromkeys(dir_ancestors))  # preserve order, deduplicate
+        dir_variants.append(None)
+    else:
+        dir_variants = [None]
+
+    # Aspect qualifier variants: self + ancestors + None (drop qualifier)
+    if aspect:
+        asp_ancestors = get_qualifier_ancestors(aspect)
+        asp_variants = list(dict.fromkeys(asp_ancestors))
+        asp_variants.append(None)
+    else:
+        asp_variants = [None]
+
+    seen = set()
     variants = []
-
-    # Normalize: strip biolink: prefix if present
-    clean_predicate = predicate.replace('biolink:', '')
-
-    # Include the original predicate (normalized)
-    if include_self:
-        variants.append(clean_predicate)
-
-    # Get ancestor predicates (already returned without biolink: prefix)
-    ancestors = get_predicate_ancestors(predicate)
-
-    for ancestor in ancestors:
-        if ancestor not in variants:
-            variants.append(ancestor)
+    for b in base_variants:
+        for d in dir_variants:
+            for a in asp_variants:
+                v = build_compound_predicate(b, d, a)
+                if include_self or v != predicate:
+                    if v not in seen:
+                        seen.add(v)
+                        variants.append(v)
 
     return variants
 
@@ -247,7 +353,9 @@ def generate_metapath_variants(metapath: str) -> Iterator[str]:
             skip_variant = False
 
             for i, pred in enumerate(pred_combo):
-                if pred in symmetric_preds:
+                # For compound predicates, symmetry is determined by the base predicate
+                base_pred = parse_compound_predicate(pred)[0]
+                if base_pred in symmetric_preds:
                     adjusted_directions.append('A')
 
                     # BUGFIX: For same-type ORIGINAL paths, avoid double-counting when expanding

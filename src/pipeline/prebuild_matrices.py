@@ -26,7 +26,7 @@ from pathlib import Path
 from collections import defaultdict
 import numpy as np
 import graphblas as gb
-from library import assign_node_type, get_symmetric_predicates, is_pseudo_type
+from library import assign_node_type, get_symmetric_predicates, is_pseudo_type, build_compound_predicate
 
 
 def load_node_types(nodes_file: str, config: dict = None) -> dict:
@@ -122,10 +122,22 @@ def build_matrices(edges_file: str, node_types: dict):
                 skipped_no_types += 1
                 continue
 
-            pred = predicate.replace('biolink:', '')
+            base_pred = predicate.replace('biolink:', '')
+
+            # Extract direction and aspect qualifiers
+            direction_qualifier = edge.get('object_direction_qualifier', '') or ''
+            aspect_qualifier = edge.get('object_aspect_qualifier', '') or ''
+
+            # Build the effective predicate (compound if qualifiers present)
+            pred = build_compound_predicate(
+                base_pred,
+                direction_qualifier if direction_qualifier else None,
+                aspect_qualifier if aspect_qualifier else None
+            )
 
             # For symmetric predicates, add edge in both directions
-            is_symmetric = pred in symmetric_predicates
+            # Symmetry is determined by the base predicate
+            is_symmetric = base_pred in symmetric_predicates
 
             # Add forward direction
             triple = (src_type, pred, tgt_type)

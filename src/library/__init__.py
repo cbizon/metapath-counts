@@ -33,7 +33,10 @@ from .aggregation import (
     get_predicate_variants,
     generate_metapath_variants,
     expand_metapath_to_variants,
-    calculate_metrics
+    calculate_metrics,
+    build_compound_predicate,
+    parse_compound_predicate,
+    is_compound_predicate
 )
 
 __all__ = [
@@ -53,5 +56,8 @@ __all__ = [
     "get_predicate_variants",
     "generate_metapath_variants",
     "expand_metapath_to_variants",
-    "calculate_metrics"
+    "calculate_metrics",
+    "build_compound_predicate",
+    "parse_compound_predicate",
+    "is_compound_predicate"
 ]

@@ -13,7 +13,10 @@ from library import (
     get_predicate_variants,
     generate_metapath_variants,
     expand_metapath_to_variants,
-    calculate_metrics
+    calculate_metrics,
+    build_compound_predicate,
+    parse_compound_predicate,
+    is_compound_predicate
 )
 
 
@@ -306,3 +309,167 @@ class TestCalculateMetrics:
         assert metrics["TN"] == 875
         # Total should be total_possible
         assert metrics["Total"] == 1000
+
+
+class TestBuildCompoundPredicate:
+    """Tests for build_compound_predicate function."""
+
+    def test_full_qualifiers(self):
+        """Both direction and aspect qualifiers produce compound string."""
+        result = build_compound_predicate("causes", "decreased", "activity_or_abundance")
+        assert result == "causes--decreased--activity_or_abundance"
+
+    def test_direction_only(self):
+        """Direction qualifier only."""
+        result = build_compound_predicate("causes", "decreased", None)
+        assert result == "causes--decreased--"
+
+    def test_aspect_only(self):
+        """Aspect qualifier only."""
+        result = build_compound_predicate("causes", None, "activity_or_abundance")
+        assert result == "causes----activity_or_abundance"
+
+    def test_no_qualifiers_returns_plain(self):
+        """No qualifiers returns the plain predicate."""
+        result = build_compound_predicate("treats")
+        assert result == "treats"
+
+    def test_no_qualifiers_explicit_none(self):
+        """Explicit None qualifiers returns the plain predicate."""
+        result = build_compound_predicate("treats", None, None)
+        assert result == "treats"
+
+
+class TestParseCompoundPredicate:
+    """Tests for parse_compound_predicate function."""
+
+    def test_full_compound(self):
+        """Parse full compound predicate."""
+        base, direction, aspect = parse_compound_predicate("causes--decreased--activity_or_abundance")
+        assert base == "causes"
+        assert direction == "decreased"
+        assert aspect == "activity_or_abundance"
+
+    def test_direction_only(self):
+        """Parse compound with direction only."""
+        base, direction, aspect = parse_compound_predicate("causes--decreased--")
+        assert base == "causes"
+        assert direction == "decreased"
+        assert aspect is None
+
+    def test_aspect_only(self):
+        """Parse compound with aspect only."""
+        base, direction, aspect = parse_compound_predicate("causes----activity_or_abundance")
+        assert base == "causes"
+        assert direction is None
+        assert aspect == "activity_or_abundance"
+
+    def test_plain_predicate(self):
+        """Plain predicate returns (pred, None, None)."""
+        base, direction, aspect = parse_compound_predicate("treats")
+        assert base == "treats"
+        assert direction is None
+        assert aspect is None
+
+    def test_roundtrip_full(self):
+        """build then parse round-trips correctly for full compound."""
+        original = build_compound_predicate("causes", "decreased", "activity_or_abundance")
+        base, direction, aspect = parse_compound_predicate(original)
+        assert base == "causes"
+        assert direction == "decreased"
+        assert aspect == "activity_or_abundance"
+
+    def test_roundtrip_plain(self):
+        """build then parse round-trips correctly for plain predicate."""
+        original = build_compound_predicate("treats")
+        base, direction, aspect = parse_compound_predicate(original)
+        assert base == "treats"
+        assert direction is None
+        assert aspect is None
+
+
+class TestIsCompoundPredicate:
+    """Tests for is_compound_predicate function."""
+
+    def test_compound_is_detected(self):
+        """Compound predicate returns True."""
+        assert is_compound_predicate("causes--decreased--activity_or_abundance") is True
+
+    def test_direction_only_compound(self):
+        """Direction-only compound returns True."""
+        assert is_compound_predicate("causes--decreased--") is True
+
+    def test_plain_returns_false(self):
+        """Plain predicate returns False."""
+        assert is_compound_predicate("treats") is False
+
+    def test_plain_with_underscores_returns_false(self):
+        """Plain predicate with underscores is not compound."""
+        assert is_compound_predicate("related_to") is False
+
+
+class TestGetPredicateVariantsCompound:
+    """Tests for get_predicate_variants on compound predicates."""
+
+    def test_compound_includes_self(self):
+        """Compound predicate includes itself in variants."""
+        compound = "causes--decreased--activity_or_abundance"
+        variants = get_predicate_variants(compound)
+        assert compound in variants
+
+    def test_compound_includes_base_without_qualifiers(self):
+        """Compound predicate variants include base predicate alone."""
+        compound = "causes--decreased--activity_or_abundance"
+        variants = get_predicate_variants(compound)
+        assert "causes" in variants
+
+    def test_compound_includes_base_ancestors(self):
+        """Compound predicate variants include ancestor predicates."""
+        # causes -> affects -> related_to in biolink hierarchy
+        compound = "causes--decreased--activity_or_abundance"
+        variants = get_predicate_variants(compound)
+        # Should contain ancestor predicates as plain strings
+        assert any(v in ("affects", "related_to") for v in variants)
+
+    def test_plain_predicate_unchanged(self):
+        """Plain predicate variant generation is unchanged."""
+        variants = get_predicate_variants("treats")
+        assert "treats" in variants
+        assert "related_to" in variants
+
+
+class TestParseMetapathCompound:
+    """Tests for parse_metapath with compound predicates."""
+
+    def test_parse_1hop_compound(self):
+        """1-hop metapath with compound predicate parses correctly."""
+        metapath = "Gene|causes--decreased--activity_or_abundance|F|Disease"
+        nodes, predicates, directions = parse_metapath(metapath)
+        assert nodes == ["Gene", "Disease"]
+        assert predicates == ["causes--decreased--activity_or_abundance"]
+        assert directions == ["F"]
+
+    def test_parse_2hop_mixed(self):
+        """2-hop with one compound and one plain predicate."""
+        metapath = "Gene|causes--decreased--|F|Disease|treats|R|SmallMolecule"
+        nodes, predicates, directions = parse_metapath(metapath)
+        assert nodes == ["Gene", "Disease", "SmallMolecule"]
+        assert predicates == ["causes--decreased--", "treats"]
+        assert directions == ["F", "R"]
+
+
+class TestExpandMetapathToVariantsCompound:
+    """Tests for expand_metapath_to_variants with compound predicates."""
+
+    def test_compound_metapath_produces_variants(self):
+        """Metapath with compound predicate generates multiple variants."""
+        metapath = "Gene|causes--decreased--|F|Disease"
+        variants = expand_metapath_to_variants(metapath)
+        assert len(variants) > 1
+
+    def test_compound_metapath_includes_plain_base(self):
+        """Variants of a compound-predicate metapath include base predicate version."""
+        metapath = "Gene|causes--decreased--|F|Disease"
+        variants = expand_metapath_to_variants(metapath)
+        # Should have a variant with plain "causes"
+        assert any("|causes|" in v for v in variants)

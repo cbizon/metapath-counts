@@ -20,7 +20,7 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
-from library import get_symmetric_predicates
+from library import get_symmetric_predicates, parse_compound_predicate
 
 
 def build_matrix_list_from_manifest(matrices_dir: str):
@@ -56,7 +56,9 @@ def build_matrix_list_from_manifest(matrices_dir: str):
         all_matrices.append((src_type, pred, tgt_type, nvals, 'F'))
 
         # Reverse direction (if not symmetric)
-        if pred not in symmetric_predicates:
+        # Symmetry is determined by the base predicate for compound predicates
+        base_pred = parse_compound_predicate(pred)[0]
+        if base_pred not in symmetric_predicates:
             all_matrices.append((tgt_type, pred, src_type, nvals, 'R'))
 
     return all_matrices
