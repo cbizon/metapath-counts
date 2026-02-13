@@ -14,6 +14,7 @@ from analyze_hop_overlap import (
     build_matrix_list,
     is_canonical_direction,
     should_process_path,
+    is_palindromic_path,
 )
 from prebuild_matrices import (
     load_node_types,
@@ -131,6 +132,204 @@ class TestShouldProcessPath:
             src_type='Gene',
             tgt_type='Gene'
         ) == True
+
+
+class TestIsPalindromicPath:
+    """Tests for is_palindromic_path function.
+
+    A palindromic path reads the same forward and backward, producing a
+    symmetric accumulated matrix. Uses same reversal logic as
+    canonicalize_metapath: reverse nodes, reverse predicates, flip F<->R.
+    """
+
+    @pytest.fixture
+    def symmetric_predicates(self):
+        """A small set of symmetric predicates for testing."""
+        return {'interacts_with', 'directly_physically_interacts_with',
+                'associated_with', 'correlated_with'}
+
+    def test_2hop_palindrome_affects_forward_reverse(self, symmetric_predicates):
+        """Gene|affects|F|Disease|affects|R|Gene is palindromic."""
+        assert is_palindromic_path(
+            ['Gene', 'Disease', 'Gene'],
+            ['affects', 'affects'],
+            ['F', 'R'],
+            symmetric_predicates
+        ) is True
+
+    def test_2hop_not_palindrome_different_predicates(self, symmetric_predicates):
+        """Gene|regulates|F|Gene|affects|F|Disease is not palindromic (different types + preds)."""
+        assert is_palindromic_path(
+            ['Gene', 'Gene', 'Disease'],
+            ['regulates', 'affects'],
+            ['F', 'F'],
+            symmetric_predicates
+        ) is False
+
+    def test_2hop_not_palindrome_same_type_different_predicates(self, symmetric_predicates):
+        """Gene|regulates|F|Gene|interacts_with|A|Gene — same endpoints but not palindromic."""
+        assert is_palindromic_path(
+            ['Gene', 'Gene', 'Gene'],
+            ['regulates', 'interacts_with'],
+            ['F', 'F'],
+            symmetric_predicates
+        ) is False
+
+    def test_2hop_palindrome_symmetric_predicate(self, symmetric_predicates):
+        """Gene|interacts_with|A|Protein|interacts_with|A|Gene — palindromic via symmetric pred."""
+        # Raw directions are F/R but both become 'A' since interacts_with is symmetric
+        assert is_palindromic_path(
+            ['Gene', 'Protein', 'Gene'],
+            ['interacts_with', 'interacts_with'],
+            ['F', 'R'],
+            symmetric_predicates
+        ) is True
+
+    def test_1hop_palindrome_symmetric_predicate(self, symmetric_predicates):
+        """Gene|interacts_with|A|Gene — 1-hop palindromic (symmetric, same types)."""
+        assert is_palindromic_path(
+            ['Gene', 'Gene'],
+            ['interacts_with'],
+            ['F'],
+            symmetric_predicates
+        ) is True
+
+    def test_1hop_not_palindrome_nonsymmetric(self, symmetric_predicates):
+        """Gene|regulates|F|Gene — not palindromic (F != R)."""
+        assert is_palindromic_path(
+            ['Gene', 'Gene'],
+            ['regulates'],
+            ['F'],
+            symmetric_predicates
+        ) is False
+
+    def test_1hop_different_types_not_palindromic(self, symmetric_predicates):
+        """Gene|affects|F|Disease — different endpoint types, never palindromic."""
+        assert is_palindromic_path(
+            ['Gene', 'Disease'],
+            ['affects'],
+            ['F'],
+            symmetric_predicates
+        ) is False
+
+    def test_3hop_palindrome(self, symmetric_predicates):
+        """3-hop palindrome: middle predicate must be symmetric (eff_dir == opposite(eff_dir))."""
+        # Gene|affects|F|Disease|associated_with|A|Disease|affects|R|Gene
+        # associated_with is symmetric, so the middle direction is 'A' which self-mirrors
+        assert is_palindromic_path(
+            ['Gene', 'Disease', 'Disease', 'Gene'],
+            ['affects', 'associated_with', 'affects'],
+            ['F', 'F', 'R'],
+            symmetric_predicates
+        ) is True
+
+    def test_3hop_not_palindrome(self, symmetric_predicates):
+        """3-hop with non-mirrored structure."""
+        assert is_palindromic_path(
+            ['Gene', 'Disease', 'Protein', 'Gene'],
+            ['affects', 'treats', 'affects'],
+            ['F', 'F', 'R'],
+            symmetric_predicates
+        ) is False
+
+    def test_3hop_palindrome_all_symmetric(self, symmetric_predicates):
+        """3-hop with all symmetric predicates and mirrored types."""
+        assert is_palindromic_path(
+            ['Gene', 'Protein', 'Protein', 'Gene'],
+            ['interacts_with', 'associated_with', 'interacts_with'],
+            ['F', 'F', 'R'],
+            symmetric_predicates
+        ) is True
+
+    def test_3hop_not_palindrome_asymmetric_middle(self, symmetric_predicates):
+        """3-hop: non-symmetric middle predicate prevents palindrome even with mirrored outers.
+
+        For odd-length paths, the middle predicate's effective direction must satisfy
+        eff_dir == opposite(eff_dir), which is only true for 'A' (symmetric predicates).
+        """
+        assert is_palindromic_path(
+            ['Gene', 'Disease', 'Disease', 'Gene'],
+            ['affects', 'regulates', 'affects'],
+            ['F', 'F', 'R'],
+            symmetric_predicates
+        ) is False
+
+
+class TestSameTypeDeduplication:
+    """Tests for the same-type endpoint deduplication logic in process_path.
+
+    When src_type == tgt_type, the accumulated matrix may contain:
+    - Self-pairs (diagonal): a node reaching itself — always meaningless
+    - Symmetric duplicates: for palindromic paths, (i,j) and (j,i) both exist
+
+    process_path applies:
+    - offdiag for non-palindromic same-type paths (removes diagonal only)
+    - triu(k=1) for palindromic same-type paths (removes diagonal + lower triangle)
+    """
+
+    def test_offdiag_removes_only_diagonal(self):
+        """Non-palindromic same-type: offdiag removes diagonal, keeps both triangles."""
+        import graphblas as gb
+
+        # Simulate accumulated matrix with diagonal and both triangles
+        # e.g., Gene|regulates|F|Gene|interacts_with|A|Gene (non-palindromic)
+        matrix = gb.Matrix.from_coo(
+            [0, 0, 1, 1, 2],
+            [0, 1, 0, 1, 1],
+            [True, True, True, True, True],
+            nrows=3, ncols=3, dtype=gb.dtypes.BOOL
+        )
+        assert matrix.nvals == 5  # (0,0) diag, (0,1) upper, (1,0) lower, (1,1) diag, (2,1) lower
+
+        work_matrix = matrix.select(gb.select.offdiag).new()
+
+        # Diagonal (0,0) and (1,1) removed; off-diagonal (0,1), (1,0), (2,1) preserved
+        assert work_matrix.nvals == 3
+        assert work_matrix[0, 1].new().value == True
+        assert work_matrix[1, 0].new().value == True
+        assert work_matrix[2, 1].new().value == True
+
+    def test_triu_removes_diagonal_and_lower_triangle(self):
+        """Palindromic same-type: triu(k=1) removes diagonal AND lower triangle."""
+        import graphblas as gb
+
+        # Same matrix as above
+        matrix = gb.Matrix.from_coo(
+            [0, 0, 1, 1, 2],
+            [0, 1, 0, 1, 1],
+            [True, True, True, True, True],
+            nrows=3, ncols=3, dtype=gb.dtypes.BOOL
+        )
+        assert matrix.nvals == 5
+
+        work_matrix = matrix.select(gb.select.triu, 1).new()
+
+        # Only strict upper triangle: (0,1) survives
+        # (0,0) diagonal removed, (1,0) lower removed, (1,1) diagonal removed, (2,1) lower removed
+        assert work_matrix.nvals == 1
+        assert work_matrix[0, 1].new().value == True
+
+    def test_offdiag_preserves_asymmetric_entries(self):
+        """Non-palindromic: lower-triangle-only entries are preserved (not lost like with triu)."""
+        import graphblas as gb
+
+        # Matrix where some entries exist only in lower triangle (asymmetric matrix)
+        # This is the key difference: offdiag keeps these, triu would discard them
+        matrix = gb.Matrix.from_coo(
+            [0, 1, 2, 2],
+            [0, 0, 0, 1],
+            [True, True, True, True],
+            nrows=3, ncols=3, dtype=gb.dtypes.BOOL
+        )
+        # (0,0) diagonal, (1,0) lower only, (2,0) lower only, (2,1) lower only
+
+        work_offdiag = matrix.select(gb.select.offdiag).new()
+        work_triu = matrix.select(gb.select.triu, 1).new()
+
+        # offdiag keeps all 3 lower-triangle entries
+        assert work_offdiag.nvals == 3
+        # triu discards them all — wrong for non-palindromic paths!
+        assert work_triu.nvals == 0
 
 
 class TestFormatMetapath:

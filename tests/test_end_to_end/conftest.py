@@ -215,6 +215,7 @@ def pipeline_2hop(golden_workspace):
         # Hierarchical pairs explicitly tested in test_pipeline_2hop.py
         ("BiologicalEntity", "BiologicalEntity"),
         ("ChemicalEntity", "Disease"),
+        ("GeneOrGeneProduct", "GeneOrGeneProduct"),
     ]
 
     grouped_dir = workspace / f"grouped_by_results_{n_hops}hop"

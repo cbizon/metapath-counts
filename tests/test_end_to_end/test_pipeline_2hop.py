@@ -272,30 +272,33 @@ class TestRawResult2HopOverlaps:
     def test_gene_affects_disease_affects_gene_overlap(self, pipeline_2hop):
         """Gene→Disease→Gene via affects should overlap with Gene→Gene regulates.
 
-        2-hop: Gene→Disease (affects), Disease→Gene (affects reverse)
-        Produces 4 pairs including (Gene_A, Gene_B).
-        Target: Gene→Gene regulates = {(Gene_A, Gene_B)}
-        Overlap = 1
+        2-hop: Gene|affects|F|Disease|affects|R|Gene (palindromic path)
+        Raw matrix has 4 pairs: (A,A), (A,B), (B,A), (B,B)
+        After triu(k=1) dedup: only (A,B) survives → predictor_count=1
+
+        Target: Gene|regulates|F|Gene = {(Gene_A, Gene_B)}
+        Overlap = 1 (the single remaining pair matches)
         """
         raw_results = pipeline_2hop["raw_results"]
 
-        # Look for 2-hop predictor ending in Gene|Gene with affects
-        # compared against regulates target
         matches = [
             r for r in raw_results
             if r['predictor_path'].count('affects') == 2  # 2 hops both using affects
             and 'regulates' in r['predicted_path']
         ]
 
-        assert len(matches) >= 1, (
-            "Expected Gene→Disease→Gene (affects×2) vs Gene→Gene (regulates)"
+        assert len(matches) == 1, (
+            "Expected exactly one Gene→Disease→Gene (affects×2) vs Gene→Gene (regulates)"
         )
 
-        for match in matches:
-            assert match['overlap'] == 1, (
-                f"Expected overlap=1 for {match['predictor_path']} vs {match['predicted_path']}, "
-                f"got {match['overlap']}"
-            )
+        match = matches[0]
+        assert match['predictor_count'] == 1, (
+            f"Expected predictor_count=1 after palindromic dedup (triu), "
+            f"got {match['predictor_count']}"
+        )
+        assert match['overlap'] == 1, (
+            f"Expected overlap=1, got {match['overlap']}"
+        )
 
     def test_gene_affects_disease_affects_protein_overlap(self, pipeline_2hop):
         """Gene→Disease→Protein via affects should overlap with Gene→Protein interacts_with.
@@ -326,6 +329,118 @@ class TestRawResult2HopOverlaps:
                 f"Expected overlap=1 for {match['predictor_path']} vs {match['predicted_path']}, "
                 f"got {match['overlap']}"
             )
+
+    def test_total_raw_result_count(self, pipeline_2hop):
+        """Verify exact number of raw result rows as regression guard.
+
+        The golden graph produces exactly 15 raw 2-hop result rows (with overlap > 0).
+        """
+        raw_results = pipeline_2hop["raw_results"]
+        assert len(raw_results) == 15, (
+            f"Expected 15 raw result rows, got {len(raw_results)}. "
+            f"Paths: {[r['predictor_path'] for r in raw_results]}"
+        )
+
+    def test_symmetric_first_hop_protein_interacts_gene_affects_disease(self, pipeline_2hop):
+        """Protein|interacts_with|A|Gene|affects|F|Disease: symmetric predicate as first hop.
+
+        interacts_with is symmetric, so the matrix has both directions:
+        Protein_M↔Gene_A, Protein_N↔Gene_B (plus Gene_B↔GeneProtein_Z, different types)
+        Then Gene→Disease (affects): Gene_A→{DP,DQ}, Gene_B→{DP,DQ}
+        Chain: Protein_M→{DP,DQ}, Protein_N→{DP,DQ} = 4 pairs
+        predictor_count=4
+
+        vs Protein|affects|F|Disease: Protein_M→Disease_P = 1 pair
+        Overlap: (Protein_M, Disease_P) in both → overlap=1
+        """
+        raw_results = pipeline_2hop["raw_results"]
+
+        matches = [
+            r for r in raw_results
+            if r['predictor_path'] == 'Protein|interacts_with|A|Gene|affects|F|Disease'
+            and r['predicted_path'] == 'Protein|affects|F|Disease'
+        ]
+
+        assert len(matches) == 1, (
+            f"Expected Protein|interacts_with|A|Gene|affects|F|Disease vs Protein|affects|F|Disease"
+        )
+        assert matches[0]['predictor_count'] == 4
+        assert matches[0]['predicted_count'] == 1
+        assert matches[0]['overlap'] == 1
+
+    def test_two_consecutive_symmetric_predicates(self, pipeline_2hop):
+        """Disease|associated_with|A|Protein|interacts_with|A|Gene: two symmetric hops.
+
+        Disease_Q→Protein_N (associated_with, symmetric) → Gene_B (interacts_with, symmetric)
+        Result: {(Disease_Q, Gene_B)} — 1 pair
+        predictor_count=1
+
+        vs Disease|affects|R|Gene: 4 pairs (reverse of Gene→Disease affects)
+        Overlap: (Disease_Q, Gene_B) — Gene_B→Disease_Q is in affects → overlap=1
+        """
+        raw_results = pipeline_2hop["raw_results"]
+
+        matches = [
+            r for r in raw_results
+            if r['predictor_path'] == 'Disease|associated_with|A|Protein|interacts_with|A|Gene'
+        ]
+
+        assert len(matches) == 1, (
+            f"Expected Disease|associated_with|A|Protein|interacts_with|A|Gene"
+        )
+        assert matches[0]['predictor_count'] == 1
+        assert matches[0]['predicted_count'] == 4
+        assert matches[0]['overlap'] == 1
+
+    def test_reverse_direction_regulates_gene_affects_disease(self, pipeline_2hop):
+        """Gene|regulates|R|Gene|affects|F|Disease: reverse-direction non-symmetric first hop.
+
+        Gene_A→Gene_B (regulates forward), so reverse: Gene_B→Gene_A
+        Then Gene_A→{Disease_P, Disease_Q} (affects)
+        Result: {(Gene_B, Disease_P), (Gene_B, Disease_Q)} — 2 pairs
+        predictor_count=2
+
+        vs Gene|affects|F|Disease: 4 pairs
+        Overlap: both (Gene_B, Disease_P) and (Gene_B, Disease_Q) are in affects → overlap=2
+        """
+        raw_results = pipeline_2hop["raw_results"]
+
+        matches = [
+            r for r in raw_results
+            if r['predictor_path'] == 'Gene|regulates|R|Gene|affects|F|Disease'
+        ]
+
+        assert len(matches) == 1, (
+            f"Expected Gene|regulates|R|Gene|affects|F|Disease"
+        )
+        assert matches[0]['predictor_count'] == 2
+        assert matches[0]['predicted_count'] == 4
+        assert matches[0]['overlap'] == 2
+
+    def test_pseudo_type_source_gene_protein_affects_disease_affects_gene(self, pipeline_2hop):
+        """Gene+Protein|affects|F|Disease|affects|R|Gene: pseudo-type as source.
+
+        GeneProtein_Z→Disease_Q (affects), Disease_Q→{Gene_A, Gene_B} (reverse affects)
+        Result: {(GeneProtein_Z, Gene_A), (GeneProtein_Z, Gene_B)} — 2 pairs
+        src=Gene+Protein ≠ tgt=Gene, so no same-type dedup applied
+        predictor_count=2
+
+        vs Gene+Protein|interacts_with|A|Gene: {(GeneProtein_Z, Gene_B)} — 1 pair
+        Overlap: (GeneProtein_Z, Gene_B) in both → overlap=1
+        """
+        raw_results = pipeline_2hop["raw_results"]
+
+        matches = [
+            r for r in raw_results
+            if r['predictor_path'] == 'Gene+Protein|affects|F|Disease|affects|R|Gene'
+        ]
+
+        assert len(matches) == 1, (
+            f"Expected Gene+Protein|affects|F|Disease|affects|R|Gene"
+        )
+        assert matches[0]['predictor_count'] == 2
+        assert matches[0]['predicted_count'] == 1
+        assert matches[0]['overlap'] == 1
 
 
 class TestGrouped2HopOverlapMetrics:
@@ -418,16 +533,14 @@ class TestGrouped2HopSpecificPaths:
         """BiologicalEntity|affects|F|BiologicalEntity|affects|F|BiologicalEntity predicts
         BiologicalEntity|related_to|A|BiologicalEntity.
 
-        Genes, Proteins, and Disease nodes are all BiologicalEntity. All explicit
-        affects edges (Gene→Disease, Protein→Disease, GeneProtein_Z→Disease,
-        SmallMolecule→Gene) roll up to BiologicalEntity|affects paths.
+        The aggregated predictor (predictor_count=2) comes from:
+        Gene|regulates|F|Gene|affects|F|Disease (count=2), rolling up via
+        the predicate hierarchy (regulates→affects) and type hierarchy
+        (Gene→BiologicalEntity, Disease→BiologicalEntity).
 
-        The 2-hop BiologicalEntity→BiologicalEntity→BiologicalEntity path (count=2)
-        comes from SmallMolecule_X/Y --affects--> Gene_A/B. Both SM_X and SM_Y
-        are SmallMolecule (not BiologicalEntity), so they DON'T contribute.
-        Only pure biological affects-affects chains contribute. The explicit
-        Gene|affects|F|Gene|affects|R|Gene has count=2
-        (Gene_A→Disease_P→Gene_A, Gene_A→Disease_Q→Gene_A = same endpoint, unique).
+        Note: Gene|affects|F|Disease|affects|R|Gene does NOT contribute here
+        because its directions are F,R — it rolls up to affects|F|...|affects|R,
+        not affects|F|...|affects|F.
 
         With 7 BiologicalEntity nodes (Gene_A, Gene_B, GeneProtein_Z, Protein_M,
         Protein_N, Disease_P, Disease_Q), total_possible = 7×7 = 49.
@@ -465,3 +578,41 @@ class TestGrouped2HopSpecificPaths:
             f"Expected recall={expected_recall:.6f} (2/15), got {row['recall']}"
         )
         assert row["mcc"] > 0, f"Expected mcc > 0, got {row['mcc']}"
+
+    def test_gene_product_affects_biological_affects_gene_product_predicts_interacts(self, pipeline_2hop):
+        """GeneOrGeneProduct|affects|F|BiologicalEntity|affects|R|GeneOrGeneProduct predicts
+        GeneOrGeneProduct|interacts_with|A|GeneOrGeneProduct.
+
+        The aggregated predictor sums three explicit 2-hop paths:
+        1. Gene|affects|F|Disease|affects|R|Gene (palindromic: count=1 after triu dedup)
+        2. Protein|affects|F|Disease|affects|R|Gene (count=2, different src/tgt types)
+        3. Gene+Protein|affects|F|Disease|affects|R|Gene (count=2, different src/tgt types)
+        Total predictor_count = 1 + 2 + 2 = 5
+
+        overlap=3: one overlapping pair from each explicit path
+        predicted_count=4: sum of 1-hop paths rolling up to interacts_with
+        """
+        grouped_results = pipeline_2hop["grouped_results"]
+
+        target_file = "GeneOrGeneProduct_interacts_with_A_GeneOrGeneProduct.tsv.zst"
+        assert target_file in grouped_results, (
+            f"Expected file {target_file} not found. Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_file]
+        predictor = "GeneOrGeneProduct|affects|F|BiologicalEntity|affects|R|GeneOrGeneProduct"
+
+        matches = [r for r in rows if r.get("predictor_metapath") == predictor]
+        assert len(matches) == 1, (
+            f"Expected exactly one row for {predictor}, got {len(matches)}"
+        )
+
+        row = matches[0]
+
+        # Check predictor count, predicted count, and overlap independently
+        assert row["predictor_count"] == 5, f"Expected predictor_count=5, got {row['predictor_count']}"
+        assert row["overlap"] == 3, f"Expected overlap=3, got {row['overlap']}"
+
+        predicted_path = "GeneOrGeneProduct|interacts_with|A|GeneOrGeneProduct"
+        predicted_count = pipeline_2hop["aggregated_nhop_counts"].get(predicted_path)
+        assert predicted_count == 4, f"Expected predicted_count=4, got {predicted_count}"
