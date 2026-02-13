@@ -20,7 +20,7 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
-from metapath_counts import get_symmetric_predicates
+from library import get_symmetric_predicates
 
 
 def build_matrix_list_from_manifest(matrices_dir: str):

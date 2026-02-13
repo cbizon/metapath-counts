@@ -9,25 +9,21 @@ This test verifies the orchestrator workflow:
 
 import json
 import os
-import sys
 import tempfile
 import shutil
 from pathlib import Path
 from datetime import datetime
 import pytest
 
-# Add scripts directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
-
-from orchestrate_hop_analysis import get_path_statistics
-from slurm_utils import (
+from pipeline.orchestrate_analysis import get_path_statistics
+from library.slurm import (
     load_manifest,
     save_manifest,
     update_job_status,
     increment_memory_tier,
     HOP_ANALYSIS_MEMORY_TIERS,
 )
-from path_tracker import (
+from library.path_tracker import (
     record_completed_path,
     record_failed_path,
 )

@@ -8,17 +8,12 @@ import pytest
 import tempfile
 import json
 from pathlib import Path
-import sys
-
-# Add scripts to path for importing
-sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
-
-from analyze_hop_overlap import (
+from pipeline.workers.run_overlap import (
     build_matrix_list,
     format_metapath,
     analyze_nhop_overlap,
 )
-from prebuild_matrices import (
+from pipeline.prebuild_matrices import (
     load_node_types,
     build_matrices,
 )

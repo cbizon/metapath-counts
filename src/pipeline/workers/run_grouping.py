@@ -18,13 +18,9 @@ from pathlib import Path
 
 import zstandard
 
-# Import hierarchy and aggregation functions
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-
-from metapath_counts.hierarchy import get_type_ancestors, get_predicate_ancestors
-from metapath_counts.type_assignment import is_pseudo_type, parse_pseudo_type
-from metapath_counts.aggregation import expand_metapath_to_variants, calculate_metrics
+from library.hierarchy import get_type_ancestors, get_predicate_ancestors
+from library.type_assignment import is_pseudo_type, parse_pseudo_type
+from library.aggregation import expand_metapath_to_variants, calculate_metrics
 
 
 def load_aggregated_nhop_counts(counts_path):

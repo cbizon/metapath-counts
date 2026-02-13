@@ -20,11 +20,11 @@ echo "  - Creates results_${N_HOPS}hop/aggregated_nhop_counts.json (N-hop counts
 echo "  - Creates results_${N_HOPS}hop/type_node_counts.json"
 echo "  - Creates results_${N_HOPS}hop/grouping_manifest.json"
 echo ""
-uv run python scripts/prepare_grouping.py --n-hops "$N_HOPS"
+uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS"
 
 echo ""
 echo "Step 2: Running distributed grouping..."
-uv run python scripts/orchestrate_grouping.py --n-hops "$N_HOPS" \
+uv run python src/pipeline/orchestrate_grouping.py --n-hops "$N_HOPS" \
     --min-count 10 \
     --min-precision 0.001
 

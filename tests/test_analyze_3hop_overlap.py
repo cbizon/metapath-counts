@@ -4,19 +4,15 @@ import pytest
 import tempfile
 import json
 from pathlib import Path
-import sys
 
-# Add scripts to path for importing
-sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
-
-from analyze_hop_overlap import (
+from pipeline.workers.run_overlap import (
     format_metapath,
     build_matrix_list,
     is_canonical_direction,
     should_process_path,
     is_palindromic_path,
 )
-from prebuild_matrices import (
+from pipeline.prebuild_matrices import (
     load_node_types,
     build_matrices,
 )
@@ -691,7 +687,7 @@ class TestAggregateExplicitResults:
 
     def test_aggregate_single_result(self):
         """Test aggregating a single explicit result expands to variants."""
-        from analyze_hop_overlap import aggregate_explicit_results
+        from pipeline.workers.run_overlap import aggregate_explicit_results
 
         # Create a temporary explicit results file
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -729,7 +725,7 @@ class TestAggregateExplicitResults:
 
     def test_aggregate_preserves_counts(self):
         """Test that aggregation preserves counts correctly."""
-        from analyze_hop_overlap import aggregate_explicit_results
+        from pipeline.workers.run_overlap import aggregate_explicit_results
 
         with tempfile.TemporaryDirectory() as tmpdir:
             explicit_file = Path(tmpdir) / "explicit.tsv"
@@ -761,7 +757,7 @@ class TestAggregateExplicitResults:
 
     def test_aggregate_multiple_results_sum_correctly(self):
         """Test that multiple explicit results sum correctly when aggregated."""
-        from analyze_hop_overlap import aggregate_explicit_results
+        from pipeline.workers.run_overlap import aggregate_explicit_results
 
         with tempfile.TemporaryDirectory() as tmpdir:
             explicit_file = Path(tmpdir) / "explicit.tsv"
@@ -805,7 +801,7 @@ class TestDetermineNeededMatrices:
 
     def test_determine_needed_for_single_matrix1(self):
         """Test determining needed matrices for a single starting matrix."""
-        from analyze_hop_overlap import determine_needed_matrices
+        from pipeline.workers.run_overlap import determine_needed_matrices
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_path = Path(tmpdir) / "manifest.json"
@@ -839,7 +835,7 @@ class TestDetermineNeededMatrices:
 
     def test_determine_needed_excludes_unrelated(self):
         """Test that unrelated matrices are excluded."""
-        from analyze_hop_overlap import determine_needed_matrices
+        from pipeline.workers.run_overlap import determine_needed_matrices
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_path = Path(tmpdir) / "manifest.json"
@@ -865,7 +861,7 @@ class TestDetermineNeededMatrices:
 
     def test_determine_needed_for_1hop(self):
         """Test determining needed matrices for 1-hop analysis."""
-        from analyze_hop_overlap import determine_needed_matrices
+        from pipeline.workers.run_overlap import determine_needed_matrices
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manifest_path = Path(tmpdir) / "manifest.json"
@@ -896,7 +892,7 @@ class TestLoadPrebuiltMatrices:
 
     def test_load_with_filtering(self):
         """Test loading only needed matrices."""
-        from analyze_hop_overlap import load_prebuilt_matrices
+        from pipeline.workers.run_overlap import load_prebuilt_matrices
         import numpy as np
         import graphblas as gb
 
@@ -939,7 +935,7 @@ class TestLoadPrebuiltMatrices:
 
     def test_load_all_matrices(self):
         """Test loading all matrices when no filter specified."""
-        from analyze_hop_overlap import load_prebuilt_matrices
+        from pipeline.workers.run_overlap import load_prebuilt_matrices
         import numpy as np
 
         with tempfile.TemporaryDirectory() as tmpdir:

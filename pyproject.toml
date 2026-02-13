@@ -26,7 +26,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/metapath_counts"]
+packages = ["src/library"]
 
 [dependency-groups]
 dev = [

@@ -13,7 +13,7 @@ echo "  Nodes: $NODES"
 echo "  Output: $OUTPUT_DIR"
 echo ""
 
-uv run python scripts/prebuild_matrices.py \
+uv run python src/pipeline/prebuild_matrices.py \
     --edges "$EDGES" \
     --nodes "$NODES" \
     --output "$OUTPUT_DIR"

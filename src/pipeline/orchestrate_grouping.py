@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from slurm_utils import (
+from library.slurm import (
     load_manifest,
     save_manifest,
     update_job_status,
@@ -26,7 +26,7 @@ from slurm_utils import (
 )
 
 # Configuration
-WORKER_SCRIPT = "scripts/group_single_onehop.sh"
+WORKER_SCRIPT = "src/pipeline/workers/run_grouping.sh"
 POLL_INTERVAL = 30  # seconds
 MAX_CONCURRENT_JOBS = 100  # Max pending jobs in queue
 

@@ -10,7 +10,7 @@ Tests cover:
 """
 
 import pytest
-from metapath_counts.type_assignment import (
+from library.type_assignment import (
     assign_node_type,
     find_leaf_types,
     format_pseudo_type,

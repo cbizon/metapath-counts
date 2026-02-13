@@ -26,7 +26,7 @@ from pathlib import Path
 from collections import defaultdict
 import numpy as np
 import graphblas as gb
-from metapath_counts import assign_node_type, get_symmetric_predicates, is_pseudo_type
+from library import assign_node_type, get_symmetric_predicates, is_pseudo_type
 
 
 def load_node_types(nodes_file: str, config: dict = None) -> dict:

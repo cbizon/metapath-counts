@@ -4,28 +4,20 @@ These fixtures run the full pipeline on the golden test graph.
 """
 
 import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
 import zstandard
 
-# Add scripts to path for importing
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'scripts'))
-
-# Add this test directory to path for importing golden_graph
-sys.path.insert(0, str(Path(__file__).parent))
-
-from golden_graph import write_golden_graph, GRAPH_STATS
-from analyze_hop_overlap import analyze_nhop_overlap
-from prebuild_matrices import load_node_types, build_matrices
-from prepare_grouping import (
+from .golden_graph import write_golden_graph, GRAPH_STATS
+from pipeline.workers.run_overlap import analyze_nhop_overlap
+from pipeline.prebuild_matrices import load_node_types, build_matrices
+from pipeline.prepare_grouping import (
     precompute_aggregated_nhop_counts,
     precompute_type_node_counts,
     extract_type_pairs_from_aggregated_paths,
 )
-from group_single_onehop_worker import (
+from pipeline.workers.run_grouping import (
     group_type_pair,
     load_aggregated_nhop_counts,
     load_type_node_counts,

@@ -15,19 +15,14 @@ import pytest
 import json
 import tempfile
 import os
-import sys
 from pathlib import Path
 from collections import defaultdict
 
 import zstandard
 
-# Add scripts directory to path for imports
-scripts_dir = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(scripts_dir))
+from library import expand_metapath_to_variants, calculate_metrics
 
-from metapath_counts import expand_metapath_to_variants, calculate_metrics
-
-from group_single_onehop_worker import (
+from pipeline.workers.run_grouping import (
     load_aggregated_nhop_counts,
     group_type_pair
 )
@@ -141,8 +136,8 @@ class TestPrecomputedCountsLogic:
 
         try:
             # Reset cache
-            import group_single_onehop_worker
-            group_single_onehop_worker._aggregated_nhop_counts_cache = None
+            import pipeline.workers.run_grouping as run_grouping
+            run_grouping._aggregated_nhop_counts_cache = None
 
             counts = load_aggregated_nhop_counts(temp_path)
 
@@ -151,7 +146,7 @@ class TestPrecomputedCountsLogic:
         finally:
             os.unlink(temp_path)
             # Reset cache again
-            group_single_onehop_worker._aggregated_nhop_counts_cache = None
+            run_grouping._aggregated_nhop_counts_cache = None
 
 
 class TestCountIndependence:
@@ -397,9 +392,7 @@ class TestPrepareGroupingIntegration:
     def test_precompute_reads_result_files(self):
         """precompute_aggregated_nhop_counts should read result files and expand to hierarchical paths."""
         import tempfile
-        scripts_dir = Path(__file__).parent.parent / "scripts"
-        sys.path.insert(0, str(scripts_dir))
-        from prepare_grouping import precompute_aggregated_nhop_counts
+        from pipeline.prepare_grouping import precompute_aggregated_nhop_counts
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create result files with explicit paths
@@ -425,9 +418,7 @@ class TestPrepareGroupingIntegration:
     def test_type_pairs_created_from_aggregated_counts(self):
         """Type pairs should be extracted from aggregated counts produced from result files."""
         import tempfile
-        scripts_dir = Path(__file__).parent.parent / "scripts"
-        sys.path.insert(0, str(scripts_dir))
-        from prepare_grouping import precompute_aggregated_nhop_counts, extract_type_pairs_from_aggregated_paths
+        from pipeline.prepare_grouping import precompute_aggregated_nhop_counts, extract_type_pairs_from_aggregated_paths
 
         with tempfile.TemporaryDirectory() as tmpdir:
             result_file = os.path.join(tmpdir, "results_matrix1_000.tsv")
@@ -507,9 +498,7 @@ class TestHierarchicalTypePairExtraction:
         (Disease, SmallMolecule).
         """
         import sys
-        scripts_dir = Path(__file__).parent.parent / "scripts"
-        sys.path.insert(0, str(scripts_dir))
-        from prepare_grouping import extract_type_pairs_from_aggregated_paths
+        from pipeline.prepare_grouping import extract_type_pairs_from_aggregated_paths
 
         # Simulate aggregated_counts that include pseudo-type paths
         aggregated_counts = {
@@ -545,7 +534,7 @@ class TestCheckTypeMatchHierarchical:
 
     def test_explicit_path_matches_hierarchical_type_pair(self):
         """SmallMolecule|treats|F|Disease should match (ChemicalEntity, DiseaseOrPhenotypicFeature)."""
-        from group_single_onehop_worker import check_type_match
+        from pipeline.workers.run_grouping import check_type_match
 
         explicit_path = "SmallMolecule|treats|F|Disease"
 
@@ -563,7 +552,7 @@ class TestCheckTypeMatchHierarchical:
 
     def test_explicit_path_does_not_match_unrelated_types(self):
         """SmallMolecule|treats|F|Disease should NOT match (Gene, Protein)."""
-        from group_single_onehop_worker import check_type_match
+        from pipeline.workers.run_grouping import check_type_match
 
         explicit_path = "SmallMolecule|treats|F|Disease"
 
@@ -574,7 +563,7 @@ class TestCheckTypeMatchHierarchical:
 
     def test_pseudo_type_path_matches_constituent_type_pairs(self):
         """Gene+Protein|affects|F|Disease should match (Gene, Disease) and (Protein, Disease)."""
-        from group_single_onehop_worker import check_type_match
+        from pipeline.workers.run_grouping import check_type_match
 
         pseudo_path = "Gene+Protein|affects|F|Disease"
 
