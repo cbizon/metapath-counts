@@ -26,7 +26,8 @@ echo ""
 echo "Step 2: Running distributed grouping..."
 uv run python src/pipeline/orchestrate_grouping.py --n-hops "$N_HOPS" \
     --min-count 10 \
-    --min-precision 0.001
+    --min-precision 0.001 \
+    --partition lowpri
 
 echo ""
 echo "Done! Results in: grouped_by_results_${N_HOPS}hop/"

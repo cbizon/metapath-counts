@@ -5,13 +5,13 @@
 set -e  # Exit on error
 set -o pipefail  # Catch errors in pipes
 
-NODES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Jan_20_filtered_nonredundant/nodes.jsonl"
-EDGES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Jan_20_filtered_nonredundant/edges.jsonl"
+NODES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Feb_13_filtered_nonredundant/nodes.jsonl"
+EDGES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Feb_13_filtered_nonredundant/edges.jsonl"
 MATRICES_DIR="matrices"
 
 # List of N-hop values to analyze
 #NHOP_VALUES=(1 2 3)
-NHOP_VALUES=(2)
+NHOP_VALUES=(3)
 
 echo "=========================================="
 echo "N-HOP METAPATH ANALYSIS PIPELINE"
@@ -64,7 +64,8 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo "You can Ctrl+C and restart later - it will resume from the manifest."
     echo ""
     uv run python src/pipeline/orchestrate_analysis.py \
-        --n-hops "$N_HOPS"
+        --n-hops "$N_HOPS" \
+        --partition lowpri
 
     # Step 3: Prepare distributed grouping (create type pair jobs + precompute counts)
     echo ""
@@ -89,7 +90,8 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
     echo ""
     uv run python src/pipeline/orchestrate_grouping.py --n-hops "$N_HOPS" \
         --min-count 10 \
-        --min-precision 0.001
+        --min-precision 0.001 \
+        --partition lowpri
 
     echo ""
     echo "✓ ${N_HOPS}-hop analysis complete!"
