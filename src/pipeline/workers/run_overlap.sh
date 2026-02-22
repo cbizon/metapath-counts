@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH --partition=lowpri
 #SBATCH --time=24:00:00
 
 # Arguments from command line (passed from orchestrate script)

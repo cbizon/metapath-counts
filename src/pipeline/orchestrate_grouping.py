@@ -101,7 +101,9 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
 def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
                         min_count=0, min_precision=0.0,
                         exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent",
-                        exclude_predicates="related_to_at_instance_level,related_to_at_concept_level"):
+                        exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
+                        partition='lowpri',
+                        output_dir=None):
     """Submit a SLURM job for one type pair.
 
     Args:
@@ -115,6 +117,7 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         min_precision: Minimum precision filter
         exclude_types: Comma-separated types to exclude
         exclude_predicates: Comma-separated predicates to exclude
+        partition: SLURM partition to submit to (default: lowpri)
 
     Returns:
         Job ID string or None if submission failed
@@ -131,6 +134,7 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
 
     cmd = [
         "sbatch",
+        f"--partition={partition}",
         f"--mem={memory_gb}G",
         f"--job-name={job_name}",
         f"--output={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.out",
@@ -145,6 +149,8 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         exclude_types,
         exclude_predicates
     ]
+    if output_dir:
+        cmd.append(output_dir)
 
     return submit_slurm_job(cmd, job_name=job_name)
 
@@ -163,7 +169,9 @@ def print_status_summary(manifest, running_jobs):
 
 def orchestrate(n_hops, min_count=10, min_precision=0.001,
                 exclude_types="Entity,ThingWithTaxon",
-                exclude_predicates="related_to_at_instance_level,related_to_at_concept_level"):
+                exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
+                partition='lowpri',
+                output_dir=None):
     """Main orchestration loop."""
     manifest_path = get_grouping_manifest_path(n_hops)
 
@@ -173,9 +181,12 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
     print(f"Worker script: {WORKER_SCRIPT}")
     print(f"Poll interval: {POLL_INTERVAL}s")
     print(f"Max concurrent: {MAX_CONCURRENT_JOBS}")
+    print(f"Partition: {partition}")
     print(f"Filters: min_count={min_count}, min_precision={min_precision}")
     print(f"Excluded types: {exclude_types}")
     print(f"Excluded predicates: {exclude_predicates}")
+    if output_dir:
+        print(f"Output dir: {output_dir}")
     print()
 
     # Load manifests
@@ -308,7 +319,8 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
                 job_id = submit_grouping_job(
                     type1, type2, file_list, memory_tier, n_hops, job_index,
                     min_count=min_count, min_precision=min_precision,
-                    exclude_types=exclude_types, exclude_predicates=exclude_predicates
+                    exclude_types=exclude_types, exclude_predicates=exclude_predicates,
+                    partition=partition, output_dir=output_dir
                 )
 
                 if job_id:
@@ -345,8 +357,8 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
                 for job_key, data in get_jobs_by_status(manifest, "failed"):
                     print(f"  - {job_key}: {data.get('error_type', 'UNKNOWN')}")
 
-            output_dir = f"grouped_by_results_{n_hops}hop"
-            print(f"\nGrouped results in: {output_dir}/")
+            final_output_dir = output_dir or f"grouped_by_results_{n_hops}hop"
+            print(f"\nGrouped results in: {final_output_dir}/")
             break
 
         # Sleep before next iteration
@@ -387,6 +399,18 @@ def main():
         default='related_to_at_instance_level,related_to_at_concept_level',
         help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)'
     )
+    parser.add_argument(
+        '--partition',
+        type=str,
+        default='lowpri',
+        help='SLURM partition to submit to (default: lowpri)'
+    )
+    parser.add_argument(
+        '--output-dir',
+        type=str,
+        default=None,
+        help='Output directory for grouped results (default: grouped_by_results_{n}hop)'
+    )
 
     args = parser.parse_args()
 
@@ -396,7 +420,9 @@ def main():
             min_count=args.min_count,
             min_precision=args.min_precision,
             exclude_types=args.exclude_types,
-            exclude_predicates=args.exclude_predicates
+            exclude_predicates=args.exclude_predicates,
+            partition=args.partition,
+            output_dir=args.output_dir
         )
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")

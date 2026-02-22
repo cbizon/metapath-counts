@@ -67,7 +67,7 @@ def get_manifest_path(n_hops):
     return f"results_{n_hops}hop/manifest.json"
 
 
-def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, direction, tgt_type):
+def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, direction, tgt_type, partition='lowpri'):
     """Submit a single matrix1 job to SLURM with specified memory.
 
     Args:
@@ -79,11 +79,13 @@ def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, d
         pred: Predicate for matrix1
         direction: Direction for matrix1 (F, R, or A)
         tgt_type: Target node type for matrix1
+        partition: SLURM partition to submit to (default: lowpri)
 
     Returns: job_id (str) or None on failure
     """
-    # Use largemem partition for jobs >1000GB (i.e., 1500GB tier)
-    partition = 'largemem' if memory_gb > 1000 else 'lowpri'
+    # Use largemem partition for jobs >1000GB (i.e., 1500GB tier) if still on lowpri
+    if memory_gb > 1000 and partition == 'lowpri':
+        partition = 'largemem'
 
     logs_dir = f"logs_{n_hops}hop"
     job_name = f"{n_hops}hop_m1_{matrix1_index:03d}"
@@ -108,7 +110,7 @@ def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, d
     return submit_slurm_job(cmd, job_name=job_name)
 
 
-def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
+def get_path_statistics(matrix1_index, n_hops, current_memory_gb, results_dir=None):
     """Get path completion statistics for a Matrix1 job.
 
     Returns dict with:
@@ -117,7 +119,7 @@ def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
         - failed_at_lower_tiers: Number of paths that failed at lower memory tiers
         - total_failed: Total failed paths across all tiers
     """
-    results_dir = f"results_{n_hops}hop"
+    results_dir = results_dir or f"results_{n_hops}hop"
 
     # Get stats from path_tracker
     stats = get_path_stats_from_tracker(results_dir, matrix1_index)
@@ -176,11 +178,12 @@ def print_status_summary(manifest, running_jobs):
     print(f"{'=' * 80}\n")
 
 
-def orchestrate(n_hops=3):
+def orchestrate(n_hops=3, partition='lowpri'):
     """Main orchestration loop.
 
     Args:
         n_hops: Number of hops to analyze (default: 3)
+        partition: SLURM partition to submit to (default: lowpri)
     """
     manifest_path = get_manifest_path(n_hops)
 
@@ -194,6 +197,7 @@ def orchestrate(n_hops=3):
     print(f"Poll interval: {POLL_INTERVAL}s")
     print(f"Max concurrent jobs: {max_concurrent}")
     print(f"N-hops: {n_hops}")
+    print(f"Partition: {partition}")
     print()
 
     # Load manifest
@@ -421,7 +425,8 @@ def orchestrate(n_hops=3):
                 print(f"Submitting {matrix1_id} with {memory_tier}GB memory (attempt {data['attempts'] + 1})...")
                 job_id = submit_job(
                     matrix1_index, memory_tier, matrices_dir, n_hops,
-                    data['src_type'], data['pred'], data['direction'], data['tgt_type']
+                    data['src_type'], data['pred'], data['direction'], data['tgt_type'],
+                    partition=partition
                 )
 
                 if job_id:
@@ -500,10 +505,16 @@ if __name__ == "__main__":
         default=3,
         help="Number of hops to analyze (default: 3)"
     )
+    parser.add_argument(
+        "--partition",
+        type=str,
+        default="lowpri",
+        help="SLURM partition to submit to (default: lowpri)"
+    )
     args = parser.parse_args()
 
     try:
-        orchestrate(n_hops=args.n_hops)
+        orchestrate(n_hops=args.n_hops, partition=args.partition)
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")
         sys.exit(0)

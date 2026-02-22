@@ -20,11 +20,14 @@ uv run python scripts/prepare_analysis.py \
 uv run python scripts/orchestrate_hop_analysis.py \
   --n-hops 3
 
-# 3. Prepare distributed grouping (creates type pair manifest)
-uv run python scripts/prepare_grouping.py --n-hops 3
+# 3. Precompute aggregated N-hop counts (SLURM)
+uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops 3
 
-# 4. Run distributed grouping with filters
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+# 4. Prepare distributed grouping (creates type pair manifest)
+uv run python src/pipeline/prepare_grouping.py --n-hops 3 --skip-aggregated-precompute
+
+# 5. Run distributed grouping with filters
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
     --min-count 10 --min-precision 0.001
 ```
 
@@ -130,28 +133,36 @@ uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 - Jobs will continue running in SLURM
 - Restart orchestrator anytime - it resumes from manifest
 
-### Step 3: Prepare Grouping
+### Step 3: Precompute Aggregated Counts (SLURM)
 
-After all analysis jobs complete, prepare distributed grouping:
+After all analysis jobs complete, precompute aggregated N-hop counts on SLURM:
 
 ```bash
-uv run python scripts/prepare_grouping.py --n-hops 3
+uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops 3
+```
+
+This submits Pass A/B map-reduce jobs and writes:
+- `results_3hop/aggregated_nhop_counts.json`
+
+### Step 4: Prepare Grouping
+
+Prepare distributed grouping (loads the SLURM-precomputed counts):
+
+```bash
+uv run python src/pipeline/prepare_grouping.py --n-hops 3 --skip-aggregated-precompute
 ```
 
 **Output:**
 - Creates `results_3hop/grouping_manifest.json` with type pair jobs
-- Precomputes aggregated path counts for global lookups
+- Loads `results_3hop/aggregated_nhop_counts.json` for global lookups
 - Precomputes type node counts for total_possible calculations
 
-**Time:** ~5-10 minutes
-
-### Step 4: Run Distributed Grouping
+### Step 5: Run Distributed Grouping
 
 Run distributed grouping with filters:
 
 ```bash
-uv run python scripts/prepare_grouping.py --n-hops 3
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
     --min-count 10 --min-precision 0.001
 ```
 
@@ -176,11 +187,11 @@ uv run python scripts/orchestrate_grouping.py --n-hops 3 \
 **Options:**
 ```bash
 # Run with different filter thresholds
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
     --min-count 100 --min-precision 0.01
 
 # Disable type/predicate exclusions
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
     --exclude-types "" --exclude-predicates ""
 ```
 
@@ -232,8 +243,9 @@ uv run python scripts/orchestrate_hop_analysis.py --n-hops 3
 ### Step 4: Group Results
 
 ```bash
-uv run python scripts/prepare_grouping.py --n-hops 3
-uv run python scripts/orchestrate_grouping.py --n-hops 3 \
+uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops 3
+uv run python src/pipeline/prepare_grouping.py --n-hops 3 --skip-aggregated-precompute
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
     --min-count 10 --min-precision 0.001
 ```
 
@@ -413,21 +425,19 @@ metapath-counts/
 ├── docs/
 │   └── README.md                    # This file
 │
-├── scripts/
+├── src/pipeline/
 │   ├── prepare_analysis.py          # Step 1: Initialize analysis
-│   ├── orchestrate_hop_analysis.py  # Step 2: Run analysis jobs
-│   ├── prepare_grouping.py          # Step 3: Initialize grouping
-│   ├── orchestrate_grouping.py      # Step 4: Run grouping jobs
-│   ├── run_single_matrix1.sh        # SLURM worker (analysis)
-│   ├── group_single_onehop.sh       # SLURM worker (grouping)
-│   ├── group_single_onehop_worker.py
-│   └── analyze_hop_overlap.py       # Core analysis engine
+│   ├── orchestrate_analysis.py      # Step 2: Run analysis jobs
+│   ├── precompute_aggregated_counts_slurm.py  # Step 3: SLURM precompute
+│   ├── prepare_grouping.py          # Step 4: Initialize grouping
+│   ├── orchestrate_grouping.py      # Step 5: Run grouping jobs
+│   └── workers/                     # SLURM worker scripts
 │
 ├── results_3hop/                    # Analysis results
 │   ├── manifest.json                # Job tracking (live updates)
 │   ├── results_matrix1_000.tsv      # Per-job results
 │   ├── ...
-│   ├── aggregated_path_counts.json  # Precomputed counts (from prepare_grouping)
+│   ├── aggregated_nhop_counts.json  # Precomputed counts (from SLURM precompute)
 │   └── type_node_counts.json        # Node counts per type
 │
 ├── logs_3hop/                       # SLURM logs (analysis)
@@ -635,7 +645,7 @@ A: Restart orchestrator after maintenance. It detects incomplete jobs and resubm
 A: Yes. Update manifest status to "pending" and restart orchestrator, or use manual submission.
 
 **Q: How do I rerun everything from scratch?**
-A: See the "Complete Rerun from Scratch" section above for detailed instructions. Short version: clean results/logs/grouped directories, run prepare_analysis.py, orchestrate_hop_analysis.py, prepare_grouping.py, and orchestrate_grouping.py.
+A: See the "Complete Rerun from Scratch" section above for detailed instructions. Short version: clean results/logs/grouped directories, run prepare_analysis.py, orchestrate_analysis.py, precompute_aggregated_counts_slurm.py, prepare_grouping.py (with `--skip-aggregated-precompute`), and orchestrate_grouping.py.
 
 **Q: Why max 1 pending job?**
 A: To be a good cluster citizen and avoid filling the queue. Running jobs have no limit.

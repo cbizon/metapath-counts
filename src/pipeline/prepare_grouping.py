@@ -280,6 +280,17 @@ def main():
         default='matrices',
         help='Matrices directory (default: matrices)'
     )
+    parser.add_argument(
+        '--aggregated-counts-path',
+        type=str,
+        default=None,
+        help='Path to precomputed aggregated_nhop_counts.json (skip precompute)'
+    )
+    parser.add_argument(
+        '--skip-aggregated-precompute',
+        action='store_true',
+        help='Use existing aggregated_nhop_counts.json in results dir'
+    )
 
     args = parser.parse_args()
 
@@ -311,7 +322,16 @@ def main():
     # Precompute aggregated path counts from result files
     # (used for both predictor and target count lookups during grouping)
     aggregated_nhop_counts_path = os.path.join(results_dir, "aggregated_nhop_counts.json")
-    aggregated_counts = precompute_aggregated_nhop_counts(results_dir, aggregated_nhop_counts_path, args.n_hops)
+    if args.aggregated_counts_path or args.skip_aggregated_precompute:
+        counts_path = args.aggregated_counts_path or aggregated_nhop_counts_path
+        if not os.path.exists(counts_path):
+            raise FileNotFoundError(f"Aggregated counts file not found: {counts_path}")
+        with open(counts_path, 'r') as f:
+            data = json.load(f)
+        aggregated_counts = data.get("counts", data)
+        print(f"  ✓ Loaded aggregated counts from {counts_path} ({len(aggregated_counts)} paths)")
+    else:
+        aggregated_counts = precompute_aggregated_nhop_counts(results_dir, aggregated_nhop_counts_path, args.n_hops)
 
     # Extract type pairs from aggregated paths (includes all hierarchical types)
     type_pairs = extract_type_pairs_from_aggregated_paths(aggregated_counts)

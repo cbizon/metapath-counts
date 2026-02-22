@@ -39,20 +39,23 @@ uv pip install -e .
 
 ```bash
 # 1. Initialize analysis (creates manifest)
-uv run python scripts/prepare_analysis.py \
-  --edges /path/to/edges.jsonl \
-  --nodes /path/to/nodes.jsonl
+uv run python src/pipeline/prepare_analysis.py \
+  --matrices-dir matrices \
+  --n-hops 3
 
 # 2. Run orchestrator (submits SLURM jobs)
-uv run python scripts/orchestrate_3hop_analysis.py \
-  --edges /path/to/edges.jsonl \
-  --nodes /path/to/nodes.jsonl
+uv run python src/pipeline/orchestrate_analysis.py \
+  --n-hops 3
 
-# 3. Merge results
-uv run python scripts/merge_results.py
+# 3. Precompute aggregated N-hop counts on SLURM
+uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops 3
 
-# 4. Group by 1-hop metapath
-uv run python scripts/group_by_onehop.py
+# 4. Prepare grouping (loads precomputed counts)
+uv run python src/pipeline/prepare_grouping.py --n-hops 3 --skip-aggregated-precompute
+
+# 5. Run distributed grouping
+uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
+  --min-count 10 --min-precision 0.001
 ```
 
 See [docs/README.md](docs/README.md) for detailed workflow documentation.
@@ -71,12 +74,15 @@ Example ROBOKOP graph: `/projects/stars/Data_services/biolink3/graphs/Baseline_N
 - `F` = forward, `R` = reverse, `A` = any (symmetric)
 - Example: `Disease|treats|R|SmallMolecule|affects|F|Gene`
 
-**Merged results** (`results/all_3hop_overlaps.tsv`):
+**Analysis results** (`results_3hop/results_matrix1_*.tsv`):
 ```
 predictor_metapath | predictor_count | predicted_metapath | predicted_count | overlap | total_possible
 ```
 
-**Grouped results** (`grouped_by_1hop/*.tsv`):
+**Precomputed counts** (`results_3hop/aggregated_nhop_counts.json`):
+- Global aggregated counts used during grouping.
+
+**Grouped results** (`grouped_by_results_3hop/*.tsv`):
 - One file per 1-hop metapath
 - Includes metrics: Precision, Recall, F1, MCC, TPR, FPR, etc.
 

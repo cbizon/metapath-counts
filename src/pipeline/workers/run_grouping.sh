@@ -14,6 +14,7 @@
 #   $6: min_precision - Minimum precision (default: 0)
 #   $7: exclude_types - Comma-separated types to exclude (default: Entity,ThingWithTaxon)
 #   $8: exclude_predicates - Comma-separated predicates to exclude
+#   $9: output_dir - Output directory for grouped results (optional)
 #
 # This script:
 # 1. Receives type pair and file list from orchestrator (no manifest access!)
@@ -33,6 +34,7 @@ MIN_COUNT="${5:-0}"
 MIN_PRECISION="${6:-0}"
 EXCLUDE_TYPES="${7:-Entity,ThingWithTaxon}"
 EXCLUDE_PREDICATES="${8:-related_to_at_instance_level,related_to_at_concept_level}"
+OUTPUT_DIR_ARG="${9:-}"
 
 if [ -z "$TYPE1" ] || [ -z "$TYPE2" ] || [ -z "$FILE_LIST_PATH" ] || [ -z "$N_HOPS" ]; then
     echo "ERROR: Missing required arguments"
@@ -40,9 +42,8 @@ if [ -z "$TYPE1" ] || [ -z "$TYPE2" ] || [ -z "$FILE_LIST_PATH" ] || [ -z "$N_HO
     exit 1
 fi
 
-OUTPUT_DIR="grouped_by_results_${N_HOPS}hop"
+OUTPUT_DIR="${OUTPUT_DIR_ARG:-grouped_by_results_${N_HOPS}hop}"
 RESULTS_DIR="results_${N_HOPS}hop"
-AGGREGATED_COUNTS="${RESULTS_DIR}/aggregated_path_counts.json"
 AGGREGATED_NHOP_COUNTS="${RESULTS_DIR}/aggregated_nhop_counts.json"
 TYPE_NODE_COUNTS="${RESULTS_DIR}/type_node_counts.json"
 
@@ -53,7 +54,6 @@ echo "Type pair: ($TYPE1, $TYPE2)"
 echo "File list: $FILE_LIST_PATH"
 echo "N-hops: $N_HOPS"
 echo "Output dir: $OUTPUT_DIR"
-echo "Aggregated 1-hop counts: $AGGREGATED_COUNTS"
 echo "Aggregated N-hop counts: $AGGREGATED_NHOP_COUNTS"
 echo "Type node counts: $TYPE_NODE_COUNTS"
 echo "Min count: $MIN_COUNT"
@@ -65,13 +65,6 @@ echo ""
 # Check if file list exists
 if [ ! -f "$FILE_LIST_PATH" ]; then
     echo "ERROR: File list not found: $FILE_LIST_PATH"
-    exit 1
-fi
-
-# Check if aggregated counts file exists
-if [ ! -f "$AGGREGATED_COUNTS" ]; then
-    echo "ERROR: Aggregated 1-hop counts file not found: $AGGREGATED_COUNTS"
-    echo "Run prepare_grouping.py first to generate this file."
     exit 1
 fi
 
@@ -104,7 +97,6 @@ uv run python src/pipeline/workers/run_grouping.py \
     --file-list "$FILE_LIST_PATH" \
     --output-dir "$OUTPUT_DIR" \
     --n-hops "$N_HOPS" \
-    --aggregated-counts "$AGGREGATED_COUNTS" \
     --aggregated-nhop-counts "$AGGREGATED_NHOP_COUNTS" \
     --type-node-counts "$TYPE_NODE_COUNTS" \
     --min-count "$MIN_COUNT" \
