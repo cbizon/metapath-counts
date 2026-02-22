@@ -110,7 +110,7 @@ def submit_job(matrix1_index, memory_gb, matrices_dir, n_hops, src_type, pred, d
     return submit_slurm_job(cmd, job_name=job_name)
 
 
-def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
+def get_path_statistics(matrix1_index, n_hops, current_memory_gb, results_dir=None):
     """Get path completion statistics for a Matrix1 job.
 
     Returns dict with:
@@ -119,7 +119,7 @@ def get_path_statistics(matrix1_index, n_hops, current_memory_gb):
         - failed_at_lower_tiers: Number of paths that failed at lower memory tiers
         - total_failed: Total failed paths across all tiers
     """
-    results_dir = f"results_{n_hops}hop"
+    results_dir = results_dir or f"results_{n_hops}hop"
 
     # Get stats from path_tracker
     stats = get_path_stats_from_tracker(results_dir, matrix1_index)

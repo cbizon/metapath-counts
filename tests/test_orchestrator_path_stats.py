@@ -31,7 +31,8 @@ def test_path_statistics_no_tracking_files(temp_results_dir):
     stats = get_path_statistics(
         matrix1_index=0,
         n_hops=3,
-        current_memory_gb=180
+        current_memory_gb=180,
+        results_dir=temp_results_dir
     )
 
     assert stats['completed_count'] == 0

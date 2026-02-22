@@ -14,6 +14,7 @@
 #   $6: min_precision - Minimum precision (default: 0)
 #   $7: exclude_types - Comma-separated types to exclude (default: Entity,ThingWithTaxon)
 #   $8: exclude_predicates - Comma-separated predicates to exclude
+#   $9: output_dir - Output directory for grouped results (optional)
 #
 # This script:
 # 1. Receives type pair and file list from orchestrator (no manifest access!)
@@ -33,6 +34,7 @@ MIN_COUNT="${5:-0}"
 MIN_PRECISION="${6:-0}"
 EXCLUDE_TYPES="${7:-Entity,ThingWithTaxon}"
 EXCLUDE_PREDICATES="${8:-related_to_at_instance_level,related_to_at_concept_level}"
+OUTPUT_DIR_ARG="${9:-}"
 
 if [ -z "$TYPE1" ] || [ -z "$TYPE2" ] || [ -z "$FILE_LIST_PATH" ] || [ -z "$N_HOPS" ]; then
     echo "ERROR: Missing required arguments"
@@ -40,7 +42,7 @@ if [ -z "$TYPE1" ] || [ -z "$TYPE2" ] || [ -z "$FILE_LIST_PATH" ] || [ -z "$N_HO
     exit 1
 fi
 
-OUTPUT_DIR="grouped_by_results_${N_HOPS}hop"
+OUTPUT_DIR="${OUTPUT_DIR_ARG:-grouped_by_results_${N_HOPS}hop}"
 RESULTS_DIR="results_${N_HOPS}hop"
 AGGREGATED_NHOP_COUNTS="${RESULTS_DIR}/aggregated_nhop_counts.json"
 TYPE_NODE_COUNTS="${RESULTS_DIR}/type_node_counts.json"

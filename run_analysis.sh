@@ -67,16 +67,32 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
         --n-hops "$N_HOPS" \
         --partition lowpri
 
-    # Step 3: Prepare distributed grouping (create type pair jobs + precompute counts)
+    # Step 3: Precompute aggregated N-hop counts on SLURM
     echo ""
-    echo "Step 3: Preparing distributed grouping..."
-    echo "  - Creating type pair jobs"
-    echo "  - Precomputing aggregated 1-hop counts (from matrix metadata)"
-    echo "  - Precomputing aggregated N-hop counts (from result files)"
-    echo "  - Computing type node counts"
-    uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS"
+    echo "Step 3: Precomputing aggregated N-hop counts on SLURM..."
+    precompute_output=$(uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops "$N_HOPS")
+    echo "$precompute_output"
 
-    # Step 4: Run distributed grouping (one SLURM job per type pair)
+    reduce_b_job_id=$(echo "$precompute_output" | awk '/Reduce B:/ {print $3}')
+    if [ -n "$reduce_b_job_id" ]; then
+        echo "Waiting for Reduce B job ${reduce_b_job_id} to finish..."
+        while squeue -j "$reduce_b_job_id" | tail -n +2 | grep -q .; do
+            sleep 30
+        done
+        echo "Reduce B job complete."
+    else
+        echo "WARNING: Could not parse Reduce B job ID. Proceeding without wait."
+    fi
+
+    # Step 4: Prepare distributed grouping (create type pair jobs + precompute counts)
+    echo ""
+    echo "Step 4: Preparing distributed grouping..."
+    echo "  - Creating type pair jobs"
+    echo "  - Loading aggregated N-hop counts (from SLURM precompute)"
+    echo "  - Computing type node counts"
+    uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS" --skip-aggregated-precompute
+
+    # Step 5: Run distributed grouping (one SLURM job per type pair)
     echo ""
     echo "Step 4: Running distributed grouping..."
     echo "  - Each type pair (src_type, tgt_type) processed by separate SLURM job"
