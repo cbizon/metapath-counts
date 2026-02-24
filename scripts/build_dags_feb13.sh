@@ -17,5 +17,5 @@ OUT3="DAG3_data_filtered"
 ./scripts/merge_multihop_shard_outputs.sh "$OUT2"
 
 # Build 3-hop DAG from 2-hop + 1-hop via per-join SLURM shard jobs (submit + wait + merge).
-./scripts/submit_multihop_shard_jobs.sh "$OUT2" "$OUT1" "$OUT3"
+./scripts/submit_multihop_shard_jobs.sh "$OUT2" "$OUT1" "$OUT3" lowpri 128
 ./scripts/merge_multihop_shard_outputs.sh "$OUT3"
