@@ -71,6 +71,18 @@ mapfile -t JOB_IDS < <(cut -f1 "$SUBMITTED_PATH")
 
 echo "Waiting for shard jobs to finish (poll every ${POLL_SECONDS}s)..." >&2
 
+declare -A JOB_JOIN_TYPE
+declare -A JOB_SHARD_PATH
+declare -A JOB_NHOP_COUNT
+while IFS=$'\t' read -r job_id join_type shard_path nhop_count; do
+  [[ -z "${job_id:-}" ]] && continue
+  JOB_JOIN_TYPE["$job_id"]="$join_type"
+  JOB_SHARD_PATH["$job_id"]="$shard_path"
+  JOB_NHOP_COUNT["$job_id"]="$nhop_count"
+done < "$SUBMITTED_PATH"
+
+final_sacct_out=""
+
 while true; do
   running_count=0
   pending_count=0
@@ -93,6 +105,7 @@ while true; do
   done_count=0
   if [[ "${#JOB_IDS[@]}" -gt 0 ]]; then
     sacct_out="$(sacct -n -P -j "$(IFS=,; echo "${JOB_IDS[*]}")" --format=JobID,State,ExitCode 2>/dev/null || true)"
+    final_sacct_out="$sacct_out"
     while IFS='|' read -r jid state exit_code; do
       [[ -z "${jid:-}" ]] && continue
       [[ "$jid" == *.* ]] && continue
@@ -115,12 +128,27 @@ while true; do
   total="${#JOB_IDS[@]}"
   echo "Shard jobs: total=$total done=$done_count completed=$completed failed=$failed running=$running_count pending=$pending_count" >&2
 
-  if [[ "$failed" -gt 0 ]]; then
-    echo "One or more shard jobs failed. Inspect $SUBMITTED_PATH and $SLURM_LOG_DIR" >&2
-    exit 1
-  fi
-
   if [[ "$done_count" -ge "$total" ]]; then
+    if [[ "$failed" -gt 0 ]]; then
+      echo "Shard job failures detected:" >&2
+      while IFS='|' read -r jid state exit_code; do
+        [[ -z "${jid:-}" ]] && continue
+        [[ "$jid" == *.* ]] && continue
+        case "$state" in
+          FAILED|OUT_OF_MEMORY|CANCELLED|TIMEOUT|NODE_FAIL)
+            printf '  job_id=%s join_type=%s state=%s exit_code=%s nhop_count=%s shard=%s\n' \
+              "$jid" \
+              "${JOB_JOIN_TYPE[$jid]:-UNKNOWN}" \
+              "$state" \
+              "$exit_code" \
+              "${JOB_NHOP_COUNT[$jid]:-UNKNOWN}" \
+              "${JOB_SHARD_PATH[$jid]:-UNKNOWN}" >&2
+            ;;
+        esac
+      done <<< "$final_sacct_out"
+      echo "Inspect SLURM logs in $SLURM_LOG_DIR" >&2
+      exit 1
+    fi
     echo "All shard jobs completed successfully." >&2
     break
   fi
