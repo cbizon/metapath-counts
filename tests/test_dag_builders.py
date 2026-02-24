@@ -271,3 +271,46 @@ def test_build_multihop_with_paired_join_parent(tmp_path, monkeypatch):
     }
 
     assert {(c, p) for (c, p) in edges if c == child} == {(child, p) for p in expected_parents}
+
+
+def test_build_multihop_shard_by_join(tmp_path, monkeypatch):
+    nhop_dir = tmp_path / "nhop"
+    onehop_dir = tmp_path / "onehop"
+    nhop_dir.mkdir()
+    onehop_dir.mkdir()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    (nhop_dir / "nodes.tsv").write_text(
+        "metapath\n"
+        "A|p|F|B\n"
+        "X|p|F|Y\n"
+    )
+    (nhop_dir / "edges.tsv").write_text("child\tparent\n")
+
+    (onehop_dir / "nodes.tsv").write_text(
+        "metapath\n"
+        "B|q|F|C\n"
+        "Y|q|F|Z\n"
+    )
+    (onehop_dir / "edges.tsv").write_text("child\tparent\n")
+
+    argv = [
+        "build_multihop_dag.py",
+        "--nhop-dir",
+        str(nhop_dir),
+        "--onehop-dir",
+        str(onehop_dir),
+        "--output-dir",
+        str(out_dir),
+        "--shard-by-join",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    build_multihop_dag.main()
+
+    _, node_rows = _read_tsv(out_dir / "nodes.tsv")
+    nodes = {row[0] for row in node_rows}
+    assert nodes == {
+        "A|p|F|B|q|F|C",
+        "X|p|F|Y|q|F|Z",
+    }

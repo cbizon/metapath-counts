@@ -13,6 +13,7 @@ Outputs:
 - nodes.tsv with header "metapath"
 - edges.tsv with header "child\tparent"
 - provenance.json with run metadata
+Optionally, shard files are written under <output_dir>/shards/
 """
 
 import argparse
@@ -28,10 +29,15 @@ Parsed = Tuple[List[str], List[str], List[str]]
 
 
 def read_nodes(path: str) -> Iterable[str]:
+    return read_metapath_lines(path, has_header=True)
+
+
+def read_metapath_lines(path: str, has_header: bool) -> Iterable[str]:
     with open(path, "r") as f:
-        header = f.readline().strip().split("\t")
-        if not header or header[0] != "metapath":
-            raise ValueError(f"Invalid nodes file header in {path}: {header}")
+        if has_header:
+            header = f.readline().strip().split("\t")
+            if not header or header[0] != "metapath":
+                raise ValueError(f"Invalid nodes file header in {path}: {header}")
         for line in f:
             line = line.strip()
             if not line:
@@ -52,6 +58,16 @@ def read_edges(path: str) -> Dict[str, List[str]]:
             child, parent = line.split("\t")[:2]
             parents[child].append(parent)
     return parents
+
+
+def safe_shard_name(name: str) -> str:
+    return (
+        name.replace("/", "_")
+        .replace(" ", "_")
+        .replace("|", "_")
+        .replace(":", "_")
+        .replace("+", "+")
+    )
 
 
 def combine_parsed(nhop: Parsed, onehop: Parsed) -> Parsed:
@@ -80,6 +96,11 @@ def main() -> None:
         type=int,
         default=100000,
         help="Log progress every N N-hop nodes (default: 100000, 0 disables)",
+    )
+    parser.add_argument(
+        "--shard-by-join",
+        action="store_true",
+        help="Shard N-hop nodes by join type to reduce memory pressure",
     )
 
     args = parser.parse_args()
@@ -127,93 +148,203 @@ def main() -> None:
         f_nodes.write("metapath\n")
         f_edges.write("child\tparent\n")
 
-        for n_metapath in read_nodes(nhop_nodes):
-            nhop_total += 1
-            n_parsed = parse_metapath(n_metapath)
-            nhop_cache[n_metapath] = n_parsed
-            join_type = n_parsed[0][-1]
+        shard_dir = None
+        shard_paths = {}
+        if args.shard_by_join:
+            shard_dir = os.path.join(args.output_dir, "shards")
+            os.makedirs(shard_dir, exist_ok=True)
+            shard_handles = {}
+            shard_counts = defaultdict(int)
+            for n_metapath in read_nodes(nhop_nodes):
+                n_parsed = parse_metapath(n_metapath)
+                join_type = n_parsed[0][-1]
+                shard_name = safe_shard_name(join_type)
+                shard_path = os.path.join(shard_dir, f"nhop_{shard_name}.tsv")
+                shard_paths[join_type] = shard_path
+                handle = shard_handles.get(shard_path)
+                if handle is None:
+                    handle = open(shard_path, "w")
+                    shard_handles[shard_path] = handle
+                handle.write(n_metapath + "\n")
+                shard_counts[join_type] += 1
+            for handle in shard_handles.values():
+                handle.close()
+            print(f"[build_multihop_dag] Sharded N-hop into {len(shard_paths)} files")
 
-            if join_type not in onehop_by_start:
-                nhop_join_miss += 1
-                continue
-
-            for o_metapath, o_parsed in onehop_by_start[join_type]:
-                combined = combine_parsed(n_parsed, o_parsed)
-                child_mp = build_metapath(*combined)
-                if child_mp not in seen_nodes:
-                    f_nodes.write(child_mp + "\n")
-                    seen_nodes.add(child_mp)
-                    combined_nodes_written += 1
-
-                # N-hop parents (single-step change, join type unchanged)
-                n_parents = nhop_parents.get(n_metapath, [])
-                for n_parent in n_parents:
-                    p_parsed = nhop_cache.get(n_parent)
-                    if p_parsed is None:
-                        p_parsed = parse_metapath(n_parent)
-                        nhop_cache[n_parent] = p_parsed
-                    if p_parsed[0][-1] != join_type:
+            for join_type, shard_path in shard_paths.items():
+                if join_type not in onehop_by_start:
+                    continue
+                seen_nodes = set()
+                seen_edges = set()
+                for n_metapath in read_metapath_lines(shard_path, has_header=False):
+                    nhop_total += 1
+                    n_parsed = parse_metapath(n_metapath)
+                    nhop_cache[n_metapath] = n_parsed
+                    if join_type not in onehop_by_start:
+                        nhop_join_miss += 1
                         continue
-                    parent_comb = combine_parsed(p_parsed, o_parsed)
-                    parent_mp = build_metapath(*parent_comb)
-                    key = (child_mp, parent_mp)
-                    if key not in seen_edges:
-                        f_edges.write(f"{child_mp}\t{parent_mp}\n")
-                        seen_edges.add(key)
-                        combined_edges_written += 1
-                        parent_edges_n += 1
 
-                # 1-hop parents (single-step change, join type unchanged)
-                o_parents = onehop_parents.get(o_metapath, [])
-                for o_parent in o_parents:
-                    p_parsed = onehop_cache.get(o_parent)
-                    if p_parsed is None:
-                        p_parsed = parse_metapath(o_parent)
-                        onehop_cache[o_parent] = p_parsed
-                    if p_parsed[0][0] != join_type:
-                        continue
-                    parent_comb = combine_parsed(n_parsed, p_parsed)
-                    parent_mp = build_metapath(*parent_comb)
-                    key = (child_mp, parent_mp)
-                    if key not in seen_edges:
-                        f_edges.write(f"{child_mp}\t{parent_mp}\n")
-                        seen_edges.add(key)
-                        combined_edges_written += 1
-                        parent_edges_o += 1
+                    for o_metapath, o_parsed in onehop_by_start[join_type]:
+                        combined = combine_parsed(n_parsed, o_parsed)
+                        child_mp = build_metapath(*combined)
+                        if child_mp not in seen_nodes:
+                            f_nodes.write(child_mp + "\n")
+                            seen_nodes.add(child_mp)
+                            combined_nodes_written += 1
 
-                # Paired parent changes on the join node
-                if n_parents and o_parents:
-                    for n_parent in n_parents:
-                        p_n = nhop_cache.get(n_parent)
-                        if p_n is None:
-                            p_n = parse_metapath(n_parent)
-                            nhop_cache[n_parent] = p_n
-                        new_join = p_n[0][-1]
-                        if new_join == join_type:
-                            continue
-                        for o_parent in o_parents:
-                            p_o = onehop_cache.get(o_parent)
-                            if p_o is None:
-                                p_o = parse_metapath(o_parent)
-                                onehop_cache[o_parent] = p_o
-                            if p_o[0][0] != new_join:
+                        n_parents = nhop_parents.get(n_metapath, [])
+                        for n_parent in n_parents:
+                            p_parsed = nhop_cache.get(n_parent)
+                            if p_parsed is None:
+                                p_parsed = parse_metapath(n_parent)
+                                nhop_cache[n_parent] = p_parsed
+                            if p_parsed[0][-1] != join_type:
                                 continue
-                            parent_comb = combine_parsed(p_n, p_o)
+                            parent_comb = combine_parsed(p_parsed, o_parsed)
                             parent_mp = build_metapath(*parent_comb)
                             key = (child_mp, parent_mp)
                             if key not in seen_edges:
                                 f_edges.write(f"{child_mp}\t{parent_mp}\n")
                                 seen_edges.add(key)
                                 combined_edges_written += 1
-                                parent_edges_pair += 1
+                                parent_edges_n += 1
 
-            if args.log_every and nhop_total % args.log_every == 0:
-                elapsed = time.time() - t0
-                print(
-                    f"[build_multihop_dag] N-hop processed={nhop_total} "
-                    f"join_miss={nhop_join_miss} nodes={combined_nodes_written} "
-                    f"edges={combined_edges_written} elapsed={elapsed:.1f}s"
-                )
+                        o_parents = onehop_parents.get(o_metapath, [])
+                        for o_parent in o_parents:
+                            p_parsed = onehop_cache.get(o_parent)
+                            if p_parsed is None:
+                                p_parsed = parse_metapath(o_parent)
+                                onehop_cache[o_parent] = p_parsed
+                            if p_parsed[0][0] != join_type:
+                                continue
+                            parent_comb = combine_parsed(n_parsed, p_parsed)
+                            parent_mp = build_metapath(*parent_comb)
+                            key = (child_mp, parent_mp)
+                            if key not in seen_edges:
+                                f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                seen_edges.add(key)
+                                combined_edges_written += 1
+                                parent_edges_o += 1
+
+                        if n_parents and o_parents:
+                            for n_parent in n_parents:
+                                p_n = nhop_cache.get(n_parent)
+                                if p_n is None:
+                                    p_n = parse_metapath(n_parent)
+                                    nhop_cache[n_parent] = p_n
+                                new_join = p_n[0][-1]
+                                if new_join == join_type:
+                                    continue
+                                for o_parent in o_parents:
+                                    p_o = onehop_cache.get(o_parent)
+                                    if p_o is None:
+                                        p_o = parse_metapath(o_parent)
+                                        onehop_cache[o_parent] = p_o
+                                    if p_o[0][0] != new_join:
+                                        continue
+                                    parent_comb = combine_parsed(p_n, p_o)
+                                    parent_mp = build_metapath(*parent_comb)
+                                    key = (child_mp, parent_mp)
+                                    if key not in seen_edges:
+                                        f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                        seen_edges.add(key)
+                                        combined_edges_written += 1
+                                        parent_edges_pair += 1
+                if args.log_every:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[build_multihop_dag] Shard join={join_type} "
+                        f"processed={nhop_total} nodes={combined_nodes_written} "
+                        f"edges={combined_edges_written} elapsed={elapsed:.1f}s"
+                    )
+        else:
+            for n_metapath in read_nodes(nhop_nodes):
+                nhop_total += 1
+                n_parsed = parse_metapath(n_metapath)
+                nhop_cache[n_metapath] = n_parsed
+                join_type = n_parsed[0][-1]
+
+                if join_type not in onehop_by_start:
+                    nhop_join_miss += 1
+                    continue
+
+                for o_metapath, o_parsed in onehop_by_start[join_type]:
+                    combined = combine_parsed(n_parsed, o_parsed)
+                    child_mp = build_metapath(*combined)
+                    if child_mp not in seen_nodes:
+                        f_nodes.write(child_mp + "\n")
+                        seen_nodes.add(child_mp)
+                        combined_nodes_written += 1
+
+                    # N-hop parents (single-step change, join type unchanged)
+                    n_parents = nhop_parents.get(n_metapath, [])
+                    for n_parent in n_parents:
+                        p_parsed = nhop_cache.get(n_parent)
+                        if p_parsed is None:
+                            p_parsed = parse_metapath(n_parent)
+                            nhop_cache[n_parent] = p_parsed
+                        if p_parsed[0][-1] != join_type:
+                            continue
+                        parent_comb = combine_parsed(p_parsed, o_parsed)
+                        parent_mp = build_metapath(*parent_comb)
+                        key = (child_mp, parent_mp)
+                        if key not in seen_edges:
+                            f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                            seen_edges.add(key)
+                            combined_edges_written += 1
+                            parent_edges_n += 1
+
+                    # 1-hop parents (single-step change, join type unchanged)
+                    o_parents = onehop_parents.get(o_metapath, [])
+                    for o_parent in o_parents:
+                        p_parsed = onehop_cache.get(o_parent)
+                        if p_parsed is None:
+                            p_parsed = parse_metapath(o_parent)
+                            onehop_cache[o_parent] = p_parsed
+                        if p_parsed[0][0] != join_type:
+                            continue
+                        parent_comb = combine_parsed(n_parsed, p_parsed)
+                        parent_mp = build_metapath(*parent_comb)
+                        key = (child_mp, parent_mp)
+                        if key not in seen_edges:
+                            f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                            seen_edges.add(key)
+                            combined_edges_written += 1
+                            parent_edges_o += 1
+
+                    # Paired parent changes on the join node
+                    if n_parents and o_parents:
+                        for n_parent in n_parents:
+                            p_n = nhop_cache.get(n_parent)
+                            if p_n is None:
+                                p_n = parse_metapath(n_parent)
+                                nhop_cache[n_parent] = p_n
+                            new_join = p_n[0][-1]
+                            if new_join == join_type:
+                                continue
+                            for o_parent in o_parents:
+                                p_o = onehop_cache.get(o_parent)
+                                if p_o is None:
+                                    p_o = parse_metapath(o_parent)
+                                    onehop_cache[o_parent] = p_o
+                                if p_o[0][0] != new_join:
+                                    continue
+                                parent_comb = combine_parsed(p_n, p_o)
+                                parent_mp = build_metapath(*parent_comb)
+                                key = (child_mp, parent_mp)
+                                if key not in seen_edges:
+                                    f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                    seen_edges.add(key)
+                                    combined_edges_written += 1
+                                    parent_edges_pair += 1
+
+                if args.log_every and nhop_total % args.log_every == 0:
+                    elapsed = time.time() - t0
+                    print(
+                        f"[build_multihop_dag] N-hop processed={nhop_total} "
+                        f"join_miss={nhop_join_miss} nodes={combined_nodes_written} "
+                        f"edges={combined_edges_written} elapsed={elapsed:.1f}s"
+                    )
 
     total_elapsed = time.time() - t0
     print("[build_multihop_dag] Done")
@@ -238,6 +369,7 @@ def main() -> None:
         "onehop_dir": args.onehop_dir,
         "nodes_written": combined_nodes_written,
         "edges_written": combined_edges_written,
+        "shard_by_join": bool(args.shard_by_join),
         "timestamp": time.time(),
     }
     with open(provenance_out, "w") as f:
