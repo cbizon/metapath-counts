@@ -60,6 +60,22 @@ def read_edges(path: str) -> Dict[str, List[str]]:
     return parents
 
 
+def read_edges_filtered(path: str, allowed_children: set[str]) -> Dict[str, List[str]]:
+    parents = defaultdict(list)
+    with open(path, "r") as f:
+        header = f.readline().strip().split("\t")
+        if header[:2] != ["child", "parent"]:
+            raise ValueError(f"Invalid edges file header in {path}: {header}")
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            child, parent = line.split("\t")[:2]
+            if child in allowed_children:
+                parents[child].append(parent)
+    return parents
+
+
 def safe_shard_name(name: str) -> str:
     return (
         name.replace("/", "_")
@@ -72,6 +88,10 @@ def safe_shard_name(name: str) -> str:
 
 def end_type(metapath: str) -> str:
     return metapath.rsplit("|", 1)[-1]
+
+
+def start_type(metapath: str) -> str:
+    return metapath.split("|", 1)[0]
 
 
 def suffix_after_first(metapath: str) -> str:
@@ -111,7 +131,21 @@ def main() -> None:
         action="store_true",
         help="Shard N-hop nodes by join type to reduce memory pressure",
     )
-
+    parser.add_argument(
+        "--prepare-shards-only",
+        action="store_true",
+        help="Only write join-type shard files and shard index, then exit",
+    )
+    parser.add_argument(
+        "--join-type",
+        default=None,
+        help="Process only a single join type (requires --nhop-shard-file)",
+    )
+    parser.add_argument(
+        "--nhop-shard-file",
+        default=None,
+        help="Shard file containing N-hop metapaths for --join-type",
+    )
     args = parser.parse_args()
 
     t0 = time.time()
@@ -128,9 +162,11 @@ def main() -> None:
     # Load and index 1-hop nodes by start type
     t_index = time.time()
     onehop_by_start: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    onehop_start_cache: Dict[str, str] = {}
     onehop_suffix_cache: Dict[str, str] = {}
     for metapath in read_nodes(onehop_nodes):
-        stype = metapath.split("|", 1)[0]
+        stype = start_type(metapath)
+        onehop_start_cache[metapath] = stype
         suffix = onehop_suffix_cache.get(metapath)
         if suffix is None:
             suffix = suffix_after_first(metapath)
@@ -138,8 +174,17 @@ def main() -> None:
         onehop_by_start[stype].append((metapath, suffix))
     onehop_count = sum(len(v) for v in onehop_by_start.values())
 
-    nhop_parents = read_edges(nhop_edges)
-    onehop_parents = read_edges(onehop_edges)
+    shard_nhop_rows: List[str] | None = None
+    if args.join_type or args.nhop_shard_file:
+        if not (args.join_type and args.nhop_shard_file):
+            raise ValueError("--join-type and --nhop-shard-file must be provided together")
+        shard_nhop_rows = list(read_metapath_lines(args.nhop_shard_file, has_header=False))
+        nhop_parents = read_edges_filtered(nhop_edges, set(shard_nhop_rows))
+        onehop_children = {mp for mp, _ in onehop_by_start.get(args.join_type, [])}
+        onehop_parents = read_edges_filtered(onehop_edges, onehop_children)
+    else:
+        nhop_parents = read_edges(nhop_edges)
+        onehop_parents = read_edges(onehop_edges)
     t_index_done = time.time()
 
     nhop_end_cache: Dict[str, str] = {}
@@ -161,11 +206,158 @@ def main() -> None:
 
         shard_dir = None
         shard_paths = {}
-        if args.shard_by_join:
+        if args.join_type:
+            join_type = args.join_type
+            if shard_nhop_rows is None:
+                raise ValueError("Internal error: shard rows not loaded")
+            if join_type not in onehop_by_start:
+                print(f"[build_multihop_dag] No 1-hop entries for join type {join_type}; writing empty outputs")
+            else:
+                shard_nhop = 0
+                shard_nodes_written = 0
+                shard_edges_written = 0
+                shard_onehop_count = len(onehop_by_start[join_type])
+                shard_t_start = time.time()
+                shard_parent_edges_n = 0
+                shard_parent_edges_o = 0
+                shard_parent_edges_pair = 0
+                shard_t_combine = 0.0
+                shard_t_nparents = 0.0
+                shard_t_oparents = 0.0
+                shard_t_oparent_check = 0.0
+                shard_t_oparent_suffix = 0.0
+                shard_t_oparent_build = 0.0
+                shard_t_oparent_dedup = 0.0
+                shard_t_pairparents = 0.0
+                seen_nodes = set()
+                seen_edges = set()
+                for n_metapath in shard_nhop_rows:
+                    shard_nhop += 1
+                    nhop_total += 1
+                    for o_metapath, o_suffix in onehop_by_start[join_type]:
+                        t_step = time.time()
+                        child_mp = f"{n_metapath}|{o_suffix}"
+                        if child_mp not in seen_nodes:
+                            f_nodes.write(child_mp + "\n")
+                            seen_nodes.add(child_mp)
+                            combined_nodes_written += 1
+                            shard_nodes_written += 1
+                        shard_t_combine += time.time() - t_step
+
+                        n_parents = nhop_parents.get(n_metapath, [])
+                        t_step = time.time()
+                        for n_parent in n_parents:
+                            p_end = nhop_end_cache.get(n_parent)
+                            if p_end is None:
+                                p_end = end_type(n_parent)
+                                nhop_end_cache[n_parent] = p_end
+                            if p_end != join_type:
+                                continue
+                            parent_mp = f"{n_parent}|{o_suffix}"
+                            key = (child_mp, parent_mp)
+                            if key not in seen_edges:
+                                f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                seen_edges.add(key)
+                                combined_edges_written += 1
+                                parent_edges_n += 1
+                                shard_edges_written += 1
+                                shard_parent_edges_n += 1
+                        shard_t_nparents += time.time() - t_step
+
+                        o_parents = onehop_parents.get(o_metapath, [])
+                        t_step = time.time()
+                        for o_parent in o_parents:
+                            t_step_inner = time.time()
+                            p_start = onehop_start_cache.get(o_parent)
+                            if p_start is None:
+                                p_start = start_type(o_parent)
+                                onehop_start_cache[o_parent] = p_start
+                            if p_start != join_type:
+                                shard_t_oparent_check += time.time() - t_step_inner
+                                continue
+                            shard_t_oparent_check += time.time() - t_step_inner
+
+                            t_step_inner = time.time()
+                            p_suffix = onehop_suffix_cache.get(o_parent)
+                            if p_suffix is None:
+                                p_suffix = suffix_after_first(o_parent)
+                                onehop_suffix_cache[o_parent] = p_suffix
+                            shard_t_oparent_suffix += time.time() - t_step_inner
+
+                            t_step_inner = time.time()
+                            parent_mp = f"{n_metapath}|{p_suffix}"
+                            shard_t_oparent_build += time.time() - t_step_inner
+
+                            t_step_inner = time.time()
+                            key = (child_mp, parent_mp)
+                            if key not in seen_edges:
+                                f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                seen_edges.add(key)
+                                combined_edges_written += 1
+                                parent_edges_o += 1
+                                shard_edges_written += 1
+                                shard_parent_edges_o += 1
+                            shard_t_oparent_dedup += time.time() - t_step_inner
+                        shard_t_oparents += time.time() - t_step
+
+                        if n_parents and o_parents:
+                            t_step = time.time()
+                            for n_parent in n_parents:
+                                new_join = nhop_end_cache.get(n_parent)
+                                if new_join is None:
+                                    new_join = end_type(n_parent)
+                                    nhop_end_cache[n_parent] = new_join
+                                if new_join == join_type:
+                                    continue
+                                for o_parent in o_parents:
+                                    o_start = onehop_start_cache.get(o_parent)
+                                    if o_start is None:
+                                        o_start = start_type(o_parent)
+                                        onehop_start_cache[o_parent] = o_start
+                                    if o_start != new_join:
+                                        continue
+                                    p_suffix = onehop_suffix_cache.get(o_parent)
+                                    if p_suffix is None:
+                                        p_suffix = suffix_after_first(o_parent)
+                                        onehop_suffix_cache[o_parent] = p_suffix
+                                    parent_mp = f"{n_parent}|{p_suffix}"
+                                    key = (child_mp, parent_mp)
+                                    if key not in seen_edges:
+                                        f_edges.write(f"{child_mp}\t{parent_mp}\n")
+                                        seen_edges.add(key)
+                                        combined_edges_written += 1
+                                        parent_edges_pair += 1
+                                        shard_edges_written += 1
+                                        shard_parent_edges_pair += 1
+                            shard_t_pairparents += time.time() - t_step
+
+                elapsed = time.time() - t0
+                shard_elapsed = time.time() - shard_t_start
+                print(
+                    f"[build_multihop_dag] Shard join={join_type} "
+                    f"nhop={shard_nhop} onehop={shard_onehop_count} "
+                    f"nodes={shard_nodes_written} edges={shard_edges_written} "
+                    f"edges_n={shard_parent_edges_n} "
+                    f"edges_o={shard_parent_edges_o} "
+                    f"edges_pair={shard_parent_edges_pair} "
+                    f"shard_elapsed={shard_elapsed:.1f}s "
+                    f"t_combine={shard_t_combine:.1f}s "
+                    f"t_n={shard_t_nparents:.1f}s "
+                    f"t_o={shard_t_oparents:.1f}s "
+                    f"t_o_check={shard_t_oparent_check:.1f}s "
+                    f"t_o_suffix={shard_t_oparent_suffix:.1f}s "
+                    f"t_o_build={shard_t_oparent_build:.1f}s "
+                    f"t_o_dedup={shard_t_oparent_dedup:.1f}s "
+                    f"t_pair={shard_t_pairparents:.1f}s "
+                    f"total_nhop={nhop_total} total_nodes={combined_nodes_written} "
+                    f"total_edges={combined_edges_written} elapsed={elapsed:.1f}s"
+                )
+        elif args.shard_by_join:
             shard_dir = os.path.join(args.output_dir, "shards")
             os.makedirs(shard_dir, exist_ok=True)
             shard_handles = {}
             shard_counts = defaultdict(int)
+            shard_index_path = os.path.join(shard_dir, "index.tsv")
             for n_metapath in read_nodes(nhop_nodes):
                 join_type = end_type(n_metapath)
                 shard_name = safe_shard_name(join_type)
@@ -179,7 +371,26 @@ def main() -> None:
                 shard_counts[join_type] += 1
             for handle in shard_handles.values():
                 handle.close()
+            with open(shard_index_path, "w") as f_idx:
+                f_idx.write("join_type\tshard_path\tnhop_count\n")
+                for join_type in sorted(shard_paths):
+                    f_idx.write(
+                        f"{join_type}\t{shard_paths[join_type]}\t{shard_counts[join_type]}\n"
+                    )
             print(f"[build_multihop_dag] Sharded N-hop into {len(shard_paths)} files")
+            if args.prepare_shards_only:
+                provenance = {
+                    "script": "build_multihop_dag.py",
+                    "output_dir": args.output_dir,
+                    "nhop_dir": args.nhop_dir,
+                    "onehop_dir": args.onehop_dir,
+                    "mode": "prepare_shards_only",
+                    "shard_count": len(shard_paths),
+                    "timestamp": time.time(),
+                }
+                with open(provenance_out, "w") as f:
+                    json.dump(provenance, f, indent=2, sort_keys=True)
+                return
 
             for join_type, shard_path in shard_paths.items():
                 if join_type not in onehop_by_start:
@@ -243,7 +454,11 @@ def main() -> None:
                         t_step = time.time()
                         for o_parent in o_parents:
                             t_step_inner = time.time()
-                            if not o_parent.startswith(f"{join_type}|"):
+                            p_start = onehop_start_cache.get(o_parent)
+                            if p_start is None:
+                                p_start = start_type(o_parent)
+                                onehop_start_cache[o_parent] = p_start
+                            if p_start != join_type:
                                 shard_t_oparent_check += time.time() - t_step_inner
                                 continue
                             shard_t_oparent_check += time.time() - t_step_inner
@@ -281,7 +496,11 @@ def main() -> None:
                                 if new_join == join_type:
                                     continue
                                 for o_parent in o_parents:
-                                    if not o_parent.startswith(f"{new_join}|"):
+                                    o_start = onehop_start_cache.get(o_parent)
+                                    if o_start is None:
+                                        o_start = start_type(o_parent)
+                                        onehop_start_cache[o_parent] = o_start
+                                    if o_start != new_join:
                                         continue
                                     p_suffix = onehop_suffix_cache.get(o_parent)
                                     if p_suffix is None:
@@ -355,7 +574,11 @@ def main() -> None:
                     # 1-hop parents (single-step change, join type unchanged)
                     o_parents = onehop_parents.get(o_metapath, [])
                     for o_parent in o_parents:
-                        if not o_parent.startswith(f"{join_type}|"):
+                        p_start = onehop_start_cache.get(o_parent)
+                        if p_start is None:
+                            p_start = start_type(o_parent)
+                            onehop_start_cache[o_parent] = p_start
+                        if p_start != join_type:
                             continue
                         p_suffix = onehop_suffix_cache.get(o_parent)
                         if p_suffix is None:
@@ -379,7 +602,11 @@ def main() -> None:
                             if new_join == join_type:
                                 continue
                             for o_parent in o_parents:
-                                if not o_parent.startswith(f"{new_join}|"):
+                                o_start = onehop_start_cache.get(o_parent)
+                                if o_start is None:
+                                    o_start = start_type(o_parent)
+                                    onehop_start_cache[o_parent] = o_start
+                                if o_start != new_join:
                                     continue
                                 p_suffix = onehop_suffix_cache.get(o_parent)
                                 if p_suffix is None:
@@ -422,6 +649,8 @@ def main() -> None:
         "output_dir": args.output_dir,
         "nhop_dir": args.nhop_dir,
         "onehop_dir": args.onehop_dir,
+        "join_type": args.join_type,
+        "nhop_shard_file": args.nhop_shard_file,
         "nodes_written": combined_nodes_written,
         "edges_written": combined_edges_written,
         "shard_by_join": bool(args.shard_by_join),
