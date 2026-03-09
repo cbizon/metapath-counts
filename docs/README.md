@@ -47,6 +47,7 @@ uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
 - **Sequential (old)**: ~5 days
 - **Parallel (new)**: ~2-4 hours with ~100-200 concurrent jobs
 - **Speedup**: ~50-100x
+- **Caution**: full 3-hop DAG builds are still very large and slow at production scale; plan for high memory usage and substantial disk output.
 
 ## Step-by-Step Instructions
 

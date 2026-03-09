@@ -138,6 +138,8 @@ Typical run on ROBOKOP graph:
 - 2-4 hours total runtime
 - ~22 GB final output
 
+> Note: the full 3-hop DAG is still very large and expensive to compute. Expect high memory/storage usage and slow end-to-end runtime at full scale.
+
 ## License
 
 [To be determined]
