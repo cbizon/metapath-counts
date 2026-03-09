@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=prep_grp_B
-#SBATCH --time=4:00:00
+#SBATCH --time=12:00:00
 #SBATCH --cpus-per-task=1
 
 set -e

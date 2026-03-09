@@ -448,8 +448,8 @@ def main():
     parser.add_argument(
         '--exclude-types',
         type=str,
-        default='Entity,ThingWithTaxon',
-        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)'
+        default='Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent',
+        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent)'
     )
     parser.add_argument(
         '--exclude-predicates',

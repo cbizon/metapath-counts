@@ -100,7 +100,7 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
 
 def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
                         min_count=0, min_precision=0.0,
-                        exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent",
+                        exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent",
                         exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
                         partition='lowpri',
                         output_dir=None):
@@ -168,7 +168,7 @@ def print_status_summary(manifest, running_jobs):
 
 
 def orchestrate(n_hops, min_count=10, min_precision=0.001,
-                exclude_types="Entity,ThingWithTaxon",
+                exclude_types="Entity,ThingWithTaxon,Occurrent",
                 exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
                 partition='lowpri',
                 output_dir=None):
@@ -390,8 +390,8 @@ def main():
     parser.add_argument(
         '--exclude-types',
         type=str,
-        default='Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent',
-        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent)'
+        default='Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent',
+        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent)'
     )
     parser.add_argument(
         '--exclude-predicates',

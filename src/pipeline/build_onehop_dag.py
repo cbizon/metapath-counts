@@ -14,32 +14,27 @@ import argparse
 import json
 import os
 import time
-from collections import defaultdict
 
 import bmt
 
 from library import get_symmetric_predicates
+from library.dag_compression import (
+    get_allowed_predicate_parents,
+    get_allowed_type_parents,
+    normalize_excluded_predicates,
+    normalize_excluded_types,
+    normalize_predicate,
+    normalize_type,
+    predicate_is_excluded,
+)
 from library.hierarchy import (
     get_type_ancestors,
-    get_type_parents,
     get_predicate_ancestors,
-    get_predicate_parents,
 )
 from library.aggregation import get_predicate_variants, parse_compound_predicate
-from library.type_assignment import assign_node_type, is_pseudo_type
-
-
-def normalize_type(name: str) -> str:
-    if not name:
-        return name
-    name = name.replace('biolink:', '').replace('_', ' ')
-    return ''.join(word.capitalize() for word in name.split())
-
-
-def normalize_predicate(name: str) -> str:
-    if not name:
-        return name
-    return name.replace('biolink:', '').replace(' ', '_')
+from library.type_assignment import assign_node_type
+from pipeline.dag_edge_io import BinaryEdgeWriter, write_node_ids
+from pipeline.dag_shards import materialize_left_shards, materialize_right_shards
 
 
 def load_node_types(nodes_file: str) -> dict:
@@ -176,13 +171,19 @@ def collect_allowed_pairs_from_data(edges_file: str, nodes_file: str):
     return allowed
 
 
-def iter_onehop_nodes(allowed_pairs):
+def iter_onehop_nodes(allowed_pairs, excluded_types=frozenset(), excluded_predicates=frozenset()):
     symmetric = get_symmetric_predicates()
     for pred, pairs in allowed_pairs.items():
+        if predicate_is_excluded(pred, excluded_predicates):
+            continue
         # Expand predicate variants (including qualifiers) using main aggregation logic
         pred_variants = get_predicate_variants(pred)
         for src, tgt in pairs:
+            if src in excluded_types or tgt in excluded_types:
+                continue
             for pred_var in pred_variants:
+                if predicate_is_excluded(pred_var, excluded_predicates):
+                    continue
                 base = parse_compound_predicate(pred_var)[0]
                 if base in symmetric:
                     yield f"{src}|{pred_var}|A|{tgt}"
@@ -198,12 +199,18 @@ def is_allowed(allowed_pairs, pred, src, tgt):
     return (src, tgt) in allowed_pairs[pred]
 
 
-def iter_onehop_edges(allowed_pairs):
+def iter_onehop_edges(allowed_pairs, excluded_types=frozenset(), excluded_predicates=frozenset()):
     symmetric = get_symmetric_predicates()
     for pred, pairs in allowed_pairs.items():
+        if predicate_is_excluded(pred, excluded_predicates):
+            continue
         pred_variants = get_predicate_variants(pred)
         for src, tgt in pairs:
+            if src in excluded_types or tgt in excluded_types:
+                continue
             for pred_var in pred_variants:
+                if predicate_is_excluded(pred_var, excluded_predicates):
+                    continue
                 base = parse_compound_predicate(pred_var)[0]
                 if base in symmetric:
                     direction = 'A'
@@ -215,7 +222,7 @@ def iter_onehop_edges(allowed_pairs):
                     forward_only = False
 
                 # parent types
-                for p_src in get_type_parents(src):
+                for p_src in get_allowed_type_parents(src, excluded_types):
                     if is_allowed(allowed_pairs, pred, p_src, tgt):
                         parent = f"{p_src}|{pred_var}|{direction}|{tgt}"
                         yield child, parent
@@ -227,7 +234,7 @@ def iter_onehop_edges(allowed_pairs):
                             r_child = f"{tgt}|{pred_var}|R|{src}"
                             r_parent = f"{tgt}|{pred_var}|R|{p_src}"
                             yield r_child, r_parent
-                for p_tgt in get_type_parents(tgt):
+                for p_tgt in get_allowed_type_parents(tgt, excluded_types):
                     if is_allowed(allowed_pairs, pred, src, p_tgt):
                         parent = f"{src}|{pred_var}|{direction}|{p_tgt}"
                         yield child, parent
@@ -241,9 +248,11 @@ def iter_onehop_edges(allowed_pairs):
                             yield r_child, r_parent
 
                 # parent predicates
-                for p_pred in get_predicate_parents(pred):
+                for p_pred in get_allowed_predicate_parents(pred, excluded_predicates):
                     if is_allowed(allowed_pairs, p_pred, src, tgt):
                         for p_pred_var in get_predicate_variants(p_pred):
+                            if predicate_is_excluded(p_pred_var, excluded_predicates):
+                                continue
                             p_base = parse_compound_predicate(p_pred_var)[0]
                             p_dir = 'A' if p_base in symmetric else 'F'
                             parent = f"{src}|{p_pred_var}|{p_dir}|{tgt}"
@@ -264,6 +273,16 @@ def main():
     parser.add_argument('--output-dir', required=True, help='Output directory')
     parser.add_argument('--edges', default=None, help='Optional KGX edges.jsonl to filter predicates/types')
     parser.add_argument('--nodes', default=None, help='Optional KGX nodes.jsonl (required for type filtering)')
+    parser.add_argument(
+        '--exclude-types',
+        default='',
+        help='Comma-separated type names to exclude (compressed DAG skips through them)',
+    )
+    parser.add_argument(
+        '--exclude-predicates',
+        default='',
+        help='Comma-separated predicate names to exclude (compressed DAG skips through them)',
+    )
 
     args = parser.parse_args()
 
@@ -276,12 +295,16 @@ def main():
         allowed_sets = collect_allowed_pairs_from_data(args.edges, args.nodes)
     else:
         allowed_sets = collect_allowed_pairs_from_biolink(toolkit)
+    excluded_types = normalize_excluded_types(args.exclude_types.split(','))
+    excluded_predicates = normalize_excluded_predicates(args.exclude_predicates.split(','))
 
     nodes_path = os.path.join(args.output_dir, 'nodes.tsv')
-    edges_path = os.path.join(args.output_dir, 'edges.tsv')
+    edges_bin_path = os.path.join(args.output_dir, 'edges.bin')
+    node_ids_path = os.path.join(args.output_dir, 'node_ids.tsv')
     provenance_path = os.path.join(args.output_dir, 'provenance.json')
 
     seen_nodes = set()
+    node_to_id = {}
     seen_edges = set()
 
     nodes_written = 0
@@ -289,32 +312,75 @@ def main():
 
     with open(nodes_path, 'w') as f_nodes:
         f_nodes.write('metapath\n')
-        for node in iter_onehop_nodes(allowed_sets):
+        for node in iter_onehop_nodes(
+            allowed_sets,
+            excluded_types=excluded_types,
+            excluded_predicates=excluded_predicates,
+        ):
             if node in seen_nodes:
                 continue
             seen_nodes.add(node)
+            node_to_id[node] = nodes_written
             f_nodes.write(node + '\n')
             nodes_written += 1
 
-    with open(edges_path, 'w') as f_edges:
-        f_edges.write('child\tparent\n')
-        for child, parent in iter_onehop_edges(allowed_sets):
+    late_nodes = []
+
+    def ensure_node_id(metapath: str) -> int:
+        node_id = node_to_id.get(metapath)
+        if node_id is None:
+            node_id = len(node_to_id)
+            node_to_id[metapath] = node_id
+            late_nodes.append(metapath)
+        return node_id
+
+    with BinaryEdgeWriter(edges_bin_path) as f_edges:
+        for child, parent in iter_onehop_edges(
+            allowed_sets,
+            excluded_types=excluded_types,
+            excluded_predicates=excluded_predicates,
+        ):
             key = (child, parent)
             if key in seen_edges:
                 continue
             seen_edges.add(key)
-            f_edges.write(child + '\t' + parent + '\n')
+            f_edges.write_ids(ensure_node_id(child), ensure_node_id(parent))
             edges_written += 1
+
+    if late_nodes:
+        with open(nodes_path, 'a') as f_nodes:
+            for node in late_nodes:
+                f_nodes.write(node + '\n')
+        nodes_written += len(late_nodes)
+
+    write_node_ids(node_ids_path, node_to_id)
 
     provenance = {
         "script": "build_onehop_dag.py",
         "output_dir": args.output_dir,
-        "edges_file": args.edges,
+        "source_edges_file": args.edges,
         "nodes_file": args.nodes,
         "mode": "data_filtered" if args.edges else "biolink_only",
+        "dag_edges_semantics": "nearest_allowed_parent" if (excluded_types or excluded_predicates) else "immediate_parent",
+        "excluded_types": sorted(excluded_types),
+        "excluded_predicates": sorted(excluded_predicates),
+        "compression_enabled": bool(excluded_types or excluded_predicates),
         "nodes_written": nodes_written,
         "edges_written": edges_written,
+        "edges_data_file": "edges.bin",
+        "node_ids_file": "node_ids.tsv",
+        "edges_encoding": "uint32_le_pairs",
         "timestamp": time.time(),
+    }
+    left_shards = materialize_left_shards(args.output_dir)
+    right_shards = materialize_right_shards(args.output_dir)
+    provenance["shards_left"] = {
+        "path": os.path.join(args.output_dir, "shards_left"),
+        "shard_count": left_shards["shard_count"],
+    }
+    provenance["shards_right"] = {
+        "path": os.path.join(args.output_dir, "shards_right"),
+        "shard_count": right_shards["shard_count"],
     }
     with open(provenance_path, 'w') as f:
         json.dump(provenance, f, indent=2, sort_keys=True)

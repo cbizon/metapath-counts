@@ -12,7 +12,7 @@
 #   $4: n_hops - Number of hops (1, 2, or 3)
 #   $5: min_count - Minimum N-hop count (default: 0)
 #   $6: min_precision - Minimum precision (default: 0)
-#   $7: exclude_types - Comma-separated types to exclude (default: Entity,ThingWithTaxon)
+#   $7: exclude_types - Comma-separated types to exclude (default: Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent)
 #   $8: exclude_predicates - Comma-separated predicates to exclude
 #   $9: output_dir - Output directory for grouped results (optional)
 #
@@ -32,7 +32,7 @@ FILE_LIST_PATH="$3"
 N_HOPS="$4"
 MIN_COUNT="${5:-0}"
 MIN_PRECISION="${6:-0}"
-EXCLUDE_TYPES="${7:-Entity,ThingWithTaxon}"
+EXCLUDE_TYPES="${7:-Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent,Occurrent}"
 EXCLUDE_PREDICATES="${8:-related_to_at_instance_level,related_to_at_concept_level}"
 OUTPUT_DIR_ARG="${9:-}"
 

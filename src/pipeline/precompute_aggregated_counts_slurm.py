@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument("--passb-max-concurrent", type=int, default=200, help="Max concurrent Pass B array tasks")
     parser.add_argument("--mem-passa", type=int, default=64, help="Memory (GB) for Pass A tasks")
     parser.add_argument("--mem-reducea", type=int, default=128, help="Memory (GB) for Reduce A")
-    parser.add_argument("--mem-passb", type=int, default=64, help="Memory (GB) for Pass B tasks")
+    parser.add_argument("--mem-passb", type=int, default=128, help="Memory (GB) for Pass B tasks")
     parser.add_argument("--mem-reduceb", type=int, default=250, help="Memory (GB) for Reduce B")
     return parser.parse_args()
 
