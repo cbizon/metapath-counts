@@ -411,6 +411,85 @@ def expand_metapath_to_variants(metapath: str) -> set:
     return set(generate_metapath_variants(metapath))
 
 
+def _type_within_ceiling(type_name: str, ceiling_type: str) -> bool:
+    """Return True when type_name is the ceiling or a descendant of it."""
+    if type_name == ceiling_type:
+        return True
+    return ceiling_type in get_type_ancestors(type_name)
+
+
+def generate_metapath_variants_for_typepair(metapath: str, type1: str, type2: str) -> Iterator[str]:
+    """
+    Generate implied variants whose endpoints do not generalize beyond a job type pair.
+
+    Endpoint types are bounded so expansion stops once it reaches type1/type2.
+    Internal nodes and predicates still expand through their full hierarchies.
+    Output variants are canonicalized exactly like generate_metapath_variants().
+    """
+    nodes, predicates, directions = parse_metapath(metapath)
+
+    endpoint_allow = {type1, type2}
+    bounded_first = [
+        node for node in get_type_variants(nodes[0])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    bounded_last = [
+        node for node in get_type_variants(nodes[-1])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    node_variants = [bounded_first]
+    if len(nodes) > 2:
+        node_variants.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_variants.append(bounded_last)
+
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+
+    for node_combo in itertools.product(*node_variants):
+        for pred_combo in itertools.product(*predicate_variants):
+            adjusted_directions = []
+            skip_variant = False
+
+            for i, pred in enumerate(pred_combo):
+                base_pred = parse_compound_predicate(pred)[0]
+                if base_pred in symmetric_preds:
+                    adjusted_directions.append('A')
+                    if nodes[0] == nodes[-1] and directions[i] == 'R':
+                        skip_variant = True
+                        break
+                else:
+                    adjusted_directions.append(directions[i])
+
+            if skip_variant:
+                continue
+
+            canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+                list(node_combo), list(pred_combo), adjusted_directions
+            )
+            if tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+                continue
+
+            variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
+            yield variant
+
+            if (nodes[0] != nodes[-1]
+                    and canon_nodes[0] == canon_nodes[-1]
+                    and any(d != 'A' for d in canon_dirs)):
+                rev_nodes = list(reversed(canon_nodes))
+                rev_preds = list(reversed(canon_preds))
+                rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
+                            for d in reversed(canon_dirs)]
+                rev_variant = build_metapath(rev_nodes, rev_preds, rev_dirs)
+                if tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
+                    yield rev_variant
+
+
+def expand_metapath_to_typepair_variants(metapath: str, type1: str, type2: str) -> set:
+    """Expand a metapath to variants bounded by the worker's endpoint type pair."""
+    return set(generate_metapath_variants_for_typepair(metapath, type1, type2))
+
+
 def calculate_metrics(
     nhop_count: int,
     onehop_count: int,

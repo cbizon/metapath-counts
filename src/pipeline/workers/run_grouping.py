@@ -2,122 +2,111 @@
 """
 Worker script to group results for all 1-hop metapaths between a type pair.
 
-Streams through specified result files, finds all 1-hop metapaths between
-the given type pair, aggregates counts for each, and computes performance metrics.
-
-Uses precomputed aggregated path counts (from prepare_grouping.py) to get
-global counts for aggregated paths like Entity|related_to|F|Entity.
+This worker no longer relies on a global aggregated_nhop_counts.json. Instead it:
+1. Loads explicit paths/counts for the current type pair shard
+2. Builds local hierarchical counts for 1-hop targets and N-hop predictors
+3. Streams relevant overlap rows
+4. Applies precision pruning during predictor aggregation
 """
 
 import argparse
-import glob
+import pickle
 import json
 import os
+import time
 from collections import defaultdict
-from pathlib import Path
 
 import zstandard
 
-from library.hierarchy import get_type_ancestors, get_predicate_ancestors
-from library.type_assignment import is_pseudo_type, parse_pseudo_type
-from library.aggregation import expand_metapath_to_variants, calculate_metrics, parse_compound_predicate
+from library.hierarchy import get_type_ancestors
+from library.aggregation import (
+    expand_metapath_to_typepair_variants,
+    calculate_metrics,
+    parse_compound_predicate,
+    parse_metapath,
+)
 
 
-def load_aggregated_nhop_counts(counts_path):
-    """Load precomputed aggregated N-hop path counts.
-
-    Args:
-        counts_path: Path to aggregated_nhop_counts.json
-
-    Returns:
-        Dict mapping N-hop path variant to global count
-    """
-    print(f"Loading precomputed aggregated N-hop counts from {counts_path}...")
-    with open(counts_path, 'r') as f:
-        data = json.load(f)
-
-    counts = data.get("counts", {})
-    print(f"  Loaded {len(counts)} aggregated N-hop path counts")
-    return counts
+def get_rss_mb():
+    """Return resident memory in MB from /proc/self/status when available."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        return None
+    return None
 
 
-def load_type_node_counts(counts_path):
-    """Load precomputed type node counts.
+def now_s(start_time):
+    return round(time.time() - start_time, 1)
 
-    Args:
-        counts_path: Path to type_node_counts.json
 
-    Returns:
-        Dict mapping type name to node count
-    """
-    print(f"Loading precomputed type node counts from {counts_path}...")
-    with open(counts_path, 'r') as f:
-        counts = json.load(f)
+def print_profile_event(stage, start_time, **metrics):
+    parts = [f"{k}={v}" for k, v in metrics.items()]
+    rss = get_rss_mb()
+    parts.append(f"elapsed_s={now_s(start_time)}")
+    if rss is not None:
+        parts.append(f"rss_mb={rss:.1f}")
+    print(f"[grouping] {stage}: " + " ".join(parts), flush=True)
 
-    print(f"  Loaded {len(counts)} type node counts")
-    return counts
+
+def write_progress_file(progress_file, payload):
+    if not progress_file:
+        return
+    tmp_path = f"{progress_file}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp_path, progress_file)
+
+
+def build_progress_payload(type1, type2, stage, start_time, counters, stage_timings, **extra):
+    payload = {
+        "type1": type1,
+        "type2": type2,
+        "stage": stage,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "elapsed_s": now_s(start_time),
+        "rss_mb": None if get_rss_mb() is None else round(get_rss_mb(), 1),
+        "counters": counters,
+        "stage_timings_s": {k: round(v, 3) for k, v in stage_timings.items()},
+    }
+    payload.update(extra)
+    return payload
+
+
+def get_max_predictor_count_for_precision(onehop_count, min_precision):
+    """Return the largest predictor count that can still meet min_precision."""
+    if min_precision <= 0:
+        return None
+    return onehop_count / min_precision
 
 
 def compute_total_possible(type1, type2, type_node_counts):
-    """Compute total possible pairs for a type pair.
-
-    Args:
-        type1: First type name
-        type2: Second type name
-        type_node_counts: Dict mapping type name to node count
-
-    Returns:
-        Total possible pairs (|type1 nodes| * |type2 nodes|)
-    """
+    """Compute total possible pairs for a type pair."""
     count1 = type_node_counts.get(type1, 0)
     count2 = type_node_counts.get(type2, 0)
     return count1 * count2
 
 
 def check_type_match(onehop_path, type1, type2):
-    """Check if a 1-hop metapath aggregates to a type pair.
-
-    This checks if the 1-hop path's types are descendants of the target type pair.
-    For example, SmallMolecule|treats|F|Disease matches (ChemicalEntity, DiseaseOrPhenotypicFeature)
-    because SmallMolecule is a descendant of ChemicalEntity and Disease is a descendant of
-    DiseaseOrPhenotypicFeature.
-
-    Args:
-        onehop_path: Pipe-separated 1-hop metapath like "Gene|affects|F|Disease"
-        type1: First type (may be hierarchical like ChemicalEntity)
-        type2: Second type (may be hierarchical like DiseaseOrPhenotypicFeature)
-
-    Returns:
-        True if the metapath aggregates to (type1, type2) in either direction
-    """
+    """Check if a 1-hop metapath aggregates to a type pair."""
     parts = onehop_path.split('|')
     if len(parts) != 4:
         return False
 
-    src_type, pred, direction, tgt_type = parts
-
-    # Get ancestors of each type (includes self)
+    src_type, _, _, tgt_type = parts
     src_ancestors = get_type_ancestors(src_type)
     tgt_ancestors = get_type_ancestors(tgt_type)
-
-    # Check if type pair is reachable via hierarchy
-    # Forward: src_type -> type1, tgt_type -> type2
     match_forward = (type1 in src_ancestors and type2 in tgt_ancestors)
-    # Reverse: src_type -> type2, tgt_type -> type1
     match_reverse = (type2 in src_ancestors and type1 in tgt_ancestors)
-
     return match_forward or match_reverse
 
 
 def contains_pseudo_type(metapath):
-    """Check if a metapath contains any pseudo-type nodes.
-
-    Pseudo-types contain '+' (e.g., Gene+Protein).
-    We filter these out of final output since their counts are
-    already included in the constituent type aggregations.
-    """
+    """Check if a metapath contains any pseudo-type nodes."""
     parts = metapath.split('|')
-    # Check node positions: 0, 3, 6, ...
     for i in range(0, len(parts), 3):
         if '+' in parts[i]:
             return True
@@ -130,14 +119,12 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
         return False
 
     parts = metapath.split('|')
-    # Extract nodes and predicates from metapath
-    # Format: Node|pred|dir|Node|pred|dir|...
     nodes = []
     predicates = []
     for i, part in enumerate(parts):
-        if i % 3 == 0:  # Node positions: 0, 3, 6, ...
+        if i % 3 == 0:
             nodes.append(part)
-        elif i % 3 == 1:  # Predicate positions: 1, 4, 7, ...
+        elif i % 3 == 1:
             predicates.append(part)
 
     if excluded_types:
@@ -147,7 +134,6 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
 
     if excluded_predicates:
         for pred in predicates:
-            # For compound predicates, also check if the base predicate is excluded
             if pred in excluded_predicates:
                 return True
             base_pred = parse_compound_predicate(pred)[0]
@@ -157,215 +143,442 @@ def should_exclude_metapath(metapath, excluded_types, excluded_predicates):
     return False
 
 
-def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
-                    aggregated_nhop_counts=None, type_node_counts=None,
-                    min_count=0, min_precision=0.0, excluded_types=None, excluded_predicates=None):
-    """Group all N-hop results for 1-hop metapaths between a type pair.
+def typepair_shard_path(explicit_shards_dir, type1, type2):
+    """Return the path to the explicit-count shard for a type pair."""
+    return os.path.join(explicit_shards_dir, f"{type1}__{type2}.pkl")
 
-    Args:
-        type1: First type (e.g., "Gene")
-        type2: Second type (e.g., "Disease")
-        file_list: List of result file paths to scan
-        output_dir: Output directory for grouped results
-        n_hops: Number of hops
-        aggregate: Whether to do hierarchical aggregation (default: True)
-        aggregated_nhop_counts: Dict mapping path variant -> global count (for both predictor and target counts)
-        type_node_counts: Dict mapping type name -> node count (for total_possible calculation)
-        min_count: Minimum N-hop count to include (default: 0)
-        min_precision: Minimum precision to include (default: 0.0)
-        excluded_types: Set of node types to exclude
-        excluded_predicates: Set of predicates to exclude
-    """
+
+def load_typepair_explicit_counts(explicit_shards_dir, type1, type2):
+    """Load explicit path counts relevant to the current type pair."""
+    shard_path = typepair_shard_path(explicit_shards_dir, type1, type2)
+    if not os.path.exists(shard_path):
+        raise FileNotFoundError(f"Explicit-count shard not found: {shard_path}")
+
+    with open(shard_path, "rb") as f:
+        return pickle.load(f)
+
+
+def build_target_variant_counts(explicit_items, type1, type2, start_time=None,
+                                progress_file=None, counters=None, stage_timings=None):
+    """Build local hierarchical counts for 1-hop target variants only."""
+    target_variant_counts = defaultdict(int)
+    target_expansion_cache = {}
+    counters = counters if counters is not None else {}
+    stage_timings = stage_timings if stage_timings is not None else {}
+
+    t0 = time.time()
+    next_progress_at = t0 + 30.0
+
+    for idx, (path, count) in enumerate(explicit_items, start=1):
+        _, predicates, _ = parse_metapath(path)
+        if len(predicates) != 1:
+            continue
+
+        counters["target_expansion_requests"] = counters.get("target_expansion_requests", 0) + 1
+        if path in target_expansion_cache:
+            variants = target_expansion_cache[path]
+            counters["target_expansion_cache_hits"] = counters.get("target_expansion_cache_hits", 0) + 1
+        else:
+            variants = list(expand_metapath_to_typepair_variants(path, type1, type2))
+            target_expansion_cache[path] = variants
+            counters["target_expansion_cache_misses"] = counters.get("target_expansion_cache_misses", 0) + 1
+            counters["target_variants_generated"] = counters.get("target_variants_generated", 0) + len(variants)
+
+        for variant in variants:
+            target_variant_counts[variant] += count
+
+        should_log = False
+        now = time.time()
+        if idx % 100000 == 0 or idx == len(explicit_items):
+            should_log = True
+        elif start_time and now >= next_progress_at:
+            should_log = True
+            next_progress_at = now + 30.0
+
+        if start_time and should_log:
+            target_paths = counters.get("target_expansion_cache_misses", 0)
+            avg_target_variants = round(counters.get("target_variants_generated", 0) / target_paths, 2) if target_paths else 0.0
+            print_profile_event(
+                "build_target_variant_counts",
+                start_time,
+                explicit_done=idx,
+                explicit_total=len(explicit_items),
+                target_variants=len(target_variant_counts),
+                target_cache=len(target_expansion_cache),
+                avg_target_variants=avg_target_variants,
+            )
+            write_progress_file(
+                progress_file,
+                build_progress_payload(
+                    type1,
+                    type2,
+                    "build_target_variant_counts",
+                    start_time,
+                    counters,
+                    stage_timings,
+                    explicit_done=idx,
+                    explicit_total=len(explicit_items),
+                    target_variants=len(target_variant_counts),
+                    target_cache=len(target_expansion_cache),
+                    avg_target_variants=avg_target_variants,
+                ),
+            )
+
+    stage_timings["build_target_variant_counts"] = stage_timings.get("build_target_variant_counts", 0.0) + (time.time() - t0)
+    counters["target_variant_count_size"] = len(target_variant_counts)
+    return dict(target_variant_counts), target_expansion_cache
+
+
+def expand_predictor_variants_for_typepair(path, type1, type2, predictor_expansion_cache, counters):
+    """Expand one predictor path with bounded endpoints and cache the result."""
+    counters["predictor_expansion_requests"] = counters.get("predictor_expansion_requests", 0) + 1
+    if path in predictor_expansion_cache:
+        counters["predictor_expansion_cache_hits"] = counters.get("predictor_expansion_cache_hits", 0) + 1
+        return predictor_expansion_cache[path]
+
+    variants = list(expand_metapath_to_typepair_variants(path, type1, type2))
+    predictor_expansion_cache[path] = variants
+    counters["predictor_expansion_cache_misses"] = counters.get("predictor_expansion_cache_misses", 0) + 1
+    counters["predictor_variants_generated"] = counters.get("predictor_variants_generated", 0) + len(variants)
+    return variants
+
+
+def build_candidate_variants_for_targets(onehop_to_overlaps, explicit_count_by_path, target_variant_counts,
+                                         type1, type2, min_precision, predictor_expansion_cache,
+                                         start_time, progress_file, counters, stage_timings):
+    """Build target-aware predictor candidates using overlap lower bounds."""
+    t0 = time.time()
+    candidate_rows_by_target = {}
+    all_candidate_variants = set()
+    total_targets = len(onehop_to_overlaps)
+
+    for target_index, (onehop_path, nhop_overlaps) in enumerate(onehop_to_overlaps.items(), start=1):
+        onehop_count_global = target_variant_counts.get(onehop_path, 0)
+        max_predictor_count = get_max_predictor_count_for_precision(onehop_count_global, min_precision)
+        aggregated_overlaps = defaultdict(int)
+        lower_bound_counts = defaultdict(int)
+        pruned_variants = set()
+        variants_pruned_lower_bound = 0
+
+        for nhop_path, overlap in nhop_overlaps.items():
+            explicit_predictor_count = explicit_count_by_path.get(nhop_path, 0)
+            nhop_variants = expand_predictor_variants_for_typepair(
+                nhop_path, type1, type2, predictor_expansion_cache, counters
+            )
+            for variant in nhop_variants:
+                if variant in pruned_variants:
+                    continue
+                proposed = lower_bound_counts[variant] + explicit_predictor_count
+                if max_predictor_count is not None and proposed > max_predictor_count:
+                    variants_pruned_lower_bound += 1
+                    pruned_variants.add(variant)
+                    lower_bound_counts.pop(variant, None)
+                    aggregated_overlaps.pop(variant, None)
+                    continue
+                lower_bound_counts[variant] = proposed
+                aggregated_overlaps[variant] += overlap
+
+        candidate_rows = {
+            variant: overlap
+            for variant, overlap in aggregated_overlaps.items()
+            if lower_bound_counts.get(variant, 0) > 0
+        }
+        candidate_rows_by_target[onehop_path] = candidate_rows
+        all_candidate_variants.update(candidate_rows)
+
+        counters["targets_candidate_built"] = counters.get("targets_candidate_built", 0) + 1
+        counters["candidate_variants"] = counters.get("candidate_variants", 0) + len(candidate_rows)
+        counters["precision_pruned_lower_bound"] = counters.get("precision_pruned_lower_bound", 0) + variants_pruned_lower_bound
+
+        print_profile_event(
+            "build_target_candidates",
+            start_time,
+            target_index=target_index,
+            total_targets=total_targets,
+            explicit_predictors=len(nhop_overlaps),
+            candidate_variants=len(candidate_rows),
+            lower_bound_pruned=variants_pruned_lower_bound,
+        )
+        write_progress_file(
+            progress_file,
+            build_progress_payload(
+                type1,
+                type2,
+                "build_target_candidates",
+                start_time,
+                counters,
+                stage_timings,
+                target_index=target_index,
+                total_targets=total_targets,
+                current_target=onehop_path,
+                explicit_predictors=len(nhop_overlaps),
+                candidate_variants=len(candidate_rows),
+                lower_bound_pruned=variants_pruned_lower_bound,
+            ),
+        )
+
+    stage_timings["build_target_candidates"] = stage_timings.get("build_target_candidates", 0.0) + (time.time() - t0)
+    counters["candidate_variant_union_size"] = len(all_candidate_variants)
+    return candidate_rows_by_target, all_candidate_variants
+
+
+def compute_exact_predictor_counts(explicit_items, candidate_variants, n_hops, type1, type2,
+                                   predictor_expansion_cache, start_time, progress_file,
+                                   counters, stage_timings):
+    """Compute exact predictor counts only for candidate variants that survived lower-bound pruning."""
+    t0 = time.time()
+    next_progress_at = t0 + 30.0
+    candidate_variants = set(candidate_variants)
+    exact_counts = defaultdict(int)
+    predictor_items = [(path, count) for path, count in explicit_items if len(parse_metapath(path)[1]) == n_hops]
+
+    for idx, (path, count) in enumerate(predictor_items, start=1):
+        variants = expand_predictor_variants_for_typepair(path, type1, type2, predictor_expansion_cache, counters)
+        matched = False
+        for variant in variants:
+            if variant in candidate_variants:
+                exact_counts[variant] += count
+                matched = True
+        if matched:
+            counters["predictor_items_contributing_to_candidates"] = counters.get("predictor_items_contributing_to_candidates", 0) + 1
+
+        now = time.time()
+        if start_time and (idx == len(predictor_items) or now >= next_progress_at):
+            next_progress_at = now + 30.0
+            print_profile_event(
+                "compute_exact_predictor_counts",
+                start_time,
+                predictors_done=idx,
+                predictor_total=len(predictor_items),
+                exact_variants=len(exact_counts),
+                candidate_variants=len(candidate_variants),
+            )
+            write_progress_file(
+                progress_file,
+                build_progress_payload(
+                    type1,
+                    type2,
+                    "compute_exact_predictor_counts",
+                    start_time,
+                    counters,
+                    stage_timings,
+                    predictors_done=idx,
+                    predictor_total=len(predictor_items),
+                    exact_variants=len(exact_counts),
+                    candidate_variants=len(candidate_variants),
+                ),
+            )
+
+    stage_timings["compute_exact_predictor_counts"] = stage_timings.get("compute_exact_predictor_counts", 0.0) + (time.time() - t0)
+    counters["exact_predictor_variant_count_size"] = len(exact_counts)
+    return dict(exact_counts)
+
+
+def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
+                    type_node_counts=None, min_count=0, min_precision=0.0,
+                    excluded_types=None, excluded_predicates=None,
+                    progress_file=None):
+    """Group all N-hop results for 1-hop metapaths between a type pair."""
     excluded_types = excluded_types or set()
     excluded_predicates = excluded_predicates or set()
+    start_time = time.time()
+    counters = {
+        "file_count": len(file_list),
+        "explicit_item_count": len(explicit_items),
+        "min_count": min_count,
+        "min_precision": min_precision,
+    }
+    stage_timings = {}
 
     print(f"Grouping for type pair: ({type1}, {type2})")
-    print(f"Aggregation: {'enabled' if aggregate else 'disabled'}")
-    if min_count > 0:
-        print(f"Min count filter: {min_count}")
-    if min_precision > 0:
-        print(f"Min precision filter: {min_precision}")
+    print(f"Min count filter: {min_count}")
+    print(f"Min precision filter: {min_precision}")
     if excluded_types:
         print(f"Excluded types: {sorted(excluded_types)}")
     if excluded_predicates:
         print(f"Excluded predicates: {sorted(excluded_predicates)}")
-    if aggregated_nhop_counts:
-        print(f"Using precomputed N-hop counts: {len(aggregated_nhop_counts)} paths")
-    if type_node_counts:
-        print(f"Using precomputed type node counts: {len(type_node_counts)} types")
+    print(f"Using explicit path shard: {len(explicit_items)} paths")
+    write_progress_file(
+        progress_file,
+        build_progress_payload(type1, type2, "start", start_time, counters, stage_timings),
+    )
 
-    # Compute total_possible for this type pair from node counts
+    explicit_count_by_path = dict(explicit_items)
+    target_variant_counts, target_expansion_cache = build_target_variant_counts(
+        explicit_items,
+        type1,
+        type2,
+        start_time=start_time,
+        progress_file=progress_file,
+        counters=counters,
+        stage_timings=stage_timings,
+    )
+    print(f"Local target variants: {len(target_variant_counts)}")
+    predictor_expansion_cache = {}
+
     total_possible_for_pair = compute_total_possible(type1, type2, type_node_counts) if type_node_counts else 0
     print(f"Total possible for ({type1}, {type2}): {total_possible_for_pair:,}")
 
-    print(f"Scanning {len(file_list)} result files (optimized subset)...")
-
-    # Data structure: onehop_path -> {nhop_path -> [overlap, nhop_count]}
-    # Note: total_possible is computed per type pair, not summed from rows
-    # We track BOTH overlap and nhop_count because nhop_count must be summed during aggregation
-    onehop_to_data = defaultdict(lambda: defaultdict(lambda: [0, 0]))
-
+    onehop_to_overlaps = defaultdict(lambda: defaultdict(int))
     files_processed = 0
     rows_found = 0
+    rows_scanned = 0
+    t_scan = time.time()
 
-    # Stream through all files to find matching 1-hops
     for file_path in file_list:
         files_processed += 1
-
         with open(file_path, 'r') as f:
-            # Skip header
             f.readline()
-
-            # Find matching rows
             for line in f:
+                rows_scanned += 1
                 parts = line.strip().split('\t')
                 if len(parts) != 6:
                     continue
 
                 nhop_path = parts[0]
-                nhop_count = int(parts[1])  # Read from results - must be aggregated, not looked up
                 onehop_path = parts[2]
-                # onehop_count = int(parts[3])  # Don't use - will look up from aggregated_counts
                 overlap = int(parts[4])
-                # total_possible from file is ignored - we compute it from type node counts
 
-                # Check if this 1-hop involves our type pair (hierarchically)
-                if check_type_match(onehop_path, type1, type2):
-                    rows_found += 1
+                if not check_type_match(onehop_path, type1, type2):
+                    continue
 
-                    # Expand 1-hop path to all hierarchical variants
-                    onehop_variants = expand_metapath_to_variants(onehop_path)
+                rows_found += 1
+                onehop_variants = target_expansion_cache.setdefault(
+                    onehop_path,
+                    list(expand_metapath_to_typepair_variants(onehop_path, type1, type2)),
+                )
+                for onehop_variant in onehop_variants:
+                    onehop_to_overlaps[onehop_variant][nhop_path] += overlap
 
-                    # Store overlap AND nhop_count for each variant that matches the type pair
-                    for onehop_variant in onehop_variants:
-                        # Only keep variants that match this job's type pair
-                        variant_parts = onehop_variant.split('|')
-                        if len(variant_parts) == 4:
-                            v_src, v_pred, v_dir, v_tgt = variant_parts
-                            # Check exact match (not hierarchical - variants are already expanded)
-                            if (v_src == type1 and v_tgt == type2) or (v_src == type2 and v_tgt == type1):
-                                data = onehop_to_data[onehop_variant][nhop_path]
-                                data[0] += overlap
-                                data[1] += nhop_count
+        if files_processed % 100 == 0 or files_processed == len(file_list):
+            print_profile_event(
+                "scan_overlap_files",
+                start_time,
+                files_processed=files_processed,
+                file_total=len(file_list),
+                rows_scanned=rows_scanned,
+                rows_matched=rows_found,
+                target_buckets=len(onehop_to_overlaps),
+            )
+            write_progress_file(
+                progress_file,
+                build_progress_payload(
+                    type1,
+                    type2,
+                    "scan_overlap_files",
+                    start_time,
+                    counters,
+                    stage_timings,
+                    files_processed=files_processed,
+                    file_total=len(file_list),
+                    rows_scanned=rows_scanned,
+                    rows_matched=rows_found,
+                    target_buckets=len(onehop_to_overlaps),
+                ),
+            )
 
-        if files_processed % 500 == 0:
-            print(f"  Processed {files_processed}/{len(file_list)} files, found {rows_found} matching rows")
+    stage_timings["scan_overlap_files"] = stage_timings.get("scan_overlap_files", 0.0) + (time.time() - t_scan)
+    counters["rows_scanned"] = rows_scanned
+    counters["rows_matched"] = rows_found
+    counters["target_bucket_count"] = len(onehop_to_overlaps)
 
     print(f"\n✓ Found {rows_found} total rows")
-    print(f"  Unique 1-hop metapaths: {len(onehop_to_data)}")
-
-    if len(onehop_to_data) == 0:
+    print(f"  Unique 1-hop metapaths: {len(onehop_to_overlaps)}")
+    if not onehop_to_overlaps:
         print("\nWARNING: No matching 1-hop metapaths found. Skipping output.")
         return
 
-    # Process each 1-hop metapath
-    for onehop_path, nhop_data in onehop_to_data.items():
+    candidate_rows_by_target, candidate_variants = build_candidate_variants_for_targets(
+        onehop_to_overlaps,
+        explicit_count_by_path,
+        target_variant_counts,
+        type1,
+        type2,
+        min_precision,
+        predictor_expansion_cache,
+        start_time,
+        progress_file,
+        counters,
+        stage_timings,
+    )
+    print(f"\nCandidate predictor variants across targets: {len(candidate_variants)}")
+
+    exact_predictor_counts = compute_exact_predictor_counts(
+        explicit_items,
+        candidate_variants,
+        n_hops,
+        type1,
+        type2,
+        predictor_expansion_cache,
+        start_time,
+        progress_file,
+        counters,
+        stage_timings,
+    )
+    print(f"Exact candidate predictor counts computed: {len(exact_predictor_counts)}")
+
+    counters["targets_processed"] = 0
+    counters["output_files_written"] = 0
+    counters["output_rows_written"] = 0
+
+    total_targets = len(onehop_to_overlaps)
+    for target_index, (onehop_path, nhop_overlaps) in enumerate(onehop_to_overlaps.items(), start=1):
         print(f"\nProcessing 1-hop: {onehop_path}")
-        print(f"  {len(nhop_data)} unique N-hop paths")
+        print(f"  {len(nhop_overlaps)} explicit N-hop paths with overlap")
+        t_target = time.time()
 
-        # Get onehop_count from precomputed lookup
-        if aggregated_nhop_counts and onehop_path in aggregated_nhop_counts:
-            onehop_count_global = aggregated_nhop_counts[onehop_path]
-        else:
-            # Fallback: this shouldn't happen if prepare_grouping.py was run
-            print(f"  WARNING: No precomputed count for {onehop_path}, using 0")
-            onehop_count_global = 0
+        onehop_count_global = target_variant_counts.get(onehop_path, 0)
+        aggregated_overlaps = candidate_rows_by_target.get(onehop_path, {})
+        explicit_predictors_for_target = len(nhop_overlaps)
 
-        # Apply hierarchical aggregation if enabled
-        # Data structure: nhop_variant -> overlap
-        # NOTE: nhop_count is looked up from aggregated_nhop_counts, NOT accumulated here
-        # This ensures we get the correct global count for each variant
-        aggregated_overlaps = {}
-        if aggregate:
-            print(f"  Applying hierarchical aggregation...")
+        print(f"  Aggregated predictor variants: {len(aggregated_overlaps)}")
 
-            # For each nhop_path, expand and aggregate overlap only
-            final_aggregated = defaultdict(int)
-
-            for nhop_path, (overlap, _nhop_count) in nhop_data.items():
-                # Expand nhop_path to all hierarchical variants
-                nhop_variants = expand_metapath_to_variants(nhop_path)
-
-                # Add overlap to all variants
-                # nhop_count will be looked up from aggregated_nhop_counts when writing
-                for variant in nhop_variants:
-                    final_aggregated[variant] += overlap
-
-            aggregated_overlaps = dict(final_aggregated)
-            print(f"    N-hop paths expanded to {len(aggregated_overlaps)} aggregated paths")
-        else:
-            # No aggregation - extract just the overlap
-            aggregated_overlaps = {k: v[0] for k, v in nhop_data.items()}
-
-        # Check if 1-hop should be excluded
         if should_exclude_metapath(onehop_path, excluded_types, excluded_predicates):
-            print(f"  Skipping (excluded type/predicate in 1-hop)")
+            print("  Skipping (excluded type/predicate in 1-hop)")
             continue
-
-        # Skip 1-hop paths containing pseudo-types (their counts are in constituent types)
         if contains_pseudo_type(onehop_path):
-            print(f"  Skipping (pseudo-type in 1-hop)")
+            print("  Skipping (pseudo-type in 1-hop)")
             continue
 
-        # Write output file for this 1-hop (zstd compressed)
         safe_filename = onehop_path.replace('|', '_').replace(':', '_').replace(' ', '_')
         output_file = f"{output_dir}/{safe_filename}.tsv.zst"
 
-        # Filter and count rows
         rows_written = 0
         rows_filtered_excluded = 0
         rows_filtered_pseudo = 0
         rows_filtered_count = 0
         rows_filtered_precision = 0
-        rows_missing_nhop_count = 0
+        t_write = time.time()
 
         with zstandard.open(output_file, 'wt') as out:
-            # Header
             out.write("predictor_metapath\tpredictor_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
-            # Sort by overlap descending
             sorted_items = sorted(aggregated_overlaps.items(), key=lambda x: x[1], reverse=True)
-
-            for nhop_path, overlap in sorted_items:
-                # Filter by excluded types/predicates
-                if should_exclude_metapath(nhop_path, excluded_types, excluded_predicates):
+            for nhop_variant, overlap in sorted_items:
+                if should_exclude_metapath(nhop_variant, excluded_types, excluded_predicates):
                     rows_filtered_excluded += 1
                     continue
-
-                # Filter out pseudo-types (their counts are in constituent types)
-                if contains_pseudo_type(nhop_path):
+                if contains_pseudo_type(nhop_variant):
                     rows_filtered_pseudo += 1
                     continue
 
-                # Look up nhop_count from precomputed aggregated N-hop counts
-                # This gives the correct global count for this variant
-                if aggregated_nhop_counts and nhop_path in aggregated_nhop_counts:
-                    nhop_count = aggregated_nhop_counts[nhop_path]
-                else:
-                    # Path not in precomputed counts - skip
-                    rows_missing_nhop_count += 1
-                    continue
-
-                # Filter by minimum count
+                nhop_count = exact_predictor_counts.get(nhop_variant, 0)
                 if nhop_count < min_count:
                     rows_filtered_count += 1
                     continue
 
-                # Calculate metrics using type-pair total_possible
                 metrics = calculate_metrics(nhop_count, onehop_count_global, overlap, total_possible_for_pair)
-
-                # Filter by minimum precision
                 if metrics['precision'] < min_precision:
                     rows_filtered_precision += 1
                     continue
 
-                # Write row
-                out.write(f"{nhop_path}\t{nhop_count}\t{overlap}\t{total_possible_for_pair}\t")
+                out.write(f"{nhop_variant}\t{nhop_count}\t{overlap}\t{total_possible_for_pair}\t")
                 out.write(f"{metrics['precision']:.6f}\t{metrics['recall']:.6f}\t")
                 out.write(f"{metrics['f1']:.6f}\t{metrics['mcc']:.6f}\t")
                 out.write(f"{metrics['specificity']:.6f}\t{metrics['npv']:.6f}\n")
                 rows_written += 1
+        stage_timings["write_output"] = stage_timings.get("write_output", 0.0) + (time.time() - t_write)
 
         print(f"  Written {rows_written} rows to {output_file}")
         if rows_filtered_excluded > 0:
@@ -376,101 +589,84 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, aggregate=True,
             print(f"    Filtered (count < {min_count}): {rows_filtered_count}")
         if rows_filtered_precision > 0:
             print(f"    Filtered (precision < {min_precision}): {rows_filtered_precision}")
-        if rows_missing_nhop_count > 0:
-            print(f"    WARNING: Skipped {rows_missing_nhop_count} paths missing from aggregated_nhop_counts")
+
+        stage_timings["process_targets_total"] = stage_timings.get("process_targets_total", 0.0) + (time.time() - t_target)
+        counters["targets_processed"] += 1
+        counters["output_files_written"] += 1
+        counters["output_rows_written"] += rows_written
+        counters["rows_filtered_excluded"] = counters.get("rows_filtered_excluded", 0) + rows_filtered_excluded
+        counters["rows_filtered_pseudo"] = counters.get("rows_filtered_pseudo", 0) + rows_filtered_pseudo
+        counters["rows_filtered_count"] = counters.get("rows_filtered_count", 0) + rows_filtered_count
+        counters["rows_filtered_precision"] = counters.get("rows_filtered_precision", 0) + rows_filtered_precision
+
+        print_profile_event(
+            "process_target",
+            start_time,
+            target_index=target_index,
+            total_targets=total_targets,
+            explicit_predictors=explicit_predictors_for_target,
+            aggregated_predictor_variants=len(aggregated_overlaps),
+            rows_written=rows_written,
+        )
+        write_progress_file(
+            progress_file,
+            build_progress_payload(
+                type1,
+                type2,
+                "process_target",
+                start_time,
+                counters,
+                stage_timings,
+                target_index=target_index,
+                total_targets=total_targets,
+                current_target=onehop_path,
+                explicit_predictors=explicit_predictors_for_target,
+                aggregated_predictor_variants=len(aggregated_overlaps),
+                rows_written=rows_written,
+            ),
+        )
 
     print(f"\n✓ All 1-hop metapaths processed for type pair ({type1}, {type2})")
+    write_progress_file(
+        progress_file,
+        build_progress_payload(
+            type1,
+            type2,
+            "complete",
+            start_time,
+            counters,
+            stage_timings,
+            total_targets=total_targets,
+        ),
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Group results for all 1-hop metapaths between a type pair'
-    )
-    parser.add_argument(
-        '--type1',
-        type=str,
-        required=True,
-        help='First type (e.g., "Gene")'
-    )
-    parser.add_argument(
-        '--type2',
-        type=str,
-        required=True,
-        help='Second type (e.g., "Disease")'
-    )
-    parser.add_argument(
-        '--file-list',
-        type=str,
-        required=True,
-        help='Path to file containing list of result files to scan'
-    )
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        required=True,
-        help='Output directory for grouped results'
-    )
-    parser.add_argument(
-        '--n-hops',
-        type=int,
-        required=True,
-        help='Number of hops'
-    )
-    parser.add_argument(
-        '--explicit-only',
-        action='store_true',
-        help='Disable hierarchical aggregation (explicit results only)'
-    )
-    parser.add_argument(
-        '--aggregated-nhop-counts',
-        type=str,
-        required=True,
-        help='Path to aggregated_nhop_counts.json (N-hop counts from prepare_grouping.py)'
-    )
-    parser.add_argument(
-        '--type-node-counts',
-        type=str,
-        required=True,
-        help='Path to type_node_counts.json (from prepare_grouping.py)'
-    )
-    parser.add_argument(
-        '--min-count',
-        type=int,
-        default=0,
-        help='Minimum N-hop count to include in output (default: 0)'
-    )
-    parser.add_argument(
-        '--min-precision',
-        type=float,
-        default=0.0,
-        help='Minimum precision to include in output (default: 0)'
-    )
-    parser.add_argument(
-        '--exclude-types',
-        type=str,
-        default='Entity,ThingWithTaxon',
-        help='Comma-separated list of node types to exclude (default: Entity,ThingWithTaxon)'
-    )
-    parser.add_argument(
-        '--exclude-predicates',
-        type=str,
-        default='related_to_at_instance_level,related_to_at_concept_level',
-        help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)'
-    )
+    parser = argparse.ArgumentParser(description='Group results for all 1-hop metapaths between a type pair')
+    parser.add_argument('--type1', type=str, required=True, help='First type')
+    parser.add_argument('--type2', type=str, required=True, help='Second type')
+    parser.add_argument('--file-list', type=str, required=True, help='Path to file containing list of result files to scan')
+    parser.add_argument('--output-dir', type=str, required=True, help='Output directory for grouped results')
+    parser.add_argument('--n-hops', type=int, required=True, help='Number of hops')
+    parser.add_argument('--explicit-shards-dir', type=str, required=True, help='Directory containing type-pair explicit-count shards')
+    parser.add_argument('--type-node-counts', type=str, required=True, help='Path to type_node_counts.json')
+    parser.add_argument('--min-count', type=int, default=0, help='Minimum N-hop count to include')
+    parser.add_argument('--min-precision', type=float, default=0.0, help='Minimum precision to include')
+    parser.add_argument('--exclude-types', type=str, default='Entity,ThingWithTaxon', help='Comma-separated list of node types to exclude')
+    parser.add_argument('--exclude-predicates', type=str, default='related_to_at_instance_level,related_to_at_concept_level', help='Comma-separated list of predicates to exclude')
+    parser.add_argument('--progress-file', type=str, default=None, help='Optional path to write per-job profiling/progress JSON')
 
     args = parser.parse_args()
 
-    # Build exclusion sets
     excluded_types = set(t.strip() for t in args.exclude_types.split(',') if t.strip())
     excluded_predicates = set(p.strip() for p in args.exclude_predicates.split(',') if p.strip())
 
-    # Read file list from file
     with open(args.file_list, 'r') as f:
         file_list = [line.strip() for line in f if line.strip()]
 
-    # Load precomputed data
-    aggregated_nhop_counts = load_aggregated_nhop_counts(args.aggregated_nhop_counts)
-    type_node_counts = load_type_node_counts(args.type_node_counts)
+    explicit_items = load_typepair_explicit_counts(args.explicit_shards_dir, args.type1, args.type2)
+    with open(args.type_node_counts, 'r') as f:
+        type_node_counts = json.load(f)
 
     group_type_pair(
         type1=args.type1,
@@ -478,13 +674,13 @@ def main():
         file_list=file_list,
         output_dir=args.output_dir,
         n_hops=args.n_hops,
-        aggregate=not args.explicit_only,
-        aggregated_nhop_counts=aggregated_nhop_counts,
+        explicit_items=explicit_items,
         type_node_counts=type_node_counts,
         min_count=args.min_count,
         min_precision=args.min_precision,
         excluded_types=excluded_types,
-        excluded_predicates=excluded_predicates
+        excluded_predicates=excluded_predicates,
+        progress_file=args.progress_file,
     )
 
 

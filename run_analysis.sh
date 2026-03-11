@@ -45,6 +45,9 @@ fi
 
 # Loop over each N-hop value
 for N_HOPS in "${NHOP_VALUES[@]}"; do
+    RESULTS_DIR="results_${N_HOPS}hop"
+    TMP_DIR="${RESULTS_DIR}/_tmp_prepare_grouping"
+    REDUCEA_MEM_GB="${REDUCEA_MEM_GB:-250}"
     echo ""
     echo "######################################"
     echo "# STARTING ${N_HOPS}-HOP ANALYSIS"
@@ -67,30 +70,42 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
         --n-hops "$N_HOPS" \
         --partition lowpri
 
-    # Step 3: Precompute aggregated N-hop counts on SLURM
+    # Step 3: Precompute explicit path counts on SLURM
     echo ""
-    echo "Step 3: Precomputing aggregated N-hop counts on SLURM..."
-    precompute_output=$(uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops "$N_HOPS")
+    echo "Step 3: Precomputing explicit path counts on SLURM..."
+    echo "  - Cleaning old temp dir: ${TMP_DIR}"
+    echo "  - Reduce A memory: ${REDUCEA_MEM_GB}G"
+    rm -rf "$TMP_DIR"
+    precompute_output=$(uv run python src/pipeline/precompute_aggregated_counts_slurm.py \
+        --n-hops "$N_HOPS" \
+        --tmp-dir "$TMP_DIR" \
+        --mem-reducea "$REDUCEA_MEM_GB")
     echo "$precompute_output"
 
-    reduce_b_job_id=$(echo "$precompute_output" | awk '/Reduce B:/ {print $3}')
-    if [ -n "$reduce_b_job_id" ]; then
-        echo "Waiting for Reduce B job ${reduce_b_job_id} to finish..."
-        while squeue -j "$reduce_b_job_id" | tail -n +2 | grep -q .; do
+    reduce_a_job_id=$(echo "$precompute_output" | awk '/Reduce A:/ {print $3}')
+    if [ -n "$reduce_a_job_id" ]; then
+        echo "Waiting for Reduce A job ${reduce_a_job_id} to finish..."
+        while squeue -j "$reduce_a_job_id" | tail -n +2 | grep -q .; do
             sleep 30
         done
-        echo "Reduce B job complete."
+        reduce_a_state=$(sacct -j "$reduce_a_job_id" --format=State --noheader | awk 'NF {print $1; exit}')
+        echo "Reduce A final state: ${reduce_a_state}"
+        if [ "$reduce_a_state" != "COMPLETED" ]; then
+            echo "ERROR: Reduce A did not complete successfully."
+            exit 1
+        fi
+        echo "Reduce A job complete."
     else
-        echo "WARNING: Could not parse Reduce B job ID. Proceeding without wait."
+        echo "WARNING: Could not parse Reduce A job ID. Proceeding without wait."
     fi
 
-    # Step 4: Prepare distributed grouping (create type pair jobs + precompute counts)
+    # Step 4: Prepare distributed grouping (create type pair jobs)
     echo ""
     echo "Step 4: Preparing distributed grouping..."
     echo "  - Creating type pair jobs"
-    echo "  - Loading aggregated N-hop counts (from SLURM precompute)"
+    echo "  - Loading type-pair explicit-count shards from ${TMP_DIR}"
     echo "  - Computing type node counts"
-    uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS" --skip-aggregated-precompute
+    uv run python src/pipeline/prepare_grouping.py --n-hops "$N_HOPS" --tmp-dir "$TMP_DIR"
 
     # Step 5: Run distributed grouping (one SLURM job per type pair)
     echo ""

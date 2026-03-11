@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=group_typepair
-#SBATCH --time=2:00:00
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=1
 
 # Group results for all 1-hop metapaths between a type pair
@@ -17,12 +17,11 @@
 #   $9: output_dir - Output directory for grouped results (optional)
 #
 # This script:
-# 1. Receives type pair and file list from orchestrator (no manifest access!)
-# 2. Calls Python worker to stream through specified files
-# 3. Finds all 1-hop metapaths between type1 and type2
-# 4. Aggregates and computes metrics for each
+# 1. Receives type pair and file list from orchestrator
+# 2. Loads the explicit-count shard for that type pair
+# 3. Builds local hierarchical counts for predictors and targets
+# 4. Streams relevant overlap rows and aggregates metrics
 # 5. Applies filters (min-count, min-precision, excluded types/predicates)
-# 6. Outputs to grouped_by_results_{n_hops}hop/<sanitized_typepair>/
 
 set -e
 
@@ -44,8 +43,13 @@ fi
 
 OUTPUT_DIR="${OUTPUT_DIR_ARG:-grouped_by_results_${N_HOPS}hop}"
 RESULTS_DIR="results_${N_HOPS}hop"
-AGGREGATED_NHOP_COUNTS="${RESULTS_DIR}/aggregated_nhop_counts.json"
 TYPE_NODE_COUNTS="${RESULTS_DIR}/type_node_counts.json"
+EXPLICIT_SHARDS_DIR="${RESULTS_DIR}/_tmp_prepare_grouping/typepair_explicit_paths"
+LOG_DIR="logs_grouping_${N_HOPS}hop"
+SAFE_TYPE1=$(echo "$TYPE1" | tr ':/+ ' '____')
+SAFE_TYPE2=$(echo "$TYPE2" | tr ':/+ ' '____')
+JOB_TAG="${SLURM_JOB_ID:-manual}"
+PROGRESS_FILE="${LOG_DIR}/progress_${SAFE_TYPE1}__${SAFE_TYPE2}__${JOB_TAG}.json"
 
 echo "=========================================="
 echo "GROUPING TYPE PAIR"
@@ -54,8 +58,9 @@ echo "Type pair: ($TYPE1, $TYPE2)"
 echo "File list: $FILE_LIST_PATH"
 echo "N-hops: $N_HOPS"
 echo "Output dir: $OUTPUT_DIR"
-echo "Aggregated N-hop counts: $AGGREGATED_NHOP_COUNTS"
+echo "Explicit-count shards: $EXPLICIT_SHARDS_DIR"
 echo "Type node counts: $TYPE_NODE_COUNTS"
+echo "Progress file: $PROGRESS_FILE"
 echo "Min count: $MIN_COUNT"
 echo "Min precision: $MIN_PRECISION"
 echo "Exclude types: $EXCLUDE_TYPES"
@@ -68,10 +73,10 @@ if [ ! -f "$FILE_LIST_PATH" ]; then
     exit 1
 fi
 
-# Check if aggregated N-hop counts file exists
-if [ ! -f "$AGGREGATED_NHOP_COUNTS" ]; then
-    echo "ERROR: Aggregated N-hop counts file not found: $AGGREGATED_NHOP_COUNTS"
-    echo "Run prepare_grouping.py first to generate this file."
+# Check if explicit-count shard dir exists
+if [ ! -d "$EXPLICIT_SHARDS_DIR" ]; then
+    echo "ERROR: Explicit-count shard directory not found: $EXPLICIT_SHARDS_DIR"
+    echo "Run precompute_aggregated_counts_slurm.py first."
     exit 1
 fi
 
@@ -89,6 +94,7 @@ echo ""
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
+mkdir -p "$LOG_DIR"
 
 # Run Python worker
 uv run python src/pipeline/workers/run_grouping.py \
@@ -97,12 +103,13 @@ uv run python src/pipeline/workers/run_grouping.py \
     --file-list "$FILE_LIST_PATH" \
     --output-dir "$OUTPUT_DIR" \
     --n-hops "$N_HOPS" \
-    --aggregated-nhop-counts "$AGGREGATED_NHOP_COUNTS" \
+    --explicit-shards-dir "$EXPLICIT_SHARDS_DIR" \
     --type-node-counts "$TYPE_NODE_COUNTS" \
     --min-count "$MIN_COUNT" \
     --min-precision "$MIN_PRECISION" \
     --exclude-types "$EXCLUDE_TYPES" \
-    --exclude-predicates "$EXCLUDE_PREDICATES"
+    --exclude-predicates "$EXCLUDE_PREDICATES" \
+    --progress-file "$PROGRESS_FILE"
 
 echo ""
 echo "✓ Grouping complete"
