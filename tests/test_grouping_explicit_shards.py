@@ -3,10 +3,13 @@
 import os
 import pickle
 import tempfile
+import time
 
 import zstandard
 
+from library.aggregation import traverse_metapath_variants_for_typepair_pruned
 from pipeline.workers.run_grouping import (
+    build_candidate_variants_for_targets,
     build_target_variant_counts,
     group_type_pair,
 )
@@ -73,3 +76,93 @@ def test_group_type_pair_uses_explicit_shard_counts_for_precision_pruning():
             not row.startswith("ChemicalEntity|affects|F|BiologicalEntity|treats|F|Disease\t5000\t")
             for row in rows[1:]
         )
+
+
+def test_pruned_variant_walk_cuts_off_broader_states():
+    visited = []
+
+    def visit(variant):
+        visited.append(variant)
+        return variant == "ChemicalEntity|treats|F|Disease"
+
+    traverse_metapath_variants_for_typepair_pruned(
+        "SmallMolecule|treats|F|Disease",
+        type1="ChemicalEntity",
+        type2="Disease",
+        visit_variant=visit,
+    )
+
+    assert "ChemicalEntity|treats|F|Disease" in visited
+    assert visited.count("ChemicalEntity|treats|F|Disease") == 1
+    assert "NamedThing|treats|F|Disease" not in visited
+
+
+def test_pruned_state_walk_suppresses_descendant_variants():
+    visited = []
+
+    def visit_state(_state_key):
+        return True
+
+    def visit_variant(variant):
+        visited.append(variant)
+        return False
+
+    traverse_metapath_variants_for_typepair_pruned(
+        "SmallMolecule|treats|F|Disease",
+        type1="ChemicalEntity",
+        type2="Disease",
+        visit_variant=visit_variant,
+        visit_state=visit_state,
+    )
+
+    assert visited == []
+
+
+def test_pruned_states_carry_forward_across_targets_in_descending_target_count_order(monkeypatch):
+    visits = []
+
+    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None):
+        assert visit_state is not None
+        should_prune = visit_state(("shared_state",))
+        visits.append(should_prune)
+        if not should_prune:
+            visit_variant("ChemicalEntity|related_to|A|Disease")
+
+    monkeypatch.setattr(
+        "pipeline.workers.run_grouping.traverse_metapath_variants_for_typepair_pruned",
+        fake_traverse,
+    )
+
+    onehop_to_overlaps = {
+        "ChemicalEntity|small_target|A|Disease": {"predictor": 1},
+        "ChemicalEntity|big_target|A|Disease": {"predictor": 1},
+    }
+    explicit_count_by_path = {"predictor": 150}
+    target_variant_counts = {
+        "ChemicalEntity|big_target|A|Disease": 100,
+        "ChemicalEntity|small_target|A|Disease": 50,
+    }
+    counters = {}
+    stage_timings = {}
+
+    candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
+        onehop_to_overlaps=onehop_to_overlaps,
+        explicit_count_by_path=explicit_count_by_path,
+        target_variant_counts=target_variant_counts,
+        type1="ChemicalEntity",
+        type2="Disease",
+        min_precision=1.0,
+        predictor_expansion_cache={},
+        start_time=time.time(),
+        progress_file=None,
+        counters=counters,
+        stage_timings=stage_timings,
+    )
+
+    assert visits == [True, True]
+    assert counters["targets_sorted_by_target_count"] == 2
+    assert counters["candidate_states_branch_pruned"] == 1
+    assert counters["candidate_state_revisits_pruned"] == 1
+    assert candidate_rows_by_target["ChemicalEntity|big_target|A|Disease"] == {}
+    assert candidate_rows_by_target["ChemicalEntity|small_target|A|Disease"] == {}
+    assert all_candidate_variants == set()
