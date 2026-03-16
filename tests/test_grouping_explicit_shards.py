@@ -9,6 +9,7 @@ import zstandard
 
 from library.aggregation import (
     expand_metapath_to_typepair_variants,
+    promote_metapath_endpoints_to_typepair_starts,
     traverse_metapath_variants_for_typepair_pruned,
 )
 from pipeline.workers.run_grouping import (
@@ -147,8 +148,25 @@ def test_typepair_expansion_emits_both_valid_endpoint_assignments():
     assert all(v.endswith("|NamedThing") for v in variants)
 
 
+def test_endpoint_promotion_collapses_explicit_predictors_to_same_start():
+    left = promote_metapath_endpoints_to_typepair_starts(
+        "SmallMolecule|treats|F|Disease",
+        type1="ChemicalEntity",
+        type2="Disease",
+    )
+    right = promote_metapath_endpoints_to_typepair_starts(
+        "Drug|treats|F|Disease",
+        type1="ChemicalEntity",
+        type2="Disease",
+    )
+
+    assert left == ["ChemicalEntity|treats|F|Disease"]
+    assert right == ["ChemicalEntity|treats|F|Disease"]
+
+
 def test_pruned_states_carry_forward_across_targets_in_descending_target_count_order(monkeypatch):
     visits = []
+    predictor_path = "SmallMolecule|treats|F|Disease"
 
     def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None):
         assert visit_state is not None
@@ -163,10 +181,10 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
     )
 
     onehop_to_overlaps = {
-        "ChemicalEntity|small_target|A|Disease": {"predictor": 1},
-        "ChemicalEntity|big_target|A|Disease": {"predictor": 1},
+        "ChemicalEntity|small_target|A|Disease": {predictor_path: 1},
+        "ChemicalEntity|big_target|A|Disease": {predictor_path: 1},
     }
-    explicit_count_by_path = {"predictor": 150}
+    explicit_count_by_path = {predictor_path: 150}
     target_variant_counts = {
         "ChemicalEntity|big_target|A|Disease": 100,
         "ChemicalEntity|small_target|A|Disease": 50,

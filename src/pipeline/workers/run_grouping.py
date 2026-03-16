@@ -21,6 +21,7 @@ import zstandard
 from library.hierarchy import get_type_ancestors
 from library.aggregation import (
     expand_metapath_to_typepair_variants,
+    promote_metapath_endpoints_to_typepair_starts,
     traverse_metapath_variants_for_typepair_pruned,
     calculate_metrics,
     parse_compound_predicate,
@@ -274,22 +275,38 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, explicit_count_by_p
         variants_pruned_lower_bound = 0
         target_branch_pruned_at_start = counters.get("candidate_variants_branch_pruned", 0)
         target_accepted_at_start = counters.get("candidate_variants_accepted", 0)
-        target_predictors = sorted(
+        raw_target_predictors = sorted(
             nhop_overlaps.items(),
             key=lambda item: explicit_count_by_path.get(item[0], 0),
             reverse=True,
         )
+        promoted_target_predictors = {}
+        for nhop_path, overlap in raw_target_predictors:
+            explicit_predictor_count = explicit_count_by_path.get(nhop_path, 0)
+            promoted_starts = promote_metapath_endpoints_to_typepair_starts(nhop_path, type1, type2)
+            counters["predictor_endpoint_promotions"] = counters.get("predictor_endpoint_promotions", 0) + len(promoted_starts)
+            for promoted_path in promoted_starts:
+                if promoted_path not in promoted_target_predictors:
+                    promoted_target_predictors[promoted_path] = [0, 0]
+                promoted_target_predictors[promoted_path][0] += overlap
+                promoted_target_predictors[promoted_path][1] += explicit_predictor_count
+
+        target_predictors = sorted(
+            promoted_target_predictors.items(),
+            key=lambda item: item[1][1],
+            reverse=True,
+        )
         explicit_predictor_total = len(target_predictors)
         max_explicit_predictor_count = (
-            explicit_count_by_path.get(target_predictors[0][0], 0) if target_predictors else 0
+            target_predictors[0][1][1] if target_predictors else 0
         )
         min_explicit_predictor_count = (
-            explicit_count_by_path.get(target_predictors[-1][0], 0) if target_predictors else 0
+            target_predictors[-1][1][1] if target_predictors else 0
         )
         counters["targets_sorted_by_predictor_count"] = counters.get("targets_sorted_by_predictor_count", 0) + 1
 
-        for predictor_index, (nhop_path, overlap) in enumerate(target_predictors, start=1):
-            explicit_predictor_count = explicit_count_by_path.get(nhop_path, 0)
+        for predictor_index, (nhop_path, predictor_payload) in enumerate(target_predictors, start=1):
+            overlap, explicit_predictor_count = predictor_payload
             counters["predictor_expansion_requests"] = counters.get("predictor_expansion_requests", 0) + 1
 
             def visit_state(state_signature):

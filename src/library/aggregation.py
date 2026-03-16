@@ -507,6 +507,38 @@ def expand_metapath_to_typepair_variants(metapath: str, type1: str, type2: str) 
     return set(generate_metapath_variants_for_typepair(metapath, type1, type2))
 
 
+def promote_metapath_endpoints_to_typepair_starts(metapath: str, type1: str, type2: str) -> List[str]:
+    """Return the direct endpoint-promoted starting form(s) for a type-pair job."""
+    (
+        nodes,
+        predicates,
+        directions,
+        assignment_dimensions,
+        node_dim_count,
+        symmetric_preds,
+        required_endpoints,
+    ) = _build_typepair_variant_dimensions(metapath, type1, type2)
+
+    promoted = []
+    seen = set()
+    for dimensions in assignment_dimensions:
+        start = tuple(0 for _ in dimensions)
+        for variant in _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            required_endpoints,
+            start,
+        ):
+            if variant not in seen:
+                seen.add(variant)
+                promoted.append(variant)
+    return promoted
+
+
 def _build_typepair_variant_dimensions(metapath: str, type1: str, type2: str):
     """Return assignment-specific expansion dimensions and metadata for type-pair traversal."""
     nodes, predicates, directions = parse_metapath(metapath)
