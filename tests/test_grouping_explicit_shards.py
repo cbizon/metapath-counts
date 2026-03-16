@@ -7,7 +7,10 @@ import time
 
 import zstandard
 
-from library.aggregation import traverse_metapath_variants_for_typepair_pruned
+from library.aggregation import (
+    expand_metapath_to_typepair_variants,
+    traverse_metapath_variants_for_typepair_pruned,
+)
 from pipeline.workers.run_grouping import (
     build_candidate_variants_for_targets,
     build_target_variant_counts,
@@ -116,6 +119,32 @@ def test_pruned_state_walk_suppresses_descendant_variants():
     )
 
     assert visited == []
+
+
+def test_typepair_expansion_promotes_endpoints_directly_to_job_pair():
+    variants = expand_metapath_to_typepair_variants(
+        "SmallMolecule|treats|F|Disease",
+        type1="ChemicalEntity",
+        type2="Disease",
+    )
+
+    assert "ChemicalEntity|treats|F|Disease" in variants
+    assert all(v.startswith("ChemicalEntity|") for v in variants)
+    assert all(v.endswith("|Disease") for v in variants)
+    assert all("SmallMolecule|" not in v for v in variants)
+
+
+def test_typepair_expansion_emits_both_valid_endpoint_assignments():
+    variants = expand_metapath_to_typepair_variants(
+        "SmallMolecule|treats|F|Drug",
+        type1="NamedThing",
+        type2="ChemicalEntity",
+    )
+
+    assert "ChemicalEntity|treats|F|NamedThing" in variants
+    assert "ChemicalEntity|treats|R|NamedThing" in variants
+    assert all(v.startswith("ChemicalEntity|") for v in variants)
+    assert all(v.endswith("|NamedThing") for v in variants)
 
 
 def test_pruned_states_carry_forward_across_targets_in_descending_target_count_order(monkeypatch):

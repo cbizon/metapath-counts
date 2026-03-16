@@ -50,17 +50,13 @@ def trace_variants_for_predictor(
     out,
     stop_after_visits: int | None = None,
 ) -> None:
-    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds, required_endpoints = (
+    nodes, predicates, directions, assignment_dimensions, node_dim_count, symmetric_preds, required_endpoints = (
         _build_typepair_variant_dimensions(path, type1, type2)
     )
-    start = tuple(0 for _ in dimensions)
-    stack = [start]
-    seen_indexes = {start}
-    parents: dict[tuple[int, ...], tuple[int, ...] | None] = {start: None}
     yielded_variants = set()
     visits_emitted = 0
 
-    def describe_state(indexes: tuple[int, ...]) -> str:
+    def describe_state(dimensions, indexes: tuple[int, ...]) -> str:
         node_choices = []
         for i in range(node_dim_count):
             node_choices.append(f"node{i}={dimensions[i][indexes[i]]}")
@@ -69,76 +65,83 @@ def trace_variants_for_predictor(
             pred_choices.append(f"pred{i}={dimensions[node_dim_count + i][indexes[node_dim_count + i]]}")
         return " ".join(node_choices + pred_choices)
 
-    while stack:
-        indexes = stack.pop()
-        state_signature = _state_signature_for_dimension_indexes(
-            nodes,
-            predicates,
-            directions,
-            dimensions,
-            node_dim_count,
-            symmetric_preds,
-            indexes,
-        )
-        variants = _variants_for_dimension_indexes(
-            nodes,
-            predicates,
-            directions,
-            dimensions,
-            node_dim_count,
-            symmetric_preds,
-            required_endpoints,
-            indexes,
-        )
-        out.write(
-            f"POP state={indexes} parent={parents[indexes]} "
-            f"{describe_state(indexes)} raw_variants={len(variants)}\n"
-        )
-        if state_signature is not None:
-            if visit_state(state_signature):
-                out.write("  STATE_BRANCH_STOP\n")
-                continue
+    for assignment_index, dimensions in enumerate(assignment_dimensions, start=1):
+        out.write(f"ASSIGNMENT {assignment_index}\n")
+        start = tuple(0 for _ in dimensions)
+        stack = [start]
+        seen_indexes = {start}
+        parents: dict[tuple[int, ...], tuple[int, ...] | None] = {start: None}
 
-        branch_pruned = False
-        emitted_new_variant = False
-        for variant in variants:
-            if variant in yielded_variants:
-                out.write(f"  DUP variant={variant}\n")
-                continue
-            yielded_variants.add(variant)
-            emitted_new_variant = True
-            out.write(
-                f"state indexes={indexes} parent={parents[indexes]} variant={variant} "
+        while stack:
+            indexes = stack.pop()
+            state_signature = _state_signature_for_dimension_indexes(
+                nodes,
+                predicates,
+                directions,
+                dimensions,
+                node_dim_count,
+                symmetric_preds,
+                indexes,
             )
-            if visit_variant(variant):
-                branch_pruned = True
-                out.write("branch_stop=yes\n")
-            else:
-                out.write("branch_stop=no\n")
-            visits_emitted += 1
-            if stop_after_visits is not None and visits_emitted >= stop_after_visits:
-                return
+            variants = _variants_for_dimension_indexes(
+                nodes,
+                predicates,
+                directions,
+                dimensions,
+                node_dim_count,
+                symmetric_preds,
+                required_endpoints,
+                indexes,
+            )
+            out.write(
+                f"POP state={indexes} parent={parents[indexes]} "
+                f"{describe_state(dimensions, indexes)} raw_variants={len(variants)}\n"
+            )
+            if state_signature is not None:
+                if visit_state(state_signature):
+                    out.write("  STATE_BRANCH_STOP\n")
+                    continue
 
-        if not variants:
-            out.write("  NO_VARIANT\n")
-        elif not emitted_new_variant:
-            out.write("  ONLY_DUPLICATES\n")
+            branch_pruned = False
+            emitted_new_variant = False
+            for variant in variants:
+                if variant in yielded_variants:
+                    out.write(f"  DUP variant={variant}\n")
+                    continue
+                yielded_variants.add(variant)
+                emitted_new_variant = True
+                out.write(
+                    f"state indexes={indexes} parent={parents[indexes]} variant={variant} "
+                )
+                if visit_variant(variant):
+                    branch_pruned = True
+                    out.write("branch_stop=yes\n")
+                else:
+                    out.write("branch_stop=no\n")
+                visits_emitted += 1
+                if stop_after_visits is not None and visits_emitted >= stop_after_visits:
+                    return
 
-        if branch_pruned:
-            continue
+            if not variants:
+                out.write("  NO_VARIANT\n")
+            elif not emitted_new_variant:
+                out.write("  ONLY_DUPLICATES\n")
 
-        for dim_idx in range(len(dimensions) - 1, -1, -1):
-            next_idx = indexes[dim_idx] + 1
-            if next_idx >= len(dimensions[dim_idx]):
+            if branch_pruned:
                 continue
-            child = list(indexes)
-            child[dim_idx] = next_idx
-            child = tuple(child)
-            if child in seen_indexes:
-                continue
-            seen_indexes.add(child)
-            parents[child] = indexes
-            stack.append(child)
+
+            for dim_idx in range(len(dimensions) - 1, -1, -1):
+                next_idx = indexes[dim_idx] + 1
+                if next_idx >= len(dimensions[dim_idx]):
+                    continue
+                child = list(indexes)
+                child[dim_idx] = next_idx
+                child = tuple(child)
+                if child in seen_indexes:
+                    continue
+                seen_indexes.add(child)
+                parents[child] = indexes
+                stack.append(child)
 
 
 def main() -> None:
