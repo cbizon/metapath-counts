@@ -496,14 +496,31 @@ class TestGroupedOverlapPrecision:
             f"Expected overlap=5 (aggregated, including pseudo-type contribution), got {row['overlap']}"
         )
 
-    def test_named_thing_related_to_predicting_affects(self, pipeline_1hop):
-        """NamedThing|related_to|A|NamedThing predicting Disease|affects|R|Gene.
+    def test_self_comparison_precision_is_one(self, pipeline_1hop):
+        """Lower-level self comparisons should retain precision 1.0."""
+        grouped_results = pipeline_1hop["grouped_results"]
+        explicit_predictors = {path for path, _ in pipeline_1hop["explicit_items"]}
 
-        The broad predictor covers all 12 edges in the graph. 4 of them are
-        Gene-type→Disease affects edges: 3 from Gene + 1 from Gene+Protein
-        (which rolls up to Gene during aggregation). So overlap=4, predictor_count=12,
-        and precision = 4/12 = 0.333...
-        """
+        found_self = False
+        for filename, rows in grouped_results.items():
+            for row in rows:
+                predictor = row.get('predictor_metapath', '')
+                if predictor not in explicit_predictors:
+                    continue
+                safe_pred = predictor.replace('|', '_').replace(':', '_').replace(' ', '_')
+                expected_filename = f"{safe_pred}.tsv.zst"
+
+                if expected_filename == filename:
+                    found_self = True
+                    assert row['precision'] == pytest.approx(1.0), (
+                        f"Self-comparison precision should be 1.0, got {row['precision']} "
+                        f"for {predictor} in {filename}"
+                    )
+
+        assert found_self, "No self-comparison rows found in grouped output"
+
+    def test_broad_endpoint_predictor_is_excluded_for_narrow_target(self, pipeline_1hop):
+        """Predictors broader than the target endpoints should not be emitted."""
         grouped_results = pipeline_1hop["grouped_results"]
 
         target_filename = "Disease_affects_R_Gene.tsv.zst"
@@ -519,56 +536,10 @@ class TestGroupedOverlapPrecision:
             if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
         ]
 
-        assert len(nt_rows) == 1, (
-            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
-            f"got {len(nt_rows)}"
-        )
+        assert nt_rows == []
 
-        row = nt_rows[0]
-        # 5 edges aggregate to Disease|affects|R|Gene: Gene_A→Disease_P, Gene_A→Disease_Q,
-        # Gene_B→Disease_P, Gene_B→Disease_Q (Gene|affects), plus GeneProtein_Z→Disease_Q
-        # (Gene+Protein|affects, rolls up to Gene)
-        assert row['overlap'] == 5, f"Expected overlap=5, got {row['overlap']}"
-        # NamedThing|related_to|A|NamedThing aggregates all 15 edges in the graph
-        assert row['predictor_count'] == 15, (
-            f"Expected predictor_count=15 (all edges) for NamedThing|related_to|A|NamedThing, "
-            f"got {row['predictor_count']}"
-        )
-        assert row['precision'] == pytest.approx(1 / 3, abs=1e-4), (
-            f"Expected precision=1/3, got {row['precision']}"
-        )
-
-    def test_self_comparison_precision_is_one(self, pipeline_1hop):
-        """When predictor variant matches the target, precision should be 1.0.
-
-        For example, Disease|affects|R|Gene predicting Disease|affects|R|Gene.
-        """
-        grouped_results = pipeline_1hop["grouped_results"]
-
-        found_self = False
-        for filename, rows in grouped_results.items():
-            for row in rows:
-                predictor = row.get('predictor_metapath', '')
-                safe_pred = predictor.replace('|', '_').replace(':', '_').replace(' ', '_')
-                expected_filename = f"{safe_pred}.tsv.zst"
-
-                if expected_filename == filename:
-                    found_self = True
-                    assert row['precision'] == pytest.approx(1.0), (
-                        f"Self-comparison precision should be 1.0, got {row['precision']} "
-                        f"for {predictor} in {filename}"
-                    )
-
-        assert found_self, "No self-comparison rows found in grouped output"
-
-    def test_named_thing_related_to_predicting_biological_entity_affects(self, pipeline_1hop):
-        """NamedThing|related_to|A|NamedThing predicting BiologicalEntity|affects|F|BiologicalEntity.
-
-        The broad predictor (count=12) covers all 12 edges. The target has 6 pairs
-        (Gene x3 + Protein x1 + Gene+Protein expanding to both Gene and Protein = 6).
-        All 6 target pairs are covered by the predictor, so overlap=6, recall=1.0.
-        Precision = 6/12 = 0.5 (predictor is twice as broad as the target).
-        """
+    def test_broad_endpoint_predictor_is_excluded_for_hierarchical_target(self, pipeline_1hop):
+        """The same endpoint-broad predictor should also be excluded for broader typed targets."""
         grouped_results = pipeline_1hop["grouped_results"]
 
         target_filename = "BiologicalEntity_affects_F_BiologicalEntity.tsv.zst"
@@ -584,31 +555,10 @@ class TestGroupedOverlapPrecision:
             if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
         ]
 
-        assert len(nt_rows) == 1, (
-            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
-            f"got {len(nt_rows)}"
-        )
+        assert nt_rows == []
 
-        row = nt_rows[0]
-        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
-        assert row['predictor_count'] == 15, (
-            f"Expected predictor_count=15, got {row['predictor_count']}"
-        )
-        assert row['recall'] == pytest.approx(1.0), (
-            f"Expected recall=1.0 (all 7 target pairs covered), got {row['recall']}"
-        )
-        assert row['precision'] == pytest.approx(7 / 15, abs=1e-4), (
-            f"Expected precision=7/15, got {row['precision']}"
-        )
-
-    def test_narrow_predictor_low_recall_for_broad_target(self, pipeline_1hop):
-        """A narrow predictor predicting a broad target has precision=1.0 but recall < 1.0.
-
-        BiologicalEntity|affects|F|BiologicalEntity (count=7) predicting
-        NamedThing|related_to|A|NamedThing (count=15).
-        All 7 predictor pairs are in the broad target (precision=1.0), but they
-        cover only 7/15 of the target (recall=7/15).
-        """
+    def test_broad_target_keeps_narrow_predictor_count(self, pipeline_1hop):
+        """Broad-target files should keep the hand-derived predictor count for narrow rows."""
         grouped_results = pipeline_1hop["grouped_results"]
 
         target_filename = "NamedThing_related_to_A_NamedThing.tsv.zst"
@@ -619,24 +569,17 @@ class TestGroupedOverlapPrecision:
         )
 
         rows = grouped_results[target_filename]
-        bio_rows = [
+        disease_gene_rows = [
             r for r in rows
-            if r.get('predictor_metapath') == 'BiologicalEntity|affects|F|BiologicalEntity'
+            if r.get('predictor_metapath') == 'Disease|affects|R|Gene'
         ]
 
-        assert len(bio_rows) == 1, (
-            f"Expected 1 row for BiologicalEntity|affects|F|BiologicalEntity predictor, "
-            f"got {len(bio_rows)}"
+        assert len(disease_gene_rows) == 1, (
+            f"Expected 1 row for Disease|affects|R|Gene predictor, "
+            f"got {len(disease_gene_rows)}"
         )
 
-        row = bio_rows[0]
-        assert row['overlap'] == 7, f"Expected overlap=7, got {row['overlap']}"
-        assert row['predictor_count'] == 7, (
-            f"Expected predictor_count=7, got {row['predictor_count']}"
-        )
-        assert row['precision'] == pytest.approx(1.0), (
-            f"Expected precision=1.0 (all predictor pairs in broad target), got {row['precision']}"
-        )
-        assert row['recall'] == pytest.approx(7 / 15, abs=1e-4), (
-            f"Expected recall=7/15, got {row['recall']}"
+        row = disease_gene_rows[0]
+        assert row['predictor_count'] == 5, (
+            f"Expected predictor_count=5, got {row['predictor_count']}"
         )

@@ -10,18 +10,16 @@ import pytest
 import zstandard
 
 from .golden_graph import write_golden_graph, GRAPH_STATS
+from library import expand_metapath_to_variants
 from pipeline.workers.run_overlap import analyze_nhop_overlap
 from pipeline.prebuild_matrices import load_node_types, build_matrices
 from pipeline.prepare_grouping import (
-    precompute_aggregated_nhop_counts,
     precompute_type_node_counts,
-    extract_type_pairs_from_aggregated_paths,
 )
 from pipeline.workers.run_grouping import (
     group_type_pair,
-    load_aggregated_nhop_counts,
-    load_type_node_counts,
 )
+from library.aggregation import promote_metapath_endpoints_to_typepair_starts
 
 
 def create_fake_manifest(matrices, output_dir):
@@ -45,6 +43,44 @@ def create_fake_manifest(matrices, output_dir):
         json.dump(manifest, f, indent=2)
 
     return manifest_path
+
+
+def collect_explicit_items(result_file):
+    """Collect unique explicit path counts from a raw result file."""
+    counts = {}
+    with open(result_file, "r") as f:
+        f.readline()
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) != 6:
+                continue
+            for path, count in ((parts[0], int(parts[1])), (parts[2], int(parts[3]))):
+                previous = counts.get(path)
+                if previous is None:
+                    counts[path] = count
+                else:
+                    assert previous == count, (
+                        f"Inconsistent explicit count for {path}: {previous} vs {count}"
+                    )
+    return sorted(counts.items())
+
+
+def build_aggregated_counts(explicit_items):
+    """Build hierarchical counts for assertions from explicit items."""
+    aggregated = {}
+    for path, count in explicit_items:
+        for variant in expand_metapath_to_variants(path):
+            aggregated[variant] = aggregated.get(variant, 0) + count
+    return aggregated
+
+
+def filter_explicit_items_for_type_pair(explicit_items, type1, type2):
+    """Keep only explicit items whose endpoints can roll up to the requested type pair."""
+    return [
+        (path, count)
+        for path, count in explicit_items
+        if promote_metapath_endpoints_to_typepair_starts(path, type1, type2)
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -93,23 +129,14 @@ def pipeline_1hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated counts from result files
-    # (covers both N-hop predictor paths and 1-hop predicted paths)
-    aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
-    aggregated_nhop_counts = precompute_aggregated_nhop_counts(
-        str(results_dir), str(aggregated_nhop_counts_path), n_hops
-    )
+    # Step 2: Build explicit items and aggregated counts for assertions.
+    explicit_items = collect_explicit_items(result_file)
+    aggregated_nhop_counts = build_aggregated_counts(explicit_items)
 
     # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
-    type_node_counts_path = results_dir / "type_node_counts.json"
-    with open(type_node_counts_path, 'w') as f:
-        json.dump(type_node_counts, f)
 
     # Step 4: Run grouping for exactly the type pairs present in the golden graph.
-    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
-    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
-    # explosion. Instead hardcode the pairs we actually test.
     type_pairs = [
         # Explicit leaf type pairs from the golden graph
         ("Disease", "Gene"),
@@ -138,9 +165,8 @@ def pipeline_1hop(golden_workspace):
             file_list=file_list,
             output_dir=str(grouped_dir),
             n_hops=n_hops,
-            aggregate=True,
-            aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
-            type_node_counts=load_type_node_counts(str(type_node_counts_path)),
+            explicit_items=filter_explicit_items_for_type_pair(explicit_items, type1, type2),
+            type_node_counts=type_node_counts,
             min_count=0,  # No filtering for tests
             min_precision=0.0,
             excluded_types=set(),
@@ -156,6 +182,7 @@ def pipeline_1hop(golden_workspace):
         "result_file": result_file,
         "results_dir": results_dir,
         "raw_results": raw_results,
+        "explicit_items": explicit_items,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,
@@ -179,23 +206,14 @@ def pipeline_2hop(golden_workspace):
     result_file = results_dir / "results_matrix1_000.tsv"
     analyze_nhop_overlap(matrices, str(result_file), n_hops=n_hops)
 
-    # Step 2: Precompute aggregated counts from result files
-    # (covers both N-hop predictor paths and 1-hop predicted paths)
-    aggregated_nhop_counts_path = results_dir / "aggregated_nhop_counts.json"
-    aggregated_nhop_counts = precompute_aggregated_nhop_counts(
-        str(results_dir), str(aggregated_nhop_counts_path), n_hops
-    )
+    # Step 2: Build explicit items and aggregated counts for assertions.
+    explicit_items = collect_explicit_items(result_file)
+    aggregated_nhop_counts = build_aggregated_counts(explicit_items)
 
     # Step 3: Precompute type node counts
     type_node_counts = precompute_type_node_counts(str(matrices_dir))
-    type_node_counts_path = results_dir / "type_node_counts.json"
-    with open(type_node_counts_path, 'w') as f:
-        json.dump(type_node_counts, f)
 
     # Step 4: Run grouping for exactly the type pairs present in the golden graph.
-    # Using extract_type_pairs_from_aggregated_paths would generate every ancestor
-    # combination (Entity, ThingWithTaxon, NamedThing, ...) causing a combinatorial
-    # explosion. Instead hardcode the pairs we actually test.
     type_pairs = [
         # Explicit leaf type pairs from the golden graph
         ("Disease", "Gene"),
@@ -222,9 +240,8 @@ def pipeline_2hop(golden_workspace):
             file_list=file_list,
             output_dir=str(grouped_dir),
             n_hops=n_hops,
-            aggregate=True,
-            aggregated_nhop_counts=load_aggregated_nhop_counts(str(aggregated_nhop_counts_path)),
-            type_node_counts=load_type_node_counts(str(type_node_counts_path)),
+            explicit_items=filter_explicit_items_for_type_pair(explicit_items, type1, type2),
+            type_node_counts=type_node_counts,
             min_count=0,
             min_precision=0.0,
             excluded_types=set(),
@@ -240,6 +257,7 @@ def pipeline_2hop(golden_workspace):
         "result_file": result_file,
         "results_dir": results_dir,
         "raw_results": raw_results,
+        "explicit_items": explicit_items,
         "aggregated_nhop_counts": aggregated_nhop_counts,
         "type_node_counts": type_node_counts,
         "grouped_dir": grouped_dir,

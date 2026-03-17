@@ -75,11 +75,11 @@ def test_group_type_pair_uses_explicit_shard_counts_for_precision_pruning():
             rows = [line.strip() for line in f if line.strip()]
 
         assert len(rows) >= 2
-        assert any(row.startswith("ChemicalEntity|affects|F|Gene|treats|F|Disease\t500\t") for row in rows[1:])
-        assert all(
-            not row.startswith("ChemicalEntity|affects|F|BiologicalEntity|treats|F|Disease\t5000\t")
+        assert any(
+            row.startswith("Disease|treats|R|Gene|affects|R|SmallMolecule\t500\t")
             for row in rows[1:]
         )
+        assert all("\t5000\t" not in row for row in rows[1:])
 
 
 def test_pruned_variant_walk_cuts_off_broader_states():
@@ -148,35 +148,19 @@ def test_typepair_expansion_emits_both_valid_endpoint_assignments():
     assert all(v.endswith("|NamedThing") for v in variants)
 
 
-def test_endpoint_promotion_collapses_explicit_predictors_to_same_start():
-    left = promote_metapath_endpoints_to_typepair_starts(
-        "SmallMolecule|treats|F|Disease",
-        type1="ChemicalEntity",
-        type2="Disease",
-    )
-    right = promote_metapath_endpoints_to_typepair_starts(
-        "Drug|treats|F|Disease",
-        type1="ChemicalEntity",
-        type2="Disease",
-    )
-
-    assert left == ["ChemicalEntity|treats|F|Disease"]
-    assert right == ["ChemicalEntity|treats|F|Disease"]
-
-
 def test_pruned_states_carry_forward_across_targets_in_descending_target_count_order(monkeypatch):
     visits = []
     predictor_path = "SmallMolecule|treats|F|Disease"
 
-    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None):
+    def fake_traverse(_metapath, visit_variant, visit_state=None):
         assert visit_state is not None
-        should_prune = visit_state(("shared_state",))
+        should_prune = visit_state(("ChemicalEntity", "related_to", "A", "Disease"))
         visits.append(should_prune)
         if not should_prune:
             visit_variant("ChemicalEntity|related_to|A|Disease")
 
     monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_metapath_variants_for_typepair_pruned",
+        "pipeline.workers.run_grouping.traverse_metapath_variants_pruned",
         fake_traverse,
     )
 

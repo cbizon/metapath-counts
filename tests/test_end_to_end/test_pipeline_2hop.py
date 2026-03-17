@@ -105,7 +105,7 @@ class Test2HopPredictorCountsAreGlobal:
                     predictor_counts[predictor] = count
 
     def test_predictor_count_matches_precomputed(self, pipeline_2hop):
-        """Predictor counts in output should match precomputed counts."""
+        """Predictor counts in output should match aggregated counts from explicit paths."""
         grouped_results = pipeline_2hop["grouped_results"]
         nhop_counts = pipeline_2hop["aggregated_nhop_counts"]
 

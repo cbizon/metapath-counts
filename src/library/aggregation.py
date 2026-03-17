@@ -411,6 +411,16 @@ def expand_metapath_to_variants(metapath: str) -> set:
     return set(generate_metapath_variants(metapath))
 
 
+def _build_variant_dimensions(metapath: str):
+    """Return full expansion dimensions and metadata for unbounded traversal."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    node_variants = [get_type_variants(node) for node in nodes]
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    dimensions = node_variants + predicate_variants
+    return nodes, predicates, directions, dimensions, len(node_variants), symmetric_preds
+
+
 def _type_within_ceiling(type_name: str, ceiling_type: str) -> bool:
     """Return True when type_name is the ceiling or a descendant of it."""
     if type_name == ceiling_type:
@@ -418,50 +428,36 @@ def _type_within_ceiling(type_name: str, ceiling_type: str) -> bool:
     return ceiling_type in get_type_ancestors(type_name)
 
 
-def _valid_typepair_endpoint_assignments(
-    left_type: str,
-    right_type: str,
-    type1: str,
-    type2: str,
-) -> List[Tuple[str, str]]:
-    """Return the valid direct endpoint assignments for a type-pair job."""
-    assignments: List[Tuple[str, str]] = []
-    candidate_pairs = [(type1, type2)]
-    if (type2, type1) != (type1, type2):
-        candidate_pairs.append((type2, type1))
-
-    for left_target, right_target in candidate_pairs:
-        if _type_within_ceiling(left_type, left_target) and _type_within_ceiling(right_type, right_target):
-            assignment = (left_target, right_target)
-            if assignment not in assignments:
-                assignments.append(assignment)
-
-    return assignments
-
-
 def generate_metapath_variants_for_typepair(metapath: str, type1: str, type2: str) -> Iterator[str]:
     """
     Generate implied variants whose endpoints do not generalize beyond a job type pair.
 
-    Endpoints are promoted directly to the valid assignment(s) for the job pair.
+    Endpoint types are bounded so expansion stops once it reaches type1/type2.
     Internal nodes and predicates still expand through their full hierarchies.
     Output variants are canonicalized exactly like generate_metapath_variants().
     """
-    (
-        nodes,
-        predicates,
-        directions,
-        assignment_dimensions,
-        node_dim_count,
-        symmetric_preds,
-        required_endpoints,
-    ) = _build_typepair_variant_dimensions(metapath, type1, type2)
+    nodes, predicates, directions = parse_metapath(metapath)
 
-    yielded = set()
-    for dimensions in assignment_dimensions:
-        for combo in itertools.product(*dimensions):
-            node_combo = combo[:node_dim_count]
-            pred_combo = combo[node_dim_count:]
+    endpoint_allow = {type1, type2}
+    bounded_first = [
+        node for node in get_type_variants(nodes[0])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    bounded_last = [
+        node for node in get_type_variants(nodes[-1])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    node_variants = [bounded_first]
+    if len(nodes) > 2:
+        node_variants.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_variants.append(bounded_last)
+
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+
+    for node_combo in itertools.product(*node_variants):
+        for pred_combo in itertools.product(*predicate_variants):
             adjusted_directions = []
             skip_variant = False
 
@@ -485,9 +481,7 @@ def generate_metapath_variants_for_typepair(metapath: str, type1: str, type2: st
                 continue
 
             variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
-            if variant not in yielded:
-                yielded.add(variant)
-                yield variant
+            yield variant
 
             if (nodes[0] != nodes[-1]
                     and canon_nodes[0] == canon_nodes[-1]
@@ -497,8 +491,7 @@ def generate_metapath_variants_for_typepair(metapath: str, type1: str, type2: st
                 rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
                             for d in reversed(canon_dirs)]
                 rev_variant = build_metapath(rev_nodes, rev_preds, rev_dirs)
-                if tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints and rev_variant not in yielded:
-                    yielded.add(rev_variant)
+                if tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
                     yield rev_variant
 
 
@@ -508,57 +501,32 @@ def expand_metapath_to_typepair_variants(metapath: str, type1: str, type2: str) 
 
 
 def promote_metapath_endpoints_to_typepair_starts(metapath: str, type1: str, type2: str) -> List[str]:
-    """Return the direct endpoint-promoted starting form(s) for a type-pair job."""
-    (
-        nodes,
-        predicates,
-        directions,
-        assignment_dimensions,
-        node_dim_count,
-        symmetric_preds,
-        required_endpoints,
-    ) = _build_typepair_variant_dimensions(metapath, type1, type2)
-
-    promoted = []
-    seen = set()
-    for dimensions in assignment_dimensions:
-        start = tuple(0 for _ in dimensions)
-        for variant in _variants_for_dimension_indexes(
-            nodes,
-            predicates,
-            directions,
-            dimensions,
-            node_dim_count,
-            symmetric_preds,
-            required_endpoints,
-            start,
-        ):
-            if variant not in seen:
-                seen.add(variant)
-                promoted.append(variant)
-    return promoted
+    """Return output-valid variants for compatibility with older tests/helpers."""
+    return sorted(expand_metapath_to_typepair_variants(metapath, type1, type2))
 
 
 def _build_typepair_variant_dimensions(metapath: str, type1: str, type2: str):
-    """Return assignment-specific expansion dimensions and metadata for type-pair traversal."""
+    """Return expansion dimensions and metadata for type-pair-bounded traversal."""
     nodes, predicates, directions = parse_metapath(metapath)
 
-    node_variants = []
+    endpoint_allow = {type1, type2}
+    bounded_first = [
+        node for node in get_type_variants(nodes[0])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    bounded_last = [
+        node for node in get_type_variants(nodes[-1])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    node_variants = [bounded_first]
     if len(nodes) > 2:
-        node_variants = [get_type_variants(node) for node in nodes[1:-1]]
-
+        node_variants.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_variants.append(bounded_last)
     predicate_variants = [get_predicate_variants(pred) for pred in predicates]
     symmetric_preds = _get_symmetric_predicates()
     required_endpoints = tuple(sorted((type1, type2)))
-    assignment_dimensions = []
-    for left_target, right_target in _valid_typepair_endpoint_assignments(nodes[0], nodes[-1], type1, type2):
-        dimensions = [[left_target]]
-        dimensions.extend(node_variants)
-        dimensions.append([right_target])
-        dimensions.extend(predicate_variants)
-        assignment_dimensions.append(dimensions)
-
-    return nodes, predicates, directions, assignment_dimensions, len(nodes), symmetric_preds, required_endpoints
+    dimensions = node_variants + predicate_variants
+    return nodes, predicates, directions, dimensions, len(node_variants), symmetric_preds, required_endpoints
 
 
 def _variants_for_dimension_indexes(
@@ -568,7 +536,7 @@ def _variants_for_dimension_indexes(
     dimensions: List[List[str]],
     node_dim_count: int,
     symmetric_preds,
-    required_endpoints: Tuple[str, str],
+    required_endpoints: Tuple[str, str] | None,
     indexes: Tuple[int, ...],
 ) -> List[str]:
     """Materialize one or two canonical variants for a dimension index tuple."""
@@ -588,7 +556,7 @@ def _variants_for_dimension_indexes(
     canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
         list(node_combo), list(pred_combo), adjusted_directions
     )
-    if tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+    if required_endpoints is not None and tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
         return []
 
     variants = [build_metapath(canon_nodes, canon_preds, canon_dirs)]
@@ -600,7 +568,7 @@ def _variants_for_dimension_indexes(
         rev_preds = list(reversed(canon_preds))
         rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
                     for d in reversed(canon_dirs)]
-        if tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
+        if required_endpoints is None or tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
             variants.append(build_metapath(rev_nodes, rev_preds, rev_dirs))
 
     return variants
@@ -653,64 +621,126 @@ def traverse_metapath_variants_for_typepair_pruned(
     cheap within-predictor branch cut-off, but it does not attempt any global
     dominance/subsumption pruning across broader supervariants.
     """
-    nodes, predicates, directions, assignment_dimensions, node_dim_count, symmetric_preds, required_endpoints = (
+    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds, required_endpoints = (
         _build_typepair_variant_dimensions(metapath, type1, type2)
     )
+    start = tuple(0 for _ in dimensions)
+    stack = [start]
+    seen_indexes = {start}
     yielded_variants = set()
 
-    for dimensions in assignment_dimensions:
-        start = tuple(0 for _ in dimensions)
-        stack = [start]
-        seen_indexes = {start}
+    while stack:
+        indexes = stack.pop()
+        state_signature = _state_signature_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            indexes,
+        )
+        if state_signature is not None and visit_state is not None and visit_state(state_signature):
+            continue
 
-        while stack:
-            indexes = stack.pop()
-            state_signature = _state_signature_for_dimension_indexes(
-                nodes,
-                predicates,
-                directions,
-                dimensions,
-                node_dim_count,
-                symmetric_preds,
-                indexes,
-            )
-            if state_signature is not None and visit_state is not None and visit_state(state_signature):
+        variants = _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            required_endpoints,
+            indexes,
+        )
+
+        branch_pruned = False
+        for variant in variants:
+            if variant in yielded_variants:
                 continue
+            yielded_variants.add(variant)
+            if visit_variant(variant):
+                branch_pruned = True
+                break
 
-            variants = _variants_for_dimension_indexes(
-                nodes,
-                predicates,
-                directions,
-                dimensions,
-                node_dim_count,
-                symmetric_preds,
-                required_endpoints,
-                indexes,
-            )
+        if branch_pruned:
+            continue
 
-            branch_pruned = False
-            for variant in variants:
-                if variant in yielded_variants:
-                    continue
-                yielded_variants.add(variant)
-                if visit_variant(variant):
-                    branch_pruned = True
-                    break
-
-            if branch_pruned:
+        for dim_idx in range(len(dimensions) - 1, -1, -1):
+            next_idx = indexes[dim_idx] + 1
+            if next_idx >= len(dimensions[dim_idx]):
                 continue
+            child = list(indexes)
+            child[dim_idx] = next_idx
+            child = tuple(child)
+            if child in seen_indexes:
+                continue
+            seen_indexes.add(child)
+            stack.append(child)
 
-            for dim_idx in range(len(dimensions) - 1, -1, -1):
-                next_idx = indexes[dim_idx] + 1
-                if next_idx >= len(dimensions[dim_idx]):
-                    continue
-                child = list(indexes)
-                child[dim_idx] = next_idx
-                child = tuple(child)
-                if child in seen_indexes:
-                    continue
-                seen_indexes.add(child)
-                stack.append(child)
+
+def traverse_metapath_variants_pruned(
+    metapath: str,
+    visit_variant: Callable[[str], bool],
+    visit_state: Callable[[Tuple[str, ...]], bool] | None = None,
+) -> None:
+    """Traverse full hierarchical variants from specific to general with branch pruning."""
+    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds = (
+        _build_variant_dimensions(metapath)
+    )
+    start = tuple(0 for _ in dimensions)
+    stack = [start]
+    seen_indexes = {start}
+    yielded_variants = set()
+
+    while stack:
+        indexes = stack.pop()
+        state_signature = _state_signature_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            indexes,
+        )
+        if state_signature is not None and visit_state is not None and visit_state(state_signature):
+            continue
+
+        variants = _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            None,
+            indexes,
+        )
+
+        branch_pruned = False
+        for variant in variants:
+            if variant in yielded_variants:
+                continue
+            yielded_variants.add(variant)
+            if visit_variant(variant):
+                branch_pruned = True
+                break
+
+        if branch_pruned:
+            continue
+
+        for dim_idx in range(len(dimensions) - 1, -1, -1):
+            next_idx = indexes[dim_idx] + 1
+            if next_idx >= len(dimensions[dim_idx]):
+                continue
+            child = list(indexes)
+            child[dim_idx] = next_idx
+            child = tuple(child)
+            if child in seen_indexes:
+                continue
+            seen_indexes.add(child)
+            stack.append(child)
 
 
 def calculate_metrics(
