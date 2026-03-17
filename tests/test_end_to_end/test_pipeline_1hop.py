@@ -539,7 +539,10 @@ class TestGroupedOverlapPrecision:
         assert nt_rows == []
 
     def test_broad_endpoint_predictor_is_excluded_for_hierarchical_target(self, pipeline_1hop):
-        """The same endpoint-broad predictor should also be excluded for broader typed targets."""
+        """The same endpoint-broad predictor should also be excluded for broader typed targets.
+
+        Paired with test_biological_entity_related_to_self_overlap().
+        """
         grouped_results = pipeline_1hop["grouped_results"]
 
         target_filename = "BiologicalEntity_affects_F_BiologicalEntity.tsv.zst"
@@ -557,8 +560,43 @@ class TestGroupedOverlapPrecision:
 
         assert nt_rows == []
 
-    def test_broad_target_keeps_narrow_predictor_count(self, pipeline_1hop):
-        """Broad-target files should keep the hand-derived predictor count for narrow rows."""
+    def test_biological_entity_related_to_self_overlap(self, pipeline_1hop):
+        """BiologicalEntity|related_to|A|BiologicalEntity should keep its hand-derived count=11."""
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        target_filename = "BiologicalEntity_related_to_A_BiologicalEntity.tsv.zst"
+
+        assert target_filename in grouped_results, (
+            f"No grouped file found for BiologicalEntity|related_to|A|BiologicalEntity. "
+            f"Available: {sorted(grouped_results.keys())}"
+        )
+
+        rows = grouped_results[target_filename]
+        broad_rows = [
+            r for r in rows
+            if r.get('predictor_metapath') == 'BiologicalEntity|related_to|A|BiologicalEntity'
+        ]
+
+        assert len(broad_rows) == 1, (
+            f"Expected 1 row for BiologicalEntity|related_to|A|BiologicalEntity predictor, "
+            f"got {len(broad_rows)}"
+        )
+
+        row = broad_rows[0]
+        assert row['predictor_count'] == 11, (
+            f"Expected predictor_count=11, got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 11, (
+            f"Expected overlap=11, got {row['overlap']}"
+        )
+
+    def test_broad_target_keeps_broad_predictor_count(self, pipeline_1hop):
+        """Broad-target files should keep the hand-derived broad predictor count.
+
+        Paired with test_disease_affects_gene_self_overlap():
+        - the narrow exact-target file must keep Disease|affects|R|Gene count = 5
+        - the broad exact-target file must keep NamedThing|related_to|A|NamedThing count = 15
+        """
         grouped_results = pipeline_1hop["grouped_results"]
 
         target_filename = "NamedThing_related_to_A_NamedThing.tsv.zst"
@@ -569,17 +607,20 @@ class TestGroupedOverlapPrecision:
         )
 
         rows = grouped_results[target_filename]
-        disease_gene_rows = [
+        broad_rows = [
             r for r in rows
-            if r.get('predictor_metapath') == 'Disease|affects|R|Gene'
+            if r.get('predictor_metapath') == 'NamedThing|related_to|A|NamedThing'
         ]
 
-        assert len(disease_gene_rows) == 1, (
-            f"Expected 1 row for Disease|affects|R|Gene predictor, "
-            f"got {len(disease_gene_rows)}"
+        assert len(broad_rows) == 1, (
+            f"Expected 1 row for NamedThing|related_to|A|NamedThing predictor, "
+            f"got {len(broad_rows)}"
         )
 
-        row = disease_gene_rows[0]
-        assert row['predictor_count'] == 5, (
-            f"Expected predictor_count=5, got {row['predictor_count']}"
+        row = broad_rows[0]
+        assert row['predictor_count'] == 15, (
+            f"Expected predictor_count=15, got {row['predictor_count']}"
+        )
+        assert row['overlap'] == 15, (
+            f"Expected overlap=15, got {row['overlap']}"
         )
