@@ -76,7 +76,7 @@ def test_group_type_pair_uses_explicit_shard_counts_for_precision_pruning():
 
         assert len(rows) >= 2
         assert any(
-            row.startswith("Disease|treats|R|Gene|affects|R|SmallMolecule\t500\t")
+            row.startswith("ChemicalEntity|affects|F|Gene|treats|F|Disease\t500\t")
             for row in rows[1:]
         )
         assert all("\t5000\t" not in row for row in rows[1:])

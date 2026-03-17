@@ -260,6 +260,10 @@ def endpoints_within_target_pair(left_type, right_type, type1, type2):
     )
 
 
+def endpoints_exact_match(left_type, right_type, type1, type2):
+    return tuple(sorted((left_type, right_type))) == tuple(sorted((type1, type2)))
+
+
 def build_candidate_variants_for_targets(onehop_to_overlaps, explicit_count_by_path, target_variant_counts,
                                          type1, type2, min_precision, predictor_expansion_cache,
                                          start_time, progress_file, counters, stage_timings):
@@ -342,7 +346,7 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, explicit_count_by_p
             def visit_variant(variant):
                 nonlocal variants_pruned_lower_bound
                 variant_left_type, variant_right_type = get_metapath_endpoints(variant)
-                if not endpoints_within_target_pair(
+                if not endpoints_exact_match(
                     variant_left_type,
                     variant_right_type,
                     target_type1,
