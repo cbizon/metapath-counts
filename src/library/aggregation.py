@@ -428,6 +428,26 @@ def _type_within_ceiling(type_name: str, ceiling_type: str) -> bool:
     return ceiling_type in get_type_ancestors(type_name)
 
 
+def _valid_typepair_endpoint_assignments(
+    left_type: str,
+    right_type: str,
+    type1: str,
+    type2: str,
+) -> List[Tuple[str, str]]:
+    """Return the valid direct endpoint assignments for a type-pair job."""
+    assignments: List[Tuple[str, str]] = []
+    candidate_pairs = [(type1, type2)]
+    if (type2, type1) != (type1, type2):
+        candidate_pairs.append((type2, type1))
+
+    for left_target, right_target in candidate_pairs:
+        if _type_within_ceiling(left_type, left_target) and _type_within_ceiling(right_type, right_target):
+            assignment = (left_target, right_target)
+            if assignment not in assignments:
+                assignments.append(assignment)
+    return assignments
+
+
 def generate_metapath_variants_for_typepair(metapath: str, type1: str, type2: str) -> Iterator[str]:
     """
     Generate implied variants whose endpoints do not generalize beyond a job type pair.
@@ -501,8 +521,35 @@ def expand_metapath_to_typepair_variants(metapath: str, type1: str, type2: str) 
 
 
 def promote_metapath_endpoints_to_typepair_starts(metapath: str, type1: str, type2: str) -> List[str]:
-    """Return output-valid variants for compatibility with older tests/helpers."""
-    return sorted(expand_metapath_to_typepair_variants(metapath, type1, type2))
+    """Return the direct endpoint-promoted exact-match starting form(s) for a type-pair job."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+
+    promoted: List[str] = []
+    seen = set()
+    for left_target, right_target in _valid_typepair_endpoint_assignments(nodes[0], nodes[-1], type1, type2):
+        node_dimensions = [[left_target]]
+        if len(nodes) > 2:
+            node_dimensions.extend([[node] for node in nodes[1:-1]])
+        node_dimensions.append([right_target])
+        predicate_dimensions = [[pred] for pred in predicates]
+        dimensions = node_dimensions + predicate_dimensions
+        start = tuple(0 for _ in dimensions)
+        for variant in _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            len(nodes),
+            symmetric_preds,
+            required_endpoints,
+            start,
+        ):
+            if variant not in seen:
+                seen.add(variant)
+                promoted.append(variant)
+    return promoted
 
 
 def _build_typepair_variant_dimensions(metapath: str, type1: str, type2: str):
