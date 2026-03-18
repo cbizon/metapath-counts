@@ -152,7 +152,7 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
     visits = []
     predictor_path = "SmallMolecule|treats|F|Disease"
 
-    def fake_traverse(_metapath, visit_variant, visit_state=None):
+    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None):
         assert visit_state is not None
         should_prune = visit_state(("ChemicalEntity", "related_to", "A", "Disease"))
         visits.append(should_prune)
@@ -160,7 +160,7 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
             visit_variant("ChemicalEntity|related_to|A|Disease")
 
     monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_metapath_variants_pruned",
+        "pipeline.workers.run_grouping.traverse_metapath_variants_for_typepair_pruned",
         fake_traverse,
     )
 

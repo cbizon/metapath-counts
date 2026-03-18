@@ -23,7 +23,7 @@ from library.aggregation import (
     expand_metapath_to_typepair_variants,
     expand_metapath_to_variants,
     promote_metapath_endpoints_to_typepair_starts,
-    traverse_metapath_variants_pruned,
+    traverse_metapath_variants_for_typepair_pruned,
     get_type_variants,
     calculate_metrics,
     parse_compound_predicate,
@@ -403,8 +403,10 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, explicit_count_by_p
                 counters["candidate_variants_accepted"] = counters.get("candidate_variants_accepted", 0) + 1
                 return False
 
-            traverse_metapath_variants_pruned(
+            traverse_metapath_variants_for_typepair_pruned(
                 nhop_path,
+                target_type1,
+                target_type2,
                 visit_variant,
                 visit_state=visit_state,
             )
