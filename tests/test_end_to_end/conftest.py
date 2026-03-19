@@ -19,7 +19,7 @@ from pipeline.prepare_grouping import (
 from pipeline.workers.run_grouping import (
     group_type_pair,
 )
-from library.aggregation import promote_metapath_endpoints_to_typepair_starts
+from library.aggregation import promote_metapath_endpoints_to_typepair_starts, original_predictor_identity
 
 
 def create_fake_manifest(matrices, output_dir):
@@ -67,11 +67,15 @@ def collect_explicit_items(result_file):
 
 def build_aggregated_counts(explicit_items):
     """Build hierarchical counts for assertions from explicit items."""
-    aggregated = {}
+    aggregated_support = {}
     for path, count in explicit_items:
+        predictor_id = original_predictor_identity(path)
         for variant in expand_metapath_to_variants(path):
-            aggregated[variant] = aggregated.get(variant, 0) + count
-    return aggregated
+            aggregated_support.setdefault(variant, {})[predictor_id] = count
+    return {
+        variant: sum(support.values())
+        for variant, support in aggregated_support.items()
+    }
 
 
 def filter_explicit_items_for_type_pair(explicit_items, type1, type2):

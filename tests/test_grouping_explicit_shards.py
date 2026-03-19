@@ -176,9 +176,7 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
         "Disease",
     )[0]
     rolled_predictor_counts = {rolled_predictor: 150}
-    global_variant_predictor_counts = {
-        canonical_variant_state_ids("ChemicalEntity|related_to|A|Disease"): 150,
-    }
+    original_predictor_counts = {predictor_path: 150}
     target_variant_counts = {
         "ChemicalEntity|big_target|A|Disease": 100,
         "ChemicalEntity|small_target|A|Disease": 50,
@@ -189,7 +187,7 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
     candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
         onehop_to_overlaps=onehop_to_overlaps,
         rolled_predictor_counts=rolled_predictor_counts,
-        global_variant_predictor_counts=global_variant_predictor_counts,
+        original_predictor_counts=original_predictor_counts,
         target_variant_counts=target_variant_counts,
         type1="ChemicalEntity",
         type2="Disease",
@@ -240,9 +238,9 @@ def test_pruned_variant_ancestor_closure_reuses_pruning_across_predictors(monkey
         predictor_big: 150,
         predictor_small: 1,
     }
-    global_variant_predictor_counts = {
-        specific: 150,
-        ancestor: 151,
+    original_predictor_counts = {
+        predictor_big: 150,
+        predictor_small: 1,
     }
     target_variant_counts = {
         "ChemicalEntity|treats|F|Disease": 100,
@@ -253,7 +251,7 @@ def test_pruned_variant_ancestor_closure_reuses_pruning_across_predictors(monkey
     candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
         onehop_to_overlaps=onehop_to_overlaps,
         rolled_predictor_counts=rolled_predictor_counts,
-        global_variant_predictor_counts=global_variant_predictor_counts,
+        original_predictor_counts=original_predictor_counts,
         target_variant_counts=target_variant_counts,
         type1="ChemicalEntity",
         type2="Disease",

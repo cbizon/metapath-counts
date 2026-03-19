@@ -184,6 +184,36 @@ def build_metapath(nodes: List[str], predicates: List[str], directions: List[str
     return '|'.join(result)
 
 
+def reverse_metapath(metapath: str) -> str:
+    """Return the reversed metapath with directions flipped."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    reversed_nodes = list(reversed(nodes))
+    reversed_predicates = list(reversed(predicates))
+    reversed_directions = []
+    for direction in reversed(directions):
+        if direction == 'F':
+            reversed_directions.append('R')
+        elif direction == 'R':
+            reversed_directions.append('F')
+        else:
+            reversed_directions.append('A')
+    return build_metapath(reversed_nodes, reversed_predicates, reversed_directions)
+
+
+def original_predictor_identity(metapath: str) -> str:
+    """
+    Return the provenance identity for an original explicit predictor.
+
+    Same-endpoint reverse views of the same underlying explicit predictor share
+    one identity; different-endpoint paths keep their original string.
+    """
+    nodes, _, _ = parse_metapath(metapath)
+    if nodes[0] != nodes[-1]:
+        return metapath
+    reversed_metapath = reverse_metapath(metapath)
+    return metapath if metapath <= reversed_metapath else reversed_metapath
+
+
 def canonicalize_metapath(nodes: List[str], predicates: List[str], directions: List[str]) -> Tuple[List[str], List[str], List[str]]:
     """
     Ensure metapath is in canonical form based on alphabetical ordering of endpoint types.
@@ -419,14 +449,19 @@ def _canonical_variant_state_ids_for_dimension_indexes(
     indexes: Tuple[int, ...],
     force_same_endpoint_reverse: bool = False,
 ) -> Tuple[Tuple[int, ...], ...]:
-    """Materialize canonical variant state IDs for a raw index tuple without same-endpoint suppression."""
+    """Materialize canonical variant state IDs for a raw index tuple."""
     node_combo = tuple(dimensions[i][indexes[i]] for i in range(node_dim_count))
     pred_combo = tuple(dimensions[node_dim_count + i][indexes[node_dim_count + i]] for i in range(len(predicates)))
 
     adjusted_directions = []
     for i, pred in enumerate(pred_combo):
         base_pred = parse_compound_predicate(pred)[0]
-        adjusted_directions.append('A' if base_pred in symmetric_preds else directions[i])
+        if base_pred in symmetric_preds:
+            if nodes[0] == nodes[-1] and not force_same_endpoint_reverse and directions[i] == 'R':
+                return ()
+            adjusted_directions.append('A')
+        else:
+            adjusted_directions.append(directions[i])
 
     canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
         list(node_combo), list(pred_combo), adjusted_directions
@@ -961,9 +996,10 @@ def promote_metapath_endpoints_to_typepair_starts(metapath: str, type1: str, typ
             required_endpoints,
             start,
         ):
-            if variant not in seen:
-                seen.add(variant)
-                promoted.append(variant)
+            canonical_variant = canonical_variant_metapath(variant)
+            if canonical_variant not in seen:
+                seen.add(canonical_variant)
+                promoted.append(canonical_variant)
     return promoted
 
 

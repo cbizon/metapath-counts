@@ -6,6 +6,8 @@ from library.aggregation import (
     canonical_variant_metapath,
     canonical_variant_metapath_from_state_ids,
     canonical_variant_state_ids,
+    expand_metapath_to_typepair_variants,
+    original_predictor_identity,
     traverse_canonical_variants_for_typepair_pruned,
     traverse_metapath_variants_for_typepair_pruned,
 )
@@ -30,6 +32,17 @@ def test_canonical_variant_collapses_same_type_symmetric_directions():
     reverse = canonical_variant_metapath("Gene|interacts_with|R|Gene")
 
     assert forward == reverse == "Gene|interacts_with|A|Gene"
+
+
+def test_original_predictor_identity_collapses_same_endpoint_reverse_equivalent_path():
+    left = original_predictor_identity(
+        "GeneOrGeneProduct|associated_with|A|Disease|affects|R|GeneOrGeneProduct"
+    )
+    right = original_predictor_identity(
+        "GeneOrGeneProduct|affects|F|Disease|associated_with|A|GeneOrGeneProduct"
+    )
+
+    assert left == right
 
 
 def test_canonical_variant_children_keep_exact_worker_endpoints():
@@ -94,6 +107,31 @@ def test_canonical_integer_traversal_matches_bounded_traversal_variants():
     )
 
     assert set(actual) == set(expected)
+
+
+def test_canonical_integer_traversal_respects_same_endpoint_symmetric_suppression():
+    path = "Gene|affects|F|Disease|affects|R|Gene"
+    expected = expand_metapath_to_typepair_variants(
+        path,
+        type1="GeneOrGeneProduct",
+        type2="GeneOrGeneProduct",
+    )
+    actual = set()
+
+    def visit_actual(state_ids):
+        actual.add(canonical_variant_metapath_from_state_ids(state_ids))
+        return False
+
+    traverse_canonical_variants_for_typepair_pruned(
+        path,
+        type1="GeneOrGeneProduct",
+        type2="GeneOrGeneProduct",
+        visit_variant=visit_actual,
+    )
+
+    forbidden = "GeneOrGeneProduct|related_to|A|Disease|related_to_at_instance_level|A|GeneOrGeneProduct"
+    assert forbidden not in expected
+    assert actual == expected
 
 
 def test_canonical_integer_traversal_prunes_branches():
