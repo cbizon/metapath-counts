@@ -8,6 +8,8 @@ import time
 import zstandard
 
 from library.aggregation import (
+    canonical_variant_ancestor_closure_state_ids_for_typepair,
+    canonical_variant_state_ids,
     expand_metapath_to_typepair_variants,
     promote_metapath_endpoints_to_typepair_starts,
     traverse_metapath_variants_for_typepair_pruned,
@@ -152,15 +154,15 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
     visits = []
     predictor_path = "SmallMolecule|treats|F|Disease"
 
-    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None):
+    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None, **kwargs):
         assert visit_state is not None
         should_prune = visit_state(("ChemicalEntity", "related_to", "A", "Disease"))
         visits.append(should_prune)
         if not should_prune:
-            visit_variant("ChemicalEntity|related_to|A|Disease")
+            visit_variant(canonical_variant_state_ids("ChemicalEntity|related_to|A|Disease"))
 
     monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_metapath_variants_for_typepair_pruned",
+        "pipeline.workers.run_grouping.traverse_canonical_variants_for_typepair_pruned",
         fake_traverse,
     )
 
@@ -168,7 +170,15 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
         "ChemicalEntity|small_target|A|Disease": {predictor_path: 1},
         "ChemicalEntity|big_target|A|Disease": {predictor_path: 1},
     }
-    explicit_count_by_path = {predictor_path: 150}
+    rolled_predictor = promote_metapath_endpoints_to_typepair_starts(
+        predictor_path,
+        "ChemicalEntity",
+        "Disease",
+    )[0]
+    rolled_predictor_counts = {rolled_predictor: 150}
+    global_variant_predictor_counts = {
+        canonical_variant_state_ids("ChemicalEntity|related_to|A|Disease"): 150,
+    }
     target_variant_counts = {
         "ChemicalEntity|big_target|A|Disease": 100,
         "ChemicalEntity|small_target|A|Disease": 50,
@@ -178,12 +188,12 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
 
     candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
         onehop_to_overlaps=onehop_to_overlaps,
-        explicit_count_by_path=explicit_count_by_path,
+        rolled_predictor_counts=rolled_predictor_counts,
+        global_variant_predictor_counts=global_variant_predictor_counts,
         target_variant_counts=target_variant_counts,
         type1="ChemicalEntity",
         type2="Disease",
         min_precision=1.0,
-        predictor_expansion_cache={},
         start_time=time.time(),
         progress_file=None,
         counters=counters,
@@ -196,4 +206,71 @@ def test_pruned_states_carry_forward_across_targets_in_descending_target_count_o
     assert counters["candidate_state_revisits_pruned"] == 1
     assert candidate_rows_by_target["ChemicalEntity|big_target|A|Disease"] == {}
     assert candidate_rows_by_target["ChemicalEntity|small_target|A|Disease"] == {}
+    assert all_candidate_variants == set()
+
+
+def test_pruned_variant_ancestor_closure_reuses_pruning_across_predictors(monkeypatch):
+    specific = canonical_variant_state_ids("ChemicalEntity|affects|F|Gene|treats|F|Disease")
+    ancestor = canonical_variant_state_ids(
+        "ChemicalEntity|related_to_at_instance_level|A|Gene|treats|F|Disease"
+    )
+    predictor_big = "ChemicalEntity|affects|F|Gene|treats|F|Disease"
+    predictor_small = "ChemicalEntity|related_to_at_instance_level|A|Gene|treats|F|Disease"
+
+    def fake_traverse(metapath, _type1, _type2, visit_variant, visit_state=None, **kwargs):
+        assert visit_state is not None
+        visit_state(("ChemicalEntity", "related_to", "A", "Disease"))
+        if metapath == predictor_big:
+            visit_variant(specific)
+        elif metapath == predictor_small:
+            visit_variant(ancestor)
+
+    monkeypatch.setattr(
+        "pipeline.workers.run_grouping.traverse_canonical_variants_for_typepair_pruned",
+        fake_traverse,
+    )
+
+    onehop_to_overlaps = {
+        "ChemicalEntity|treats|F|Disease": {
+            predictor_big: 1,
+            predictor_small: 1,
+        }
+    }
+    rolled_predictor_counts = {
+        predictor_big: 150,
+        predictor_small: 1,
+    }
+    global_variant_predictor_counts = {
+        specific: 150,
+        ancestor: 151,
+    }
+    target_variant_counts = {
+        "ChemicalEntity|treats|F|Disease": 100,
+    }
+    counters = {}
+    stage_timings = {}
+
+    candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
+        onehop_to_overlaps=onehop_to_overlaps,
+        rolled_predictor_counts=rolled_predictor_counts,
+        global_variant_predictor_counts=global_variant_predictor_counts,
+        target_variant_counts=target_variant_counts,
+        type1="ChemicalEntity",
+        type2="Disease",
+        min_precision=1.0,
+        start_time=time.time(),
+        progress_file=None,
+        counters=counters,
+        stage_timings=stage_timings,
+    )
+
+    specific_closure = canonical_variant_ancestor_closure_state_ids_for_typepair(
+        specific,
+        type1="ChemicalEntity",
+        type2="Disease",
+    )
+    assert ancestor in specific_closure
+    assert counters["candidate_variants_branch_pruned"] == 1
+    assert counters["candidate_variant_revisits_pruned"] == 1
+    assert candidate_rows_by_target["ChemicalEntity|treats|F|Disease"] == {}
     assert all_candidate_variants == set()
