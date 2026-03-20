@@ -22,11 +22,9 @@ from library.hierarchy import get_type_ancestors
 from library.aggregation import (
     canonical_variant_ancestor_closure_state_ids_for_typepair,
     canonical_variant_metapath_from_state_ids,
-    canonical_variant_state_ids,
     expand_metapath_to_typepair_variants,
     expand_metapath_to_variants,
     promote_metapath_endpoints_to_typepair_rollup_keys,
-    promote_metapath_endpoints_to_typepair_starts,
     traverse_canonical_variants_for_typepair_pruned,
     get_type_variants,
     calculate_metrics,
@@ -257,64 +255,6 @@ def expand_predictor_variants_for_typepair(path, type1, type2, predictor_expansi
     return variants
 
 
-def group_predictor_items_by_promoted_start(explicit_items, n_hops, type1, type2, counters=None):
-    """Aggregate explicit predictors by their worker-valid promoted exact-match form(s)."""
-    grouped_support = defaultdict(dict)
-    counters = counters if counters is not None else {}
-
-    for path, count in explicit_items:
-        if len(parse_metapath(path)[1]) != n_hops:
-            continue
-        predictor_id = original_predictor_identity(path)
-        promoted_starts = promote_metapath_endpoints_to_typepair_rollup_keys(path, type1, type2)
-        counters["predictor_endpoint_promotions"] = counters.get("predictor_endpoint_promotions", 0) + len(promoted_starts)
-        for promoted_key in promoted_starts:
-            grouped_support[promoted_key][predictor_id] = count
-
-    grouped_counts = {
-        key: sum(support.values())
-        for key, support in grouped_support.items()
-    }
-    counters["grouped_predictor_count"] = len(grouped_counts)
-    return dict(grouped_counts)
-
-
-def build_global_variant_predictor_counts(
-    explicit_items,
-    n_hops,
-    type1,
-    type2,
-    counters,
-):
-    """Accumulate exact global counts via a semantics-preserving variant-signature rollup."""
-    global_variant_support = defaultdict(dict)
-
-    for explicit_path, predictor_count in explicit_items:
-        if len(parse_metapath(explicit_path)[1]) != n_hops:
-            continue
-        if not promote_metapath_endpoints_to_typepair_starts(explicit_path, type1, type2):
-            continue
-        predictor_id = original_predictor_identity(explicit_path)
-        counters["predictor_expansion_requests"] = counters.get("predictor_expansion_requests", 0) + 1
-
-        for variant in expand_metapath_to_typepair_variants(
-            explicit_path,
-            type1,
-            type2,
-        ):
-            global_variant_support[canonical_variant_state_ids(variant)][predictor_id] = predictor_count
-
-    counters["predictor_signature_rollup_count"] = len(global_variant_support)
-
-    global_variant_predictor_counts = {
-        variant_state_ids: sum(support.values())
-        for variant_state_ids, support in global_variant_support.items()
-    }
-
-    counters["global_variant_predictor_count_size"] = len(global_variant_predictor_counts)
-    return dict(global_variant_predictor_counts)
-
-
 def get_metapath_endpoints(metapath):
     nodes, _, _ = parse_metapath(metapath)
     return nodes[0], nodes[-1]
@@ -333,10 +273,16 @@ def endpoints_exact_match(left_type, right_type, type1, type2):
     return tuple(sorted((left_type, right_type))) == tuple(sorted((type1, type2)))
 
 
-def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_counts, original_predictor_counts, target_variant_counts,
+def build_candidate_variants_for_targets(onehop_to_overlaps, original_predictor_counts,
+                                         target_variant_counts,
                                          type1, type2, min_precision,
                                          start_time, progress_file, counters, stage_timings):
-    """Build target-aware predictor candidates with rolled-predictor support maps."""
+    """Build target-aware predictor candidates with support-map dedup and state-level pruning.
+
+    Predictor support is accumulated globally (across all targets) for pruning.
+    Traversal uses non-canonical promoted paths (predicates stay in their
+    original positions) so the variant set matches explicit expansion exactly.
+    """
     t0 = time.time()
     next_progress_at = t0 + 30.0
     candidate_rows_by_target = {}
@@ -349,25 +295,16 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
     total_targets = len(target_items)
     counters["targets_sorted_by_target_count"] = total_targets
     global_pruned_states = set()
-    state_token_ids = {}
-    next_state_token_id = 0
-
-    def rolled_count_for_key(key):
-        if key in rolled_predictor_counts:
-            return rolled_predictor_counts[key]
-        if isinstance(key, tuple):
-            return rolled_predictor_counts.get(key[0], 0)
-        return 0
+    global_predictor_ids = defaultdict(set)
+    global_predictor_count = defaultdict(int)
+    target_overlap_records = {}
 
     for target_index, (onehop_path, nhop_overlaps) in enumerate(target_items, start=1):
         target_t0 = time.time()
         onehop_count_global = target_variant_counts.get(onehop_path, 0)
         target_type1, target_type2 = get_metapath_endpoints(onehop_path)
         max_predictor_count = get_max_predictor_count_for_precision(onehop_count_global, min_precision)
-        aggregated_predictor_support = defaultdict(dict)
         aggregated_overlap_support = defaultdict(dict)
-        pruned_variants = set()
-        lower_bound_state_counts = defaultdict(int)
         variants_pruned_lower_bound = 0
         target_branch_pruned_at_start = counters.get("candidate_variants_branch_pruned", 0)
         target_accepted_at_start = counters.get("candidate_variants_accepted", 0)
@@ -407,46 +344,17 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
             explicit_predictor_count = sum(rollup_support["predictor"].values())
             counters["predictor_expansion_requests"] = counters.get("predictor_expansion_requests", 0) + 1
 
-            def visit_state(state_signature):
-                nonlocal variants_pruned_lower_bound
-                nonlocal next_state_token_id
-
-                if not endpoints_within_target_pair(state_signature[0], state_signature[-1], target_type1, target_type2):
-                    return False
-
-                state_id_parts = []
-                for token in state_signature:
-                    token_id = state_token_ids.get(token)
-                    if token_id is None:
-                        token_id = next_state_token_id
-                        state_token_ids[token] = token_id
-                        next_state_token_id += 1
-                    state_id_parts.append(token_id)
-                state_id = tuple(state_id_parts)
-
-                if state_id in global_pruned_states:
-                    counters["candidate_state_revisits_pruned"] = counters.get("candidate_state_revisits_pruned", 0) + 1
-                    return True
-                proposed = lower_bound_state_counts[state_id] + explicit_predictor_count
-                if max_predictor_count is not None and proposed > max_predictor_count:
-                    variants_pruned_lower_bound += 1
-                    global_pruned_states.add(state_id)
-                    lower_bound_state_counts.pop(state_id, None)
-                    counters["candidate_states_branch_pruned"] = counters.get("candidate_states_branch_pruned", 0) + 1
-                    return True
-                lower_bound_state_counts[state_id] = proposed
-                return False
-
             def visit_variant(variant_state_ids):
                 nonlocal variants_pruned_lower_bound
-                if variant_state_ids in pruned_variants:
-                    counters["candidate_variant_revisits_pruned"] = counters.get("candidate_variant_revisits_pruned", 0) + 1
+                if variant_state_ids in global_pruned_states:
+                    counters["candidate_state_revisits_pruned"] = counters.get("candidate_state_revisits_pruned", 0) + 1
                     return True
-                support_map = aggregated_predictor_support[variant_state_ids]
-                proposed = sum(support_map.values())
-                for predictor_id, predictor_count in rollup_support["predictor"].items():
-                    if predictor_id not in support_map:
-                        proposed += predictor_count
+                known_ids = global_predictor_ids[variant_state_ids]
+                new_contribution = sum(
+                    count for pid, count in rollup_support["predictor"].items()
+                    if pid not in known_ids
+                )
+                proposed = global_predictor_count[variant_state_ids] + new_contribution
                 if max_predictor_count is not None and proposed > max_predictor_count:
                     variants_pruned_lower_bound += 1
                     for pruned_state_ids in canonical_variant_ancestor_closure_state_ids_for_typepair(
@@ -454,13 +362,14 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                         target_type1,
                         target_type2,
                     ):
-                        pruned_variants.add(pruned_state_ids)
-                        aggregated_predictor_support.pop(pruned_state_ids, None)
+                        global_pruned_states.add(pruned_state_ids)
                         aggregated_overlap_support.pop(pruned_state_ids, None)
-                    counters["candidate_variants_branch_pruned"] = counters.get("candidate_variants_branch_pruned", 0) + 1
+                    counters["candidate_states_branch_pruned"] = counters.get("candidate_states_branch_pruned", 0) + 1
                     return True
-                for predictor_id, predictor_count in rollup_support["predictor"].items():
-                    support_map[predictor_id] = predictor_count
+                for pid, count in rollup_support["predictor"].items():
+                    if pid not in known_ids:
+                        known_ids.add(pid)
+                        global_predictor_count[variant_state_ids] += count
                 for predictor_id, overlap in rollup_support["overlap"].items():
                     aggregated_overlap_support[variant_state_ids][predictor_id] = overlap
                 counters["candidate_variants_accepted"] = counters.get("candidate_variants_accepted", 0) + 1
@@ -471,7 +380,6 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                 target_type1,
                 target_type2,
                 visit_variant,
-                visit_state=visit_state,
                 force_same_endpoint_reverse=force_same_endpoint_reverse,
             )
 
@@ -494,7 +402,7 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                     max_predictor_explicit_count=max_explicit_predictor_count,
                     min_predictor_explicit_count=min_explicit_predictor_count,
                     active_variants=len(aggregated_overlap_support),
-                    pruned_variants=len(pruned_variants),
+                    pruned_variants=len(global_pruned_states),
                     lower_bound_pruned=variants_pruned_lower_bound,
                     accepted_variants=accepted_delta,
                     branch_pruned_variants=branch_pruned_delta,
@@ -518,7 +426,7 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                         max_predictor_explicit_count=max_explicit_predictor_count,
                         min_predictor_explicit_count=min_explicit_predictor_count,
                         active_variants=len(aggregated_overlap_support),
-                        pruned_variants=len(pruned_variants),
+                        pruned_variants=len(global_pruned_states),
                         lower_bound_pruned=variants_pruned_lower_bound,
                         accepted_variants=accepted_delta,
                         branch_pruned_variants=branch_pruned_delta,
@@ -526,19 +434,15 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                     ),
                 )
 
-        candidate_rows = {
-            canonical_variant_metapath_from_state_ids(variant_state_ids): (
-                sum(predictor_support.values()),
-                sum(aggregated_overlap_support[variant_state_ids].values()),
-            )
-            for variant_state_ids, predictor_support in aggregated_predictor_support.items()
-            if predictor_support
+        target_overlap_records[onehop_path] = {
+            variant_state_ids: dict(overlap_support)
+            for variant_state_ids, overlap_support in aggregated_overlap_support.items()
+            if overlap_support
         }
-        candidate_rows_by_target[onehop_path] = candidate_rows
-        all_candidate_variants.update(candidate_rows)
+        target_overlap_count = len(target_overlap_records[onehop_path])
 
         counters["targets_candidate_built"] = counters.get("targets_candidate_built", 0) + 1
-        counters["candidate_variants"] = counters.get("candidate_variants", 0) + len(candidate_rows)
+        counters["candidate_variants"] = counters.get("candidate_variants", 0) + target_overlap_count
         counters["precision_pruned_lower_bound"] = counters.get("precision_pruned_lower_bound", 0) + variants_pruned_lower_bound
         elapsed_target = max(time.time() - target_t0, 1e-9)
         accepted_delta = counters.get("candidate_variants_accepted", 0) - target_accepted_at_start
@@ -553,7 +457,7 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
             predictor_rate=round(explicit_predictor_total / elapsed_target, 2),
             max_predictor_explicit_count=max_explicit_predictor_count,
             min_predictor_explicit_count=min_explicit_predictor_count,
-            candidate_variants=len(candidate_rows),
+            candidate_variants=target_overlap_count,
             lower_bound_pruned=variants_pruned_lower_bound,
             accepted_variants=accepted_delta,
             branch_pruned_variants=branch_pruned_delta,
@@ -575,7 +479,7 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
                 predictor_rate=round(explicit_predictor_total / elapsed_target, 2),
                 max_predictor_explicit_count=max_explicit_predictor_count,
                 min_predictor_explicit_count=min_explicit_predictor_count,
-                candidate_variants=len(candidate_rows),
+                candidate_variants=target_overlap_count,
                 lower_bound_pruned=variants_pruned_lower_bound,
                 accepted_variants=accepted_delta,
                 branch_pruned_variants=branch_pruned_delta,
@@ -583,133 +487,21 @@ def build_candidate_variants_for_targets(onehop_to_overlaps, rolled_predictor_co
             ),
         )
 
-    stage_timings["build_target_candidates"] = stage_timings.get("build_target_candidates", 0.0) + (time.time() - t0)
-    counters["candidate_variant_union_size"] = len(all_candidate_variants)
-    return candidate_rows_by_target, all_candidate_variants
-
-
-def build_candidate_variants_for_targets_single_pass(
-    onehop_to_overlaps,
-    explicit_items,
-    original_predictor_counts,
-    target_variant_counts,
-    type1,
-    type2,
-    min_precision,
-    counters,
-):
-    """Build exact global predictor counts and target overlaps in one predictor-centric pass."""
-    candidate_rows_by_target = {target: {} for target in onehop_to_overlaps}
-    all_candidate_variants = set()
-
-    predictor_paths_by_id = defaultdict(set)
-    for path, count in explicit_items:
-        if len(parse_metapath(path)[1]) == 0:
-            continue
-        if not promote_metapath_endpoints_to_typepair_starts(path, type1, type2):
-            continue
-        predictor_paths_by_id[original_predictor_identity(path)].add(path)
-
-    predictor_target_overlaps = defaultdict(dict)
-    for target, nhop_overlaps in onehop_to_overlaps.items():
-        for nhop_path, overlap in nhop_overlaps.items():
-            predictor_id = original_predictor_identity(nhop_path)
-            previous = predictor_target_overlaps[predictor_id].get(target)
-            if previous is None or overlap > previous:
-                predictor_target_overlaps[predictor_id][target] = overlap
-
-    max_predictor_count_by_target = {
-        target: get_max_predictor_count_for_precision(target_variant_counts.get(target, 0), min_precision)
-        for target in onehop_to_overlaps
-    }
-    target_endpoint_types = {
-        target: get_metapath_endpoints(target)
-        for target in onehop_to_overlaps
-    }
-
-    global_variant_support = defaultdict(dict)
-    target_variant_overlap_support = defaultdict(lambda: defaultdict(dict))
-    active_targets_by_variant = defaultdict(set)
-    pruned_variants_by_target = defaultdict(set)
-
-    predictor_items = sorted(
-        predictor_paths_by_id.keys(),
-        key=lambda predictor_id: original_predictor_counts.get(predictor_id, 0),
-        reverse=True,
-    )
-    counters["predictor_single_pass_count"] = len(predictor_items)
-
-    def prune_variant_for_target(variant_state_ids, target):
-        target_type1, target_type2 = target_endpoint_types[target]
-        for pruned_state_ids in canonical_variant_ancestor_closure_state_ids_for_typepair(
-            variant_state_ids,
-            target_type1,
-            target_type2,
-        ):
-            pruned_variants_by_target[target].add(pruned_state_ids)
-            target_variant_overlap_support[target].pop(pruned_state_ids, None)
-            active_targets_by_variant[pruned_state_ids].discard(target)
-
-    for predictor_id in predictor_items:
-        predictor_count = original_predictor_counts.get(predictor_id, 0)
-        target_overlaps = predictor_target_overlaps.get(predictor_id, {})
-        seen_variants = set()
-
-        def visit_variant(variant_state_ids):
-            if variant_state_ids in seen_variants:
-                counters["candidate_variant_revisits_pruned"] = counters.get("candidate_variant_revisits_pruned", 0) + 1
-                return True
-
-            seen_variants.add(variant_state_ids)
-            support_map = global_variant_support[variant_state_ids]
-            if predictor_id not in support_map:
-                support_map[predictor_id] = predictor_count
-
-            current_predictor_count = sum(support_map.values())
-
-            if active_targets_by_variant[variant_state_ids]:
-                for target in list(active_targets_by_variant[variant_state_ids]):
-                    if variant_state_ids in pruned_variants_by_target[target]:
-                        continue
-                    max_predictor_count = max_predictor_count_by_target[target]
-                    if max_predictor_count is not None and current_predictor_count > max_predictor_count:
-                        prune_variant_for_target(variant_state_ids, target)
-
-            for target, overlap in target_overlaps.items():
-                if variant_state_ids in pruned_variants_by_target[target]:
-                    continue
-                max_predictor_count = max_predictor_count_by_target[target]
-                if max_predictor_count is not None and current_predictor_count > max_predictor_count:
-                    prune_variant_for_target(variant_state_ids, target)
-                    continue
-                target_variant_overlap_support[target][variant_state_ids][predictor_id] = overlap
-                active_targets_by_variant[variant_state_ids].add(target)
-                counters["candidate_variants_accepted"] = counters.get("candidate_variants_accepted", 0) + 1
-            return False
-
-        for nhop_path in sorted(predictor_paths_by_id.get(predictor_id, ())):
-            traverse_canonical_variants_for_typepair_pruned(
-                nhop_path,
-                type1,
-                type2,
-                visit_variant,
-            )
-
-    for target, variant_overlap_support in target_variant_overlap_support.items():
-        rows = {}
-        for variant_state_ids, overlap_support in variant_overlap_support.items():
-            if not overlap_support:
+    for onehop_path, overlap_record in target_overlap_records.items():
+        candidate_rows = {}
+        for variant_state_ids, overlap_support in overlap_record.items():
+            predictor_count = global_predictor_count.get(variant_state_ids, 0)
+            if not predictor_count:
                 continue
-            predictor_support = global_variant_support.get(variant_state_ids)
-            if not predictor_support:
-                continue
-            rows[canonical_variant_metapath_from_state_ids(variant_state_ids)] = (
-                sum(predictor_support.values()),
+            variant = canonical_variant_metapath_from_state_ids(variant_state_ids)
+            candidate_rows[variant] = (
+                predictor_count,
                 sum(overlap_support.values()),
             )
-        candidate_rows_by_target[target] = rows
-        all_candidate_variants.update(rows)
+        candidate_rows_by_target[onehop_path] = candidate_rows
+        all_candidate_variants.update(candidate_rows)
 
+    stage_timings["build_target_candidates"] = stage_timings.get("build_target_candidates", 0.0) + (time.time() - t0)
     counters["candidate_variant_union_size"] = len(all_candidate_variants)
     return candidate_rows_by_target, all_candidate_variants
 
@@ -841,13 +633,6 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
                 f"Inconsistent explicit count for original predictor identity {predictor_id}: "
                 f"{previous} vs {count}"
             )
-    rolled_predictor_counts = group_predictor_items_by_promoted_start(
-        global_explicit_items,
-        n_hops,
-        type1,
-        type2,
-        counters,
-    )
     target_variant_counts, target_expansion_cache = build_target_variant_counts(
         global_explicit_items,
         type1,
@@ -928,15 +713,17 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
         ),
     )
 
-    candidate_rows_by_target, candidate_variants = build_candidate_variants_for_targets_single_pass(
-        onehop_to_overlaps,
-        global_explicit_items,
-        original_predictor_counts,
-        target_variant_counts,
-        type1,
-        type2,
-        min_precision,
-        counters,
+    candidate_rows_by_target, candidate_variants = build_candidate_variants_for_targets(
+        onehop_to_overlaps=onehop_to_overlaps,
+        original_predictor_counts=original_predictor_counts,
+        target_variant_counts=target_variant_counts,
+        type1=type1,
+        type2=type2,
+        min_precision=min_precision,
+        start_time=start_time,
+        progress_file=progress_file,
+        counters=counters,
+        stage_timings=stage_timings,
     )
     print(f"\nCandidate predictor variants across targets: {len(candidate_variants)}")
     write_progress_file(

@@ -1008,13 +1008,27 @@ def promote_metapath_endpoints_to_typepair_rollup_keys(
     type1: str,
     type2: str,
 ) -> List[Tuple[str, bool]]:
-    """Return exact-match rolled starts plus whether original endpoints were distinct."""
-    nodes, _, _ = parse_metapath(metapath)
+    """Return non-canonical endpoint-promoted starts plus whether original endpoints were distinct.
+
+    Unlike ``promote_metapath_endpoints_to_typepair_starts`` which canonicalizes
+    the promoted path, this function keeps predicates in their original positions.
+    This is critical for traversal accuracy: canonical reversal swaps predicate
+    positions, and hierarchy expansion from swapped positions produces a different
+    cross-product than expansion from the original positions.
+    """
+    nodes, predicates, directions = parse_metapath(metapath)
     original_endpoints_distinct = nodes[0] != nodes[-1]
-    return [
-        (promoted_path, original_endpoints_distinct)
-        for promoted_path in promote_metapath_endpoints_to_typepair_starts(metapath, type1, type2)
-    ]
+    rollup_keys = []
+    seen = set()
+    for left_target, right_target in _valid_typepair_endpoint_assignments(
+        nodes[0], nodes[-1], type1, type2,
+    ):
+        new_nodes = [left_target] + list(nodes[1:-1]) + [right_target]
+        promoted = build_metapath(new_nodes, predicates, directions)
+        if promoted not in seen:
+            seen.add(promoted)
+            rollup_keys.append((promoted, original_endpoints_distinct))
+    return rollup_keys
 
 
 def expand_rollup_keys_to_typepair_variants(

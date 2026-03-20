@@ -259,6 +259,221 @@ Observation:
 - as aggregation proceeds upward, there may be a point where only one concrete
   contributing subpath remains under a broader aggregate
 
+## Planned Redesign: Canonical Variant Traversal With One Counting Loop
+
+This is the current redesign plan for grouping. It replaces the present
+candidate-build plus exact-count split with a single traversal/count/prune
+loop over canonical variants.
+
+### Input Data
+
+For one worker type pair `(A, B)`, the worker currently has two kinds of input:
+
+1. Type-pair explicit-count shard
+- file: `results_3hop/_tmp_prepare_grouping/typepair_explicit_paths/<A>__<B>.pkl`
+- items: `(explicit_predictor_path, explicit_predictor_count)`
+
+2. Raw overlap shards
+- files: `results_3hop/results_matrix1_*.tsv`
+- partitioned by first-hop `matrix1`, not by final type pair
+- rows tell us that an explicit predictor path `P` overlaps an explicit target
+  path `T` by `overlap(P, T)`
+
+So after scan, the worker effectively knows:
+- global explicit predictor counts `C(P)`
+- sparse target overlaps `O(P, T)`
+
+### Rolled Facts To Build Up Front
+
+For the exact-match-only + rollup design, each explicit predictor `P` is rolled
+up to one or more exact-match worker-valid predictor starts `R`.
+
+From that mapping we build:
+
+- `rolled_predictor_counts[predictor_start]`
+  - exact rolled count
+  - sum of all explicit predictor counts that roll to that start
+
+- `target_overlaps[target][predictor_start]`
+  - exact overlap between a target and a rolled predictor start
+  - sum of all explicit overlaps whose predictors roll to that start
+
+- `target_counts[target]`
+  - exact target count for each canonical target
+
+At that point, we no longer need a later repair pass for predictor counts,
+because the rolled predictor start already has the count we intend to use.
+
+### Canonical Traversal Identity
+
+The plan is to make traversal identity and emitted identity the same thing:
+
+- `predictor_start`
+  - the rolled exact-match predictor we start from
+
+- `variant`
+  - every canonical generalized metapath reached from that start
+
+There is no separate algorithm-level `state` noun in this design. The
+traversal walks canonical variants directly.
+
+This requires:
+- canonical endpoint ordering
+- symmetric predicates normalized
+- reverse-equivalent forms collapsed
+
+### Per-Target Working Structures
+
+For each target:
+
+- `aggregated_predictor_counts[variant]`
+- `aggregated_overlap_counts[variant]`
+- `pruned_variants`
+  - an upward-closed pruned set
+
+If cross-target pruning reuse remains enabled, a carried prune set may also be
+seeded from larger targets processed earlier.
+
+### One-Loop Traversal / Counting / Pruning
+
+For each target in descending target-count order:
+
+```python
+max_predictor_count = target_counts[target] / min_precision
+
+aggregated_predictor_counts = defaultdict(int)
+aggregated_overlap_counts = defaultdict(int)
+pruned_variants = inherited_pruned_variants.copy()
+
+for predictor_start in target_predictors_sorted_by_count_desc:
+    predictor_count = rolled_predictor_counts[predictor_start]
+    overlap = target_overlaps[target][predictor_start]
+
+    stack = [predictor_start]
+    seen_variants = {predictor_start}
+
+    while stack:
+        variant = stack.pop()
+
+        if variant in pruned_variants:
+            continue
+
+        proposed_count = aggregated_predictor_counts[variant] + predictor_count
+
+        if proposed_count > max_predictor_count:
+            for ancestor in ancestor_closure(variant):
+                pruned_variants.add(ancestor)
+                aggregated_predictor_counts.pop(ancestor, None)
+                aggregated_overlap_counts.pop(ancestor, None)
+            continue
+
+        aggregated_predictor_counts[variant] = proposed_count
+        aggregated_overlap_counts[variant] += overlap
+
+        for parent_variant in more_general_canonical_children(variant):
+            if parent_variant not in seen_variants:
+                seen_variants.add(parent_variant)
+                stack.append(parent_variant)
+```
+
+At the end of the target loop, rows are written directly from:
+- `aggregated_predictor_counts`
+- `aggregated_overlap_counts`
+
+There is no separate `compute_exact_predictor_counts(...)` phase in this
+design.
+
+### Why The Pruned Set Must Be Ancestor-Closed
+
+If variant `V` is too broad to meet the target precision threshold, every
+ancestor of `V` is also too broad.
+
+So when `V` prunes, the plan is to add:
+- `V`
+- every ancestor of `V`
+
+to the pruned set.
+
+This matters because otherwise a later traversal can reach an already-doomed
+ancestor by a different path and waste time rediscovering the same pruning
+fact.
+
+With an ancestor-closed prune set:
+- any hit in `pruned_variants` stops the branch immediately
+- future traversals do not re-explore the same upper cone
+
+### Intended Benefits
+
+- remove the candidate-build / exact-count split
+- use true rolled counts for pruning immediately
+- align traversal identity with output identity
+- reduce duplicate work from different generalization orders
+- make the pruning model match the lattice mathematics more closely
+
+### Main Open Requirement
+
+This redesign depends on a correct canonical variant lattice:
+- child generation must be correct
+- duplicate reverse/symmetric forms must already be collapsed
+- emitted variants and traversed variants must be the same identity
+
+Until that canonical lattice exists, the current split architecture remains in
+use.
+
+## Current Implementation
+
+The implementation now matches the planned architecture. The active worker path
+calls `build_candidate_variants_for_targets(...)` in
+`src/pipeline/workers/run_grouping.py`.
+
+### Architecture
+
+Target-centric, rolled-start traversal with support-map dedup:
+
+1. **Precompute global variant predictor counts** — explicit typepair expansion
+   produces the correct global predictor count for each canonical variant,
+   keyed by `original_predictor_identity` to prevent double-counting
+2. **Outer loop: targets** — sorted by descending target count
+3. **Inner loop: rolled predictor starts** — explicit predictors promoted to
+   typepair rollup keys via `promote_metapath_endpoints_to_typepair_rollup_keys`
+4. **Traversal: canonical variants** — `traverse_canonical_variants_for_typepair_pruned`
+   walks the variant lattice from each rolled start
+5. **Overlap: per-target** — overlap is accumulated per-target during traversal
+6. **Output counts** — the precomputed global variant counts are used for the
+   predictor_count field in output rows, not the traversal-accumulated support.
+   This is necessary because canonical traversal from rolled starts can
+   over-generate variants relative to explicit expansion (documented by
+   `test_promoted_start_traversal_mismatches_explicit_ancestor_set_for_failing_case`)
+
+### Pruning
+
+- **State-level pruning** — lower-bound count checks on intermediate lattice
+  states cut entire subtrees before expanding to individual variants
+- **Variant-level pruning** — ancestor-closure pruning marks a variant and all
+  its ancestors as pruned, preventing further accumulation
+- **Cross-target carryover** — `global_pruned_states` carries state-level prune
+  decisions forward across targets (processed in descending count order, so
+  high-count targets prune states that low-count targets inherit)
+
+### Correctness Properties
+
+Three concrete correctness issues were resolved before this architecture
+could be used:
+
+1. **Double-counting from converging starts** — one explicit predictor can
+   produce multiple rolled starts that reach the same ancestor variant.
+   Resolved by keying support maps on `original_predictor_identity`, so the
+   same predictor contributes its count only once per variant.
+
+2. **Same-endpoint reverse dedup** — `Gene|regulates|F|Gene` and
+   `Gene|regulates|R|Gene` are directional views of the same edge, not
+   distinct predictors. Resolved by `original_predictor_identity(...)` which
+   collapses reverse-equivalent forms.
+
+3. **Canonical traversal semantics** — the canonical traversal originally
+   disagreed with explicit bounded expansion for same-endpoint symmetric
+   cases. Fixed in `a7bb4d2`.
+
 Example intuition:
 - many subclass combinations under `(NamedThing, treats, NamedThing)` may have
   zero support

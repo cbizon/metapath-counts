@@ -48,6 +48,11 @@ That file now records the implemented sequence:
 - direct endpoint promotion
 - predictor aggregation after endpoint promotion
 
+It also now records the planned redesign:
+- canonical variant traversal where `state == variant`
+- one-loop rolled predictor counting and pruning
+- ancestor-closed prune sets
+
 ### What This System Does
 
 1. **Splits work** across ~2,879 independent jobs (one per Matrix1)
