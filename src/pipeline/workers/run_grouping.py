@@ -641,7 +641,12 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
     rows_scanned = 0
     t_scan = time.time()
 
+    files_skipped = 0
     for file_path in file_list:
+        if not os.path.exists(file_path):
+            files_skipped += 1
+            print(f"WARNING: Missing result file (analysis job may have failed): {file_path}")
+            continue
         files_processed += 1
         with open(file_path, 'r') as f:
             f.readline()
@@ -718,8 +723,11 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
             )
 
     stage_timings["scan_overlap_files"] = stage_timings.get("scan_overlap_files", 0.0) + (time.time() - t_scan)
+    if files_skipped:
+        print(f"WARNING: Skipped {files_skipped} missing result files out of {len(file_list)}")
     counters["rows_scanned"] = rows_scanned
     counters["rows_matched"] = rows_found
+    counters["files_skipped"] = files_skipped
     counters["target_bucket_count"] = len(onehop_to_overlaps)
 
     global_explicit_items = sorted(global_onehop_count_by_path.items())

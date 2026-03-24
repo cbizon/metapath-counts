@@ -79,6 +79,10 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
         if not all([src_type, tgt_type]):
             continue
 
+        # Skip jobs that didn't complete (no result file)
+        if matrix_data.get("status") != "completed":
+            continue
+
         # Check if this matrix could contribute to paths between type1 and type2
         # Match if either src or tgt matches either type1 or type2
         type_match = (
