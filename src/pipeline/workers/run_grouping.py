@@ -634,7 +634,8 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
 
     onehop_to_overlaps = defaultdict(lambda: defaultdict(int))
     target_expansion_cache = {}
-    global_explicit_count_by_path = {}
+    global_nhop_count_by_path = {}
+    global_onehop_count_by_path = {}
     files_processed = 0
     rows_found = 0
     rows_scanned = 0
@@ -656,21 +657,24 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
                 onehop_count = int(parts[3])
                 overlap = int(parts[4])
 
-                previous_nhop_count = global_explicit_count_by_path.get(nhop_path)
+                # Track nhop (predictor) and onehop (predicted) counts separately.
+                # For 1-hop self-overlap, the same path can have different counts
+                # as predictor (triu-deduped for same-type) vs predicted (raw).
+                previous_nhop_count = global_nhop_count_by_path.get(nhop_path)
                 if previous_nhop_count is None:
-                    global_explicit_count_by_path[nhop_path] = nhop_count
+                    global_nhop_count_by_path[nhop_path] = nhop_count
                 else:
                     assert previous_nhop_count == nhop_count, (
-                        f"Inconsistent explicit count for {nhop_path}: "
+                        f"Inconsistent nhop count for {nhop_path}: "
                         f"{previous_nhop_count} vs {nhop_count}"
                     )
 
-                previous_onehop_count = global_explicit_count_by_path.get(onehop_path)
+                previous_onehop_count = global_onehop_count_by_path.get(onehop_path)
                 if previous_onehop_count is None:
-                    global_explicit_count_by_path[onehop_path] = onehop_count
+                    global_onehop_count_by_path[onehop_path] = onehop_count
                 else:
                     assert previous_onehop_count == onehop_count, (
-                        f"Inconsistent explicit count for {onehop_path}: "
+                        f"Inconsistent onehop count for {onehop_path}: "
                         f"{previous_onehop_count} vs {onehop_count}"
                     )
 
@@ -718,7 +722,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
     counters["rows_matched"] = rows_found
     counters["target_bucket_count"] = len(onehop_to_overlaps)
 
-    global_explicit_items = sorted(global_explicit_count_by_path.items())
+    global_explicit_items = sorted(global_onehop_count_by_path.items())
     target_variant_counts, target_expansion_cache = build_target_variant_counts(
         global_explicit_items,
         type1,
