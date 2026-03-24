@@ -13,7 +13,8 @@ here to avoid duplication.
 """
 
 import itertools
-from typing import Iterator, List, Tuple
+from functools import lru_cache
+from typing import Callable, Iterator, List, Tuple
 
 from .hierarchy import get_type_ancestors, get_predicate_ancestors, get_qualifier_ancestors
 from .type_assignment import is_pseudo_type, parse_pseudo_type
@@ -21,6 +22,8 @@ from .type_utils import get_symmetric_predicates
 
 # Cache symmetric predicates at module load time
 _SYMMETRIC_PREDICATES = None
+_CANONICAL_STATE_TOKEN_TO_ID = {}
+_CANONICAL_STATE_ID_TO_TOKEN = []
 
 
 def _get_symmetric_predicates():
@@ -29,6 +32,22 @@ def _get_symmetric_predicates():
     if _SYMMETRIC_PREDICATES is None:
         _SYMMETRIC_PREDICATES = get_symmetric_predicates()
     return _SYMMETRIC_PREDICATES
+
+
+def _intern_canonical_state_token(token: str) -> int:
+    """Map a canonical state token to a compact integer ID."""
+    token_id = _CANONICAL_STATE_TOKEN_TO_ID.get(token)
+    if token_id is not None:
+        return token_id
+    token_id = len(_CANONICAL_STATE_ID_TO_TOKEN)
+    _CANONICAL_STATE_TOKEN_TO_ID[token] = token_id
+    _CANONICAL_STATE_ID_TO_TOKEN.append(token)
+    return token_id
+
+
+def _decode_canonical_state_ids(state_ids: Tuple[int, ...]) -> Tuple[str, ...]:
+    """Convert a canonical state ID tuple back to tokens."""
+    return tuple(_CANONICAL_STATE_ID_TO_TOKEN[token_id] for token_id in state_ids)
 
 
 def build_compound_predicate(predicate: str, direction: str = None, aspect: str = None) -> str:
@@ -165,6 +184,36 @@ def build_metapath(nodes: List[str], predicates: List[str], directions: List[str
     return '|'.join(result)
 
 
+def reverse_metapath(metapath: str) -> str:
+    """Return the reversed metapath with directions flipped."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    reversed_nodes = list(reversed(nodes))
+    reversed_predicates = list(reversed(predicates))
+    reversed_directions = []
+    for direction in reversed(directions):
+        if direction == 'F':
+            reversed_directions.append('R')
+        elif direction == 'R':
+            reversed_directions.append('F')
+        else:
+            reversed_directions.append('A')
+    return build_metapath(reversed_nodes, reversed_predicates, reversed_directions)
+
+
+def original_predictor_identity(metapath: str) -> str:
+    """
+    Return the provenance identity for an original explicit predictor.
+
+    Same-endpoint reverse views of the same underlying explicit predictor share
+    one identity; different-endpoint paths keep their original string.
+    """
+    nodes, _, _ = parse_metapath(metapath)
+    if nodes[0] != nodes[-1]:
+        return metapath
+    reversed_metapath = reverse_metapath(metapath)
+    return metapath if metapath <= reversed_metapath else reversed_metapath
+
+
 def canonicalize_metapath(nodes: List[str], predicates: List[str], directions: List[str]) -> Tuple[List[str], List[str], List[str]]:
     """
     Ensure metapath is in canonical form based on alphabetical ordering of endpoint types.
@@ -202,6 +251,392 @@ def canonicalize_metapath(nodes: List[str], predicates: List[str], directions: L
             flipped_directions.append('A')
 
     return reversed_nodes, reversed_predicates, flipped_directions
+
+
+@lru_cache(maxsize=None)
+def _canonical_variant_state_ids_from_metapath(metapath: str) -> Tuple[int, ...]:
+    """Return the canonical variant state as a compact integer tuple."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    symmetric_preds = _get_symmetric_predicates()
+
+    adjusted_directions = []
+    for pred, direction in zip(predicates, directions):
+        base_pred = parse_compound_predicate(pred)[0]
+        adjusted_directions.append('A' if base_pred in symmetric_preds else direction)
+
+    canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+        nodes,
+        predicates,
+        adjusted_directions,
+    )
+
+    state_ids: List[int] = [_intern_canonical_state_token(canon_nodes[0])]
+    for pred, direction, node in zip(canon_preds, canon_dirs, canon_nodes[1:]):
+        state_ids.extend(
+            (
+                _intern_canonical_state_token(pred),
+                _intern_canonical_state_token(direction),
+                _intern_canonical_state_token(node),
+            )
+        )
+    return tuple(state_ids)
+
+
+def canonical_variant_state(metapath: str) -> Tuple[str, ...]:
+    """Return the canonical variant token tuple for a metapath."""
+    return _decode_canonical_state_ids(_canonical_variant_state_ids_from_metapath(metapath))
+
+
+def canonical_variant_metapath(metapath: str) -> str:
+    """Return the canonical variant metapath string."""
+    return '|'.join(canonical_variant_state(metapath))
+
+
+def canonical_variant_state_ids(metapath: str) -> Tuple[int, ...]:
+    """Return the canonical variant as a compact integer state ID tuple."""
+    return _canonical_variant_state_ids_from_metapath(metapath)
+
+
+def canonical_variant_metapath_from_state_ids(state_ids: Tuple[int, ...]) -> str:
+    """Return the canonical metapath string for a compact integer state ID tuple."""
+    return '|'.join(_decode_canonical_state_ids(state_ids))
+
+
+@lru_cache(maxsize=None)
+def _canonical_variant_ancestor_closure_state_ids_for_typepair(
+    canonical_metapath: str,
+    type1: str,
+    type2: str,
+) -> Tuple[Tuple[int, ...], ...]:
+    """Return the upward closure of a canonical exact-match worker variant."""
+    closure: List[Tuple[int, ...]] = []
+    seen = set()
+
+    def visit_variant(state_ids: Tuple[int, ...]) -> bool:
+        if state_ids not in seen:
+            seen.add(state_ids)
+            closure.append(state_ids)
+        return False
+
+    traverse_canonical_variants_for_typepair_pruned(
+        canonical_metapath,
+        type1,
+        type2,
+        visit_variant,
+    )
+    return tuple(closure)
+
+
+def canonical_variant_ancestor_closure_state_ids_for_typepair(
+    state_ids: Tuple[int, ...],
+    type1: str,
+    type2: str,
+) -> Tuple[Tuple[int, ...], ...]:
+    """Return the upward closure of a canonical exact-match worker variant ID."""
+    return _canonical_variant_ancestor_closure_state_ids_for_typepair(
+        canonical_variant_metapath_from_state_ids(state_ids),
+        type1,
+        type2,
+    )
+
+
+def _canonical_variant_state_ids_from_components(
+    nodes: Tuple[str, ...],
+    predicates: Tuple[str, ...],
+    directions: Tuple[str, ...],
+) -> Tuple[int, ...]:
+    """Canonicalize components and return compact canonical state IDs."""
+    symmetric_preds = _get_symmetric_predicates()
+    adjusted_directions = []
+    for pred, direction in zip(predicates, directions):
+        base_pred = parse_compound_predicate(pred)[0]
+        adjusted_directions.append('A' if base_pred in symmetric_preds else direction)
+
+    canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+        list(nodes),
+        list(predicates),
+        adjusted_directions,
+    )
+
+    state_ids: List[int] = [_intern_canonical_state_token(canon_nodes[0])]
+    for pred, direction, node in zip(canon_preds, canon_dirs, canon_nodes[1:]):
+        state_ids.extend(
+            (
+                _intern_canonical_state_token(pred),
+                _intern_canonical_state_token(direction),
+                _intern_canonical_state_token(node),
+            )
+        )
+    return tuple(state_ids)
+
+
+@lru_cache(maxsize=None)
+def _canonical_variant_children_state_ids_for_typepair(
+    canonical_metapath: str,
+    type1: str,
+    type2: str,
+) -> Tuple[Tuple[int, ...], ...]:
+    """
+    Return one-step more-general canonical child state IDs for an exact-match worker variant.
+
+    Endpoints remain fixed to the worker pair. Only internal node and predicate
+    dimensions are generalized.
+    """
+    nodes, predicates, directions = parse_metapath(canonical_metapath)
+    required_endpoints = tuple(sorted((type1, type2)))
+    actual_endpoints = tuple(sorted((nodes[0], nodes[-1])))
+    if actual_endpoints != required_endpoints:
+        raise ValueError(
+            f"Metapath endpoints {actual_endpoints} do not match worker pair {required_endpoints}"
+        )
+
+    node_dimensions = [[nodes[0]]]
+    if len(nodes) > 2:
+        node_dimensions.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_dimensions.append([nodes[-1]])
+    predicate_dimensions = [get_predicate_variants(pred) for pred in predicates]
+    dimensions = node_dimensions + predicate_dimensions
+    node_dim_count = len(nodes)
+    start = tuple(0 for _ in dimensions)
+
+    children: List[Tuple[int, ...]] = []
+    seen = set()
+    for dim_idx in range(len(dimensions) - 1, -1, -1):
+        next_idx = start[dim_idx] + 1
+        if next_idx >= len(dimensions[dim_idx]):
+            continue
+        child_indexes = list(start)
+        child_indexes[dim_idx] = next_idx
+        child_indexes = tuple(child_indexes)
+        node_combo = tuple(dimensions[i][child_indexes[i]] for i in range(node_dim_count))
+        pred_combo = tuple(
+            dimensions[node_dim_count + i][child_indexes[node_dim_count + i]]
+            for i in range(len(predicates))
+        )
+
+        adjusted_directions = []
+        for i, pred in enumerate(pred_combo):
+            base_pred = parse_compound_predicate(pred)[0]
+            adjusted_directions.append('A' if base_pred in _get_symmetric_predicates() else directions[i])
+
+        canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+            list(node_combo),
+            list(pred_combo),
+            adjusted_directions,
+        )
+        if tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+            continue
+
+        child_state_ids = _canonical_variant_state_ids_from_components(
+            tuple(canon_nodes),
+            tuple(canon_preds),
+            tuple(canon_dirs),
+        )
+        if child_state_ids not in seen:
+            seen.add(child_state_ids)
+            children.append(child_state_ids)
+    return tuple(children)
+
+
+def _canonical_variant_state_ids_for_dimension_indexes(
+    nodes: List[str],
+    predicates: List[str],
+    directions: List[str],
+    dimensions: List[List[str]],
+    node_dim_count: int,
+    symmetric_preds,
+    required_endpoints: Tuple[str, str] | None,
+    indexes: Tuple[int, ...],
+    force_same_endpoint_reverse: bool = False,
+) -> Tuple[Tuple[int, ...], ...]:
+    """Materialize canonical variant state IDs for a raw index tuple."""
+    node_combo = tuple(dimensions[i][indexes[i]] for i in range(node_dim_count))
+    pred_combo = tuple(dimensions[node_dim_count + i][indexes[node_dim_count + i]] for i in range(len(predicates)))
+
+    adjusted_directions = []
+    for i, pred in enumerate(pred_combo):
+        base_pred = parse_compound_predicate(pred)[0]
+        if base_pred in symmetric_preds:
+            if nodes[0] == nodes[-1] and not force_same_endpoint_reverse and directions[i] == 'R':
+                return ()
+            adjusted_directions.append('A')
+        else:
+            adjusted_directions.append(directions[i])
+
+    canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+        list(node_combo), list(pred_combo), adjusted_directions
+    )
+    if required_endpoints is not None and tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+        return ()
+
+    variants = [
+        _canonical_variant_state_ids_from_components(
+            tuple(canon_nodes),
+            tuple(canon_preds),
+            tuple(canon_dirs),
+        )
+    ]
+
+    if ((nodes[0] != nodes[-1] or force_same_endpoint_reverse)
+            and canon_nodes[0] == canon_nodes[-1]
+            and any(d != 'A' for d in canon_dirs)):
+        rev_nodes = tuple(reversed(canon_nodes))
+        rev_preds = tuple(reversed(canon_preds))
+        rev_dirs = tuple(
+            'R' if d == 'F' else 'F' if d == 'R' else 'A'
+            for d in reversed(canon_dirs)
+        )
+        if required_endpoints is None or tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
+            rev_state_ids = _canonical_variant_state_ids_from_components(
+                rev_nodes,
+                rev_preds,
+                rev_dirs,
+            )
+            if rev_state_ids not in variants:
+                variants.append(rev_state_ids)
+
+    return tuple(variants)
+
+
+@lru_cache(maxsize=None)
+def _canonical_variant_graph_for_typepair(
+    metapath: str,
+    type1: str,
+    type2: str,
+    force_same_endpoint_reverse: bool = False,
+) -> Tuple[Tuple[Tuple[int, ...], ...], dict[Tuple[int, ...], Tuple[Tuple[int, ...], ...]]]:
+    """
+    Compile the raw bounded traversal into a canonical-variant graph.
+
+    Raw index states are used only to discover reachability. The returned graph
+    contains canonical variant states only, with outgoing edges equal to the
+    union of all raw-state transitions that materialize those canonical
+    variants.
+    """
+    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds, required_endpoints = (
+        _build_typepair_variant_dimensions(metapath, type1, type2)
+    )
+    start = tuple(0 for _ in dimensions)
+    raw_stack = [start]
+    seen_raw_indexes = {start}
+    raw_variant_cache: dict[Tuple[int, ...], Tuple[Tuple[int, ...], ...]] = {}
+    canonical_children: dict[Tuple[int, ...], set[Tuple[int, ...]]] = {}
+    canonical_nodes: set[Tuple[int, ...]] = set()
+    canonical_indegree: dict[Tuple[int, ...], int] = {}
+
+    def variants_for_raw_indexes(indexes: Tuple[int, ...]) -> Tuple[Tuple[int, ...], ...]:
+        variants = raw_variant_cache.get(indexes)
+        if variants is None:
+            variants = _canonical_variant_state_ids_for_dimension_indexes(
+                nodes,
+                predicates,
+                directions,
+                dimensions,
+                node_dim_count,
+                symmetric_preds,
+                required_endpoints,
+                indexes,
+                force_same_endpoint_reverse=force_same_endpoint_reverse,
+            )
+            raw_variant_cache[indexes] = variants
+        return variants
+
+    while raw_stack:
+        indexes = raw_stack.pop()
+        parent_variants = variants_for_raw_indexes(indexes)
+        for parent_variant in parent_variants:
+            canonical_nodes.add(parent_variant)
+            canonical_children.setdefault(parent_variant, set())
+            canonical_indegree.setdefault(parent_variant, 0)
+
+        for dim_idx in range(len(dimensions) - 1, -1, -1):
+            next_idx = indexes[dim_idx] + 1
+            if next_idx >= len(dimensions[dim_idx]):
+                continue
+            child = list(indexes)
+            child[dim_idx] = next_idx
+            child = tuple(child)
+            if child not in seen_raw_indexes:
+                seen_raw_indexes.add(child)
+                raw_stack.append(child)
+
+            child_variants = variants_for_raw_indexes(child)
+            for child_variant in child_variants:
+                canonical_nodes.add(child_variant)
+                canonical_children.setdefault(child_variant, set())
+                canonical_indegree.setdefault(child_variant, 0)
+
+            for parent_variant in parent_variants:
+                for child_variant in child_variants:
+                    if child_variant == parent_variant or child_variant in canonical_children[parent_variant]:
+                        continue
+                    canonical_children[parent_variant].add(child_variant)
+                    canonical_indegree[child_variant] = canonical_indegree.get(child_variant, 0) + 1
+
+    start_variants = tuple(
+        sorted(
+            (variant for variant in canonical_nodes if canonical_indegree.get(variant, 0) == 0),
+            key=canonical_variant_metapath_from_state_ids,
+        )
+    )
+    child_map = {
+        variant: tuple(sorted(children, key=canonical_variant_metapath_from_state_ids))
+        for variant, children in canonical_children.items()
+    }
+    return start_variants, child_map
+
+
+def canonical_variant_children_for_typepair(metapath: str, type1: str, type2: str) -> List[str]:
+    """Return one-step more-general canonical children for an exact-match worker variant."""
+    canonical_metapath = canonical_variant_metapath(metapath)
+    return [
+        '|'.join(_decode_canonical_state_ids(state_ids))
+        for state_ids in _canonical_variant_children_state_ids_for_typepair(
+            canonical_metapath,
+            type1,
+            type2,
+        )
+    ]
+
+
+def traverse_canonical_variants_for_typepair_pruned(
+    metapath: str,
+    type1: str,
+    type2: str,
+    visit_variant: Callable[[Tuple[int, ...]], bool],
+    visit_state: Callable[[Tuple[str, ...]], bool] | None = None,
+    force_same_endpoint_reverse: bool = False,
+) -> None:
+    """
+    Traverse canonical variants for a type pair using canonical variant states.
+
+    The traversal state is the canonical emitted variant identity itself. Child
+    generation operates on canonical states directly, so future descendants do
+    not depend on which raw orientation happened to reach the state.
+    """
+    start_states, child_map = _canonical_variant_graph_for_typepair(
+        metapath,
+        type1,
+        type2,
+        force_same_endpoint_reverse=force_same_endpoint_reverse,
+    )
+    stack = list(start_states)
+    seen_variants = set(start_states)
+
+    while stack:
+        state_ids = stack.pop()
+        state_signature = _decode_canonical_state_ids(state_ids)
+        if visit_state is not None and visit_state(state_signature):
+            continue
+
+        if visit_variant(state_ids):
+            continue
+
+        for child_state_ids in child_map.get(state_ids, ()):
+            if child_state_ids in seen_variants:
+                continue
+            seen_variants.add(child_state_ids)
+            stack.append(child_state_ids)
 
 
 def get_type_variants(type_name: str, include_self: bool = True) -> List[str]:
@@ -409,6 +844,460 @@ def expand_metapath_to_variants(metapath: str) -> set:
         Set of expanded metapaths including hierarchical ancestors
     """
     return set(generate_metapath_variants(metapath))
+
+
+def _build_variant_dimensions(metapath: str):
+    """Return full expansion dimensions and metadata for unbounded traversal."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    node_variants = [get_type_variants(node) for node in nodes]
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    dimensions = node_variants + predicate_variants
+    return nodes, predicates, directions, dimensions, len(node_variants), symmetric_preds
+
+
+def _type_within_ceiling(type_name: str, ceiling_type: str) -> bool:
+    """Return True when type_name is the ceiling or a descendant of it."""
+    if type_name == ceiling_type:
+        return True
+    return ceiling_type in get_type_ancestors(type_name)
+
+
+def _valid_typepair_endpoint_assignments(
+    left_type: str,
+    right_type: str,
+    type1: str,
+    type2: str,
+) -> List[Tuple[str, str]]:
+    """Return the valid direct endpoint assignments for a type-pair job."""
+    assignments: List[Tuple[str, str]] = []
+    candidate_pairs = [(type1, type2)]
+    if (type2, type1) != (type1, type2):
+        candidate_pairs.append((type2, type1))
+
+    for left_target, right_target in candidate_pairs:
+        if _type_within_ceiling(left_type, left_target) and _type_within_ceiling(right_type, right_target):
+            assignment = (left_target, right_target)
+            if assignment not in assignments:
+                assignments.append(assignment)
+    return assignments
+
+
+def generate_metapath_variants_for_typepair(
+    metapath: str,
+    type1: str,
+    type2: str,
+    force_same_endpoint_reverse: bool = False,
+) -> Iterator[str]:
+    """
+    Generate implied variants whose endpoints do not generalize beyond a job type pair.
+
+    Endpoint types are bounded so expansion stops once it reaches type1/type2.
+    Internal nodes and predicates still expand through their full hierarchies.
+    Output variants are canonicalized exactly like generate_metapath_variants().
+    """
+    nodes, predicates, directions = parse_metapath(metapath)
+
+    endpoint_allow = {type1, type2}
+    bounded_first = [
+        node for node in get_type_variants(nodes[0])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    bounded_last = [
+        node for node in get_type_variants(nodes[-1])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    node_variants = [bounded_first]
+    if len(nodes) > 2:
+        node_variants.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_variants.append(bounded_last)
+
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+
+    for node_combo in itertools.product(*node_variants):
+        for pred_combo in itertools.product(*predicate_variants):
+            adjusted_directions = []
+            skip_variant = False
+
+            for i, pred in enumerate(pred_combo):
+                base_pred = parse_compound_predicate(pred)[0]
+                if base_pred in symmetric_preds:
+                    adjusted_directions.append('A')
+                    if nodes[0] == nodes[-1] and directions[i] == 'R':
+                        skip_variant = True
+                        break
+                else:
+                    adjusted_directions.append(directions[i])
+
+            if skip_variant:
+                continue
+
+            canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+                list(node_combo), list(pred_combo), adjusted_directions
+            )
+            if tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+                continue
+
+            variant = build_metapath(canon_nodes, canon_preds, canon_dirs)
+            yield variant
+
+            if ((nodes[0] != nodes[-1] or force_same_endpoint_reverse)
+                    and canon_nodes[0] == canon_nodes[-1]
+                    and any(d != 'A' for d in canon_dirs)):
+                rev_nodes = list(reversed(canon_nodes))
+                rev_preds = list(reversed(canon_preds))
+                rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
+                            for d in reversed(canon_dirs)]
+                rev_variant = build_metapath(rev_nodes, rev_preds, rev_dirs)
+                if tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
+                    yield rev_variant
+
+
+def expand_metapath_to_typepair_variants(
+    metapath: str,
+    type1: str,
+    type2: str,
+    force_same_endpoint_reverse: bool = False,
+) -> set:
+    """Expand a metapath to variants bounded by the worker's endpoint type pair."""
+    return set(generate_metapath_variants_for_typepair(
+        metapath,
+        type1,
+        type2,
+        force_same_endpoint_reverse=force_same_endpoint_reverse,
+    ))
+
+
+def promote_metapath_endpoints_to_typepair_starts(metapath: str, type1: str, type2: str) -> List[str]:
+    """Return the direct endpoint-promoted exact-match starting form(s) for a type-pair job."""
+    nodes, predicates, directions = parse_metapath(metapath)
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+
+    promoted: List[str] = []
+    seen = set()
+    for left_target, right_target in _valid_typepair_endpoint_assignments(nodes[0], nodes[-1], type1, type2):
+        node_dimensions = [[left_target]]
+        if len(nodes) > 2:
+            node_dimensions.extend([[node] for node in nodes[1:-1]])
+        node_dimensions.append([right_target])
+        predicate_dimensions = [[pred] for pred in predicates]
+        dimensions = node_dimensions + predicate_dimensions
+        start = tuple(0 for _ in dimensions)
+        for variant in _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            len(nodes),
+            symmetric_preds,
+            required_endpoints,
+            start,
+        ):
+            canonical_variant = canonical_variant_metapath(variant)
+            if canonical_variant not in seen:
+                seen.add(canonical_variant)
+                promoted.append(canonical_variant)
+    return promoted
+
+
+def promote_metapath_endpoints_to_typepair_rollup_keys(
+    metapath: str,
+    type1: str,
+    type2: str,
+) -> List[Tuple[str, bool]]:
+    """Return non-canonical endpoint-promoted starts plus whether original endpoints were distinct.
+
+    Unlike ``promote_metapath_endpoints_to_typepair_starts`` which canonicalizes
+    the promoted path, this function keeps predicates in their original positions.
+    This is critical for traversal accuracy: canonical reversal swaps predicate
+    positions, and hierarchy expansion from swapped positions produces a different
+    cross-product than expansion from the original positions.
+    """
+    nodes, predicates, directions = parse_metapath(metapath)
+    original_endpoints_distinct = nodes[0] != nodes[-1]
+    rollup_keys = []
+    seen = set()
+    for left_target, right_target in _valid_typepair_endpoint_assignments(
+        nodes[0], nodes[-1], type1, type2,
+    ):
+        new_nodes = [left_target] + list(nodes[1:-1]) + [right_target]
+        promoted = build_metapath(new_nodes, predicates, directions)
+        if promoted not in seen:
+            seen.add(promoted)
+            rollup_keys.append((promoted, original_endpoints_distinct))
+    return rollup_keys
+
+
+def expand_rollup_keys_to_typepair_variants(
+    metapath: str,
+    type1: str,
+    type2: str,
+) -> set[str]:
+    """Expand an explicit metapath by traversing all rolled starts that preserve endpoint-distinctness."""
+    variants: set[str] = set()
+    for promoted_path, force_same_endpoint_reverse in promote_metapath_endpoints_to_typepair_rollup_keys(
+        metapath,
+        type1,
+        type2,
+    ):
+        def visit_variant(variant_state_ids):
+            variants.add(canonical_variant_metapath_from_state_ids(variant_state_ids))
+            return False
+
+        traverse_canonical_variants_for_typepair_pruned(
+            promoted_path,
+            type1,
+            type2,
+            visit_variant,
+            force_same_endpoint_reverse=force_same_endpoint_reverse,
+        )
+    return variants
+
+
+def _build_typepair_variant_dimensions(metapath: str, type1: str, type2: str):
+    """Return expansion dimensions and metadata for type-pair-bounded traversal."""
+    nodes, predicates, directions = parse_metapath(metapath)
+
+    endpoint_allow = {type1, type2}
+    bounded_first = [
+        node for node in get_type_variants(nodes[0])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    bounded_last = [
+        node for node in get_type_variants(nodes[-1])
+        if any(_type_within_ceiling(node, ceiling) for ceiling in endpoint_allow)
+    ]
+    node_variants = [bounded_first]
+    if len(nodes) > 2:
+        node_variants.extend(get_type_variants(node) for node in nodes[1:-1])
+    node_variants.append(bounded_last)
+    predicate_variants = [get_predicate_variants(pred) for pred in predicates]
+    symmetric_preds = _get_symmetric_predicates()
+    required_endpoints = tuple(sorted((type1, type2)))
+    dimensions = node_variants + predicate_variants
+    return nodes, predicates, directions, dimensions, len(node_variants), symmetric_preds, required_endpoints
+
+
+def _variants_for_dimension_indexes(
+    nodes: List[str],
+    predicates: List[str],
+    directions: List[str],
+    dimensions: List[List[str]],
+    node_dim_count: int,
+    symmetric_preds,
+    required_endpoints: Tuple[str, str] | None,
+    indexes: Tuple[int, ...],
+    force_same_endpoint_reverse: bool = False,
+) -> List[str]:
+    """Materialize one or two canonical variants for a dimension index tuple."""
+    node_combo = tuple(dimensions[i][indexes[i]] for i in range(node_dim_count))
+    pred_combo = tuple(dimensions[node_dim_count + i][indexes[node_dim_count + i]] for i in range(len(predicates)))
+
+    adjusted_directions = []
+    for i, pred in enumerate(pred_combo):
+        base_pred = parse_compound_predicate(pred)[0]
+        if base_pred in symmetric_preds:
+            if nodes[0] == nodes[-1] and not force_same_endpoint_reverse and directions[i] == 'R':
+                return []
+            adjusted_directions.append('A')
+        else:
+            adjusted_directions.append(directions[i])
+
+    canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+        list(node_combo), list(pred_combo), adjusted_directions
+    )
+    if required_endpoints is not None and tuple(sorted((canon_nodes[0], canon_nodes[-1]))) != required_endpoints:
+        return []
+
+    variants = [build_metapath(canon_nodes, canon_preds, canon_dirs)]
+
+    if ((nodes[0] != nodes[-1] or force_same_endpoint_reverse)
+            and canon_nodes[0] == canon_nodes[-1]
+            and any(d != 'A' for d in canon_dirs)):
+        rev_nodes = list(reversed(canon_nodes))
+        rev_preds = list(reversed(canon_preds))
+        rev_dirs = ['R' if d == 'F' else 'F' if d == 'R' else 'A'
+                    for d in reversed(canon_dirs)]
+        if required_endpoints is None or tuple(sorted((rev_nodes[0], rev_nodes[-1]))) == required_endpoints:
+            variants.append(build_metapath(rev_nodes, rev_preds, rev_dirs))
+
+    return variants
+
+
+def _state_signature_for_dimension_indexes(
+    nodes: List[str],
+    predicates: List[str],
+    directions: List[str],
+    dimensions: List[List[str]],
+    node_dim_count: int,
+    symmetric_preds,
+    indexes: Tuple[int, ...],
+    force_same_endpoint_reverse: bool = False,
+) -> Tuple[str, ...] | None:
+    """Materialize a canonical lattice-state signature without enforcing endpoint validity."""
+    node_combo = tuple(dimensions[i][indexes[i]] for i in range(node_dim_count))
+    pred_combo = tuple(dimensions[node_dim_count + i][indexes[node_dim_count + i]] for i in range(len(predicates)))
+
+    adjusted_directions = []
+    for i, pred in enumerate(pred_combo):
+        base_pred = parse_compound_predicate(pred)[0]
+        if base_pred in symmetric_preds:
+            if nodes[0] == nodes[-1] and not force_same_endpoint_reverse and directions[i] == 'R':
+                return None
+            adjusted_directions.append('A')
+        else:
+            adjusted_directions.append(directions[i])
+
+    canon_nodes, canon_preds, canon_dirs = canonicalize_metapath(
+        list(node_combo), list(pred_combo), adjusted_directions
+    )
+    signature: List[str] = [canon_nodes[0]]
+    for pred, direction, node in zip(canon_preds, canon_dirs, canon_nodes[1:]):
+        signature.extend((pred, direction, node))
+    return tuple(signature)
+
+
+def traverse_metapath_variants_for_typepair_pruned(
+    metapath: str,
+    type1: str,
+    type2: str,
+    visit_variant: Callable[[str], bool],
+    visit_state: Callable[[Tuple[str, ...]], bool] | None = None,
+    force_same_endpoint_reverse: bool = False,
+) -> None:
+    """
+    Traverse bounded type-pair variants from specific to general with branch pruning.
+
+    `visit_variant` is called once for each distinct variant. If it returns
+    True, traversal stops descending from the current lattice point. This is a
+    cheap within-predictor branch cut-off, but it does not attempt any global
+    dominance/subsumption pruning across broader supervariants.
+    """
+    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds, required_endpoints = (
+        _build_typepair_variant_dimensions(metapath, type1, type2)
+    )
+    start = tuple(0 for _ in dimensions)
+    stack = [start]
+    seen_indexes = {start}
+    yielded_variants = set()
+
+    while stack:
+        indexes = stack.pop()
+        state_signature = _state_signature_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            indexes,
+            force_same_endpoint_reverse=force_same_endpoint_reverse,
+        )
+        if state_signature is not None and visit_state is not None and visit_state(state_signature):
+            continue
+
+        variants = _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            required_endpoints,
+            indexes,
+            force_same_endpoint_reverse=force_same_endpoint_reverse,
+        )
+
+        branch_pruned = False
+        for variant in variants:
+            if variant in yielded_variants:
+                continue
+            yielded_variants.add(variant)
+            if visit_variant(variant):
+                branch_pruned = True
+                break
+
+        if branch_pruned:
+            continue
+
+        for dim_idx in range(len(dimensions) - 1, -1, -1):
+            next_idx = indexes[dim_idx] + 1
+            if next_idx >= len(dimensions[dim_idx]):
+                continue
+            child = list(indexes)
+            child[dim_idx] = next_idx
+            child = tuple(child)
+            if child in seen_indexes:
+                continue
+            seen_indexes.add(child)
+            stack.append(child)
+
+
+def traverse_metapath_variants_pruned(
+    metapath: str,
+    visit_variant: Callable[[str], bool],
+    visit_state: Callable[[Tuple[str, ...]], bool] | None = None,
+) -> None:
+    """Traverse full hierarchical variants from specific to general with branch pruning."""
+    nodes, predicates, directions, dimensions, node_dim_count, symmetric_preds = (
+        _build_variant_dimensions(metapath)
+    )
+    start = tuple(0 for _ in dimensions)
+    stack = [start]
+    seen_indexes = {start}
+    yielded_variants = set()
+
+    while stack:
+        indexes = stack.pop()
+        state_signature = _state_signature_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            indexes,
+        )
+        if state_signature is not None and visit_state is not None and visit_state(state_signature):
+            continue
+
+        variants = _variants_for_dimension_indexes(
+            nodes,
+            predicates,
+            directions,
+            dimensions,
+            node_dim_count,
+            symmetric_preds,
+            None,
+            indexes,
+        )
+
+        branch_pruned = False
+        for variant in variants:
+            if variant in yielded_variants:
+                continue
+            yielded_variants.add(variant)
+            if visit_variant(variant):
+                branch_pruned = True
+                break
+
+        if branch_pruned:
+            continue
+
+        for dim_idx in range(len(dimensions) - 1, -1, -1):
+            next_idx = indexes[dim_idx] + 1
+            if next_idx >= len(dimensions[dim_idx]):
+                continue
+            child = list(indexes)
+            child[dim_idx] = next_idx
+            child = tuple(child)
+            if child in seen_indexes:
+                continue
+            seen_indexes.add(child)
+            stack.append(child)
 
 
 def calculate_metrics(

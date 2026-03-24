@@ -33,6 +33,26 @@ uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
 
 ## System Overview
 
+## Current Optimization Notes
+
+Recent grouping hot-path changes are summarized in:
+- [optimization_notes.md](/projects/sequence_analysis/vol3/bizon/sub/metapath-counts/docs/optimization_notes.md)
+
+That file now records the implemented sequence:
+- early target filtering
+- ordered predictor processing
+- real branch cut-off
+- state-level pruning
+- compact state identities
+- cross-target pruned-state carryover
+- direct endpoint promotion
+- predictor aggregation after endpoint promotion
+
+It also now records the planned redesign:
+- canonical variant traversal where `state == variant`
+- one-loop rolled predictor counting and pruning
+- ancestor-closed prune sets
+
 ### What This System Does
 
 1. **Splits work** across ~2,879 independent jobs (one per Matrix1)

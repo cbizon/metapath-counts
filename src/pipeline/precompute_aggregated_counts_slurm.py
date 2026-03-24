@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Submit SLURM jobs to precompute aggregated N-hop counts in two passes.
+Submit SLURM jobs to precompute explicit path counts for grouping.
 
 Pass A: Scan result files to find first-seen explicit counts per path.
-Pass B: Expand explicit counts to hierarchical variants and aggregate.
+Reduce A: Merge explicit counts and shard them by ancestor endpoint type pair.
 """
 
 import argparse
@@ -15,10 +15,6 @@ import subprocess
 
 WORKER_PASSA = "src/pipeline/workers/run_prepare_grouping_passA.sh"
 WORKER_REDUCEA = "src/pipeline/workers/run_prepare_grouping_reduceA.sh"
-WORKER_PASSB = "src/pipeline/workers/run_prepare_grouping_passB.sh"
-WORKER_REDUCEB = "src/pipeline/workers/run_prepare_grouping_reduceB.sh"
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Precompute aggregated counts via SLURM")
     parser.add_argument("--n-hops", type=int, required=True, help="Number of hops (e.g. 3)")
@@ -27,12 +23,8 @@ def parse_args():
     parser.add_argument("--partition", type=str, default="lowpri", help="SLURM partition (default: lowpri)")
     parser.add_argument("--passa-files-per-shard", type=int, default=40, help="Files per Pass A shard")
     parser.add_argument("--passa-max-concurrent", type=int, default=100, help="Max concurrent Pass A array tasks")
-    parser.add_argument("--passb-shards", type=int, default=512, help="Shard count for Pass B")
-    parser.add_argument("--passb-max-concurrent", type=int, default=200, help="Max concurrent Pass B array tasks")
     parser.add_argument("--mem-passa", type=int, default=64, help="Memory (GB) for Pass A tasks")
     parser.add_argument("--mem-reducea", type=int, default=128, help="Memory (GB) for Reduce A")
-    parser.add_argument("--mem-passb", type=int, default=64, help="Memory (GB) for Pass B tasks")
-    parser.add_argument("--mem-reduceb", type=int, default=250, help="Memory (GB) for Reduce B")
     return parser.parse_args()
 
 
@@ -102,52 +94,17 @@ def main():
         f"--error={logs_dir}/prepA_reduce.err",
         WORKER_REDUCEA,
         tmp_dir,
-        str(args.passb_shards),
         results_dir,
         str(args.n_hops),
     ]
     job_ra = submit_sbatch(cmd_ra)
 
-    # Pass B array
-    array_spec_b = f"0-{args.passb_shards - 1}%{args.passb_max_concurrent}"
-    cmd_b = [
-        "sbatch",
-        f"--partition={args.partition}",
-        f"--mem={args.mem_passb}G",
-        f"--array={array_spec_b}",
-        f"--dependency=afterok:{job_ra}",
-        "--job-name=prepB_map",
-        f"--output={logs_dir}/prepB_%a.out",
-        f"--error={logs_dir}/prepB_%a.err",
-        WORKER_PASSB,
-        tmp_dir,
-    ]
-    job_b = submit_sbatch(cmd_b)
-
-    # Reduce B
-    cmd_rb = [
-        "sbatch",
-        f"--partition={args.partition}",
-        f"--mem={args.mem_reduceb}G",
-        f"--dependency=afterok:{job_b}",
-        "--job-name=prepB_reduce",
-        f"--output={logs_dir}/prepB_reduce.out",
-        f"--error={logs_dir}/prepB_reduce.err",
-        WORKER_REDUCEB,
-        tmp_dir,
-        results_dir,
-        str(args.n_hops),
-    ]
-    job_rb = submit_sbatch(cmd_rb)
-
-    print("Submitted prepare_grouping precompute jobs:")
+    print("Submitted prepare_grouping explicit-count precompute jobs:")
     print(f"  Pass A array:   {job_a} (shards: {passa_shards})")
     print(f"  Reduce A:       {job_ra}")
-    print(f"  Pass B array:   {job_b} (shards: {args.passb_shards})")
-    print(f"  Reduce B:       {job_rb}")
     print()
     print("Next step after completion:")
-    print(f"  uv run python src/pipeline/prepare_grouping.py --n-hops {args.n_hops} --skip-aggregated-precompute")
+    print(f"  uv run python src/pipeline/prepare_grouping.py --n-hops {args.n_hops}")
 
 
 if __name__ == "__main__":

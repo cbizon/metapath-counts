@@ -23,6 +23,7 @@ src/
 │   ├── type_assignment.py      # Single-type-per-node assignment
 │   ├── hierarchy.py            # Hierarchy inference for aggregation
 │   ├── aggregation.py          # Metapath aggregation logic
+│   ├── unified_index.py        # GraphBLAS matrix reconstruction and unified pair-set tracking
 │   ├── slurm.py                # SLURM orchestration utilities
 │   └── path_tracker.py         # Per-path OOM recovery tracking
 ├── pipeline/                   # Analysis workflow
@@ -34,7 +35,7 @@ src/
 │   ├── merge_results.py        # Combine result files
 │   └── workers/                # SLURM worker scripts
 │       ├── run_overlap.py      # Core analysis engine
-│       ├── run_grouping.py     # Grouping worker
+│       ├── run_grouping.py     # Grouping worker (direct matrix evaluation)
 │       ├── run_overlap.sh
 │       └── run_grouping.sh
 └── analysis/                   # Exploratory/one-off scripts
@@ -63,11 +64,14 @@ Pipe-separated: `NodeType|predicate|direction|NodeType|...`
 
 - **Single type assignment:** Each node gets exactly one type (most specific leaf). Nodes with multiple unrelated leaf types get a pseudo-type like `Gene+SmallMolecule`.
 - **Post-processing aggregation:** Hierarchical type/predicate expansion happens during grouping, not matrix building. This keeps matrix count linear with edges.
-- **Approximate metrics:** Aggregated metrics use sum semantics (not set union) for scalability. Precision > 1.0 can occur in aggregated results. Use metrics for ranking, not absolute values.
+- **Direct matrix evaluation:** Grouping reconstructs each N-hop predictor path as a GraphBLAS matrix and intersects it with target pair sets to get exact overlap counts. This replaced an earlier candidate-build approach that OOMed on large type pairs. Output rows are explicit predictor paths (e.g. `SmallMolecule|affects|F|Gene|affects|F|Disease`) with exact matrix-derived counts.
 - **No repeated-node filtering:** Matrix multiplication counts all paths including those that revisit nodes. Filtering would require path enumeration.
 
 ## Running the Pipeline
 
+The full pipeline is automated in `run_analysis.sh` (edit input paths at top).
+
+Individual steps:
 ```bash
 # 0. Pre-build matrices (once per KG)
 uv run python src/pipeline/prebuild_matrices.py \
@@ -79,13 +83,18 @@ uv run python src/pipeline/prepare_analysis.py --matrices-dir matrices --n-hops 
 # 2. Run SLURM orchestrator
 uv run python src/pipeline/orchestrate_analysis.py --n-hops 3
 
-# 3. Prepare grouping
+# 3. Precompute explicit path counts (SLURM)
+uv run python src/pipeline/precompute_aggregated_counts_slurm.py --n-hops 3
+
+# 4. Prepare grouping
 uv run python src/pipeline/prepare_grouping.py --n-hops 3
 
-# 4. Run distributed grouping
+# 5. Run distributed grouping (requires matrices dir)
 uv run python src/pipeline/orchestrate_grouping.py --n-hops 3 \
   --min-count 10 --min-precision 0.001
 ```
+
+To re-run grouping with different filters: `./rerun_grouping.sh 3`
 
 ## Testing
 
