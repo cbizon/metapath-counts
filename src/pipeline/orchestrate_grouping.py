@@ -101,9 +101,10 @@ def determine_relevant_files(type1, type2, analysis_manifest, n_hops):
 def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
                         min_count=0, min_precision=0.0,
                         exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent",
-                        exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
+                        exclude_predicates="related_to,related_to_at_instance_level,related_to_at_concept_level,associated_with",
                         partition='lowpri',
-                        output_dir=None):
+                        output_dir=None,
+                        matrices_dir=None):
     """Submit a SLURM job for one type pair.
 
     Args:
@@ -118,6 +119,7 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         exclude_types: Comma-separated types to exclude
         exclude_predicates: Comma-separated predicates to exclude
         partition: SLURM partition to submit to (default: lowpri)
+        matrices_dir: Matrices directory for exact pair-set tracking
 
     Returns:
         Job ID string or None if submission failed
@@ -147,10 +149,10 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         str(min_count),
         str(min_precision),
         exclude_types,
-        exclude_predicates
+        exclude_predicates,
+        output_dir or "",
+        matrices_dir or "",
     ]
-    if output_dir:
-        cmd.append(output_dir)
 
     return submit_slurm_job(cmd, job_name=job_name)
 
@@ -168,10 +170,11 @@ def print_status_summary(manifest, running_jobs):
 
 
 def orchestrate(n_hops, min_count=10, min_precision=0.001,
-                exclude_types="Entity,ThingWithTaxon",
-                exclude_predicates="related_to_at_instance_level,related_to_at_concept_level",
+                exclude_types="Entity,ThingWithTaxon,PhysicalEssence,PhysicalEssenceOrOccurrent",
+                exclude_predicates="related_to,related_to_at_instance_level,related_to_at_concept_level,associated_with",
                 partition='lowpri',
-                output_dir=None):
+                output_dir=None,
+                matrices_dir='matrices'):
     """Main orchestration loop."""
     manifest_path = get_grouping_manifest_path(n_hops)
 
@@ -187,6 +190,8 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
     print(f"Excluded predicates: {exclude_predicates}")
     if output_dir:
         print(f"Output dir: {output_dir}")
+    if matrices_dir:
+        print(f"Matrices dir: {matrices_dir}")
     print()
 
     # Load manifests
@@ -320,7 +325,8 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
                     type1, type2, file_list, memory_tier, n_hops, job_index,
                     min_count=min_count, min_precision=min_precision,
                     exclude_types=exclude_types, exclude_predicates=exclude_predicates,
-                    partition=partition, output_dir=output_dir
+                    partition=partition, output_dir=output_dir,
+                    matrices_dir=matrices_dir,
                 )
 
                 if job_id:
@@ -396,8 +402,8 @@ def main():
     parser.add_argument(
         '--exclude-predicates',
         type=str,
-        default='related_to_at_instance_level,related_to_at_concept_level',
-        help='Comma-separated list of predicates to exclude (default: related_to_at_instance_level,related_to_at_concept_level)'
+        default='related_to,related_to_at_instance_level,related_to_at_concept_level,associated_with',
+        help='Comma-separated list of predicates to exclude (default: related_to,related_to_at_instance_level,related_to_at_concept_level,associated_with)'
     )
     parser.add_argument(
         '--partition',
@@ -411,6 +417,12 @@ def main():
         default=None,
         help='Output directory for grouped results (default: grouped_by_results_{n}hop)'
     )
+    parser.add_argument(
+        '--matrices-dir',
+        type=str,
+        default='matrices',
+        help='Matrices directory for exact pair-set tracking (default: matrices)'
+    )
 
     args = parser.parse_args()
 
@@ -422,7 +434,8 @@ def main():
             exclude_types=args.exclude_types,
             exclude_predicates=args.exclude_predicates,
             partition=args.partition,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            matrices_dir=args.matrices_dir,
         )
     except KeyboardInterrupt:
         print("\n\nOrchestrator interrupted by user. Exiting...")

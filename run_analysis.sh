@@ -109,14 +109,12 @@ for N_HOPS in "${NHOP_VALUES[@]}"; do
 
     # Step 5: Run distributed grouping (one SLURM job per type pair)
     echo ""
-    echo "Step 4: Running distributed grouping..."
+    echo "Step 5: Running distributed grouping..."
     echo "  - Each type pair (src_type, tgt_type) processed by separate SLURM job"
-    echo "  - Each job finds and groups all 1-hop metapaths between those types"
-    echo "  - Memory-efficient streaming through relevant result files only"
-    echo "  - Automatic hierarchical aggregation"
+    echo "  - Direct matrix evaluation: exact pair counts via GraphBLAS"
     echo "  - Filters: min-count=10, min-precision=0.001"
-    echo "  - Excluded types: Entity, ThingWithTaxon"
-    echo "  - Excluded predicates: related_to_at_instance_level, related_to_at_concept_level"
+    echo "  - Excluded types: Entity, ThingWithTaxon, PhysicalEssence, PhysicalEssenceOrOccurrent"
+    echo "  - Excluded predicates: related_to, related_to_at_instance_level, related_to_at_concept_level, associated_with"
     echo "  - You can Ctrl+C and restart later - it will resume from the manifest"
     echo ""
     uv run python src/pipeline/orchestrate_grouping.py --n-hops "$N_HOPS" \

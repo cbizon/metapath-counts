@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 
+import json
 import os
-import pickle
 import tempfile
 import time
 
+import numpy as np
 import zstandard
 
 from library.aggregation import (
-    canonical_variant_ancestor_closure_state_ids_for_typepair,
-    canonical_variant_metapath_from_state_ids,
-    canonical_variant_state_ids,
     expand_metapath_to_typepair_variants,
     traverse_metapath_variants_for_typepair_pruned,
 )
 from pipeline.workers.run_grouping import (
-    build_candidate_variants_for_targets,
     build_target_variant_counts,
+    compute_exact_target_pair_counts,
+    compute_direct_metrics,
     group_type_pair,
 )
 
@@ -34,54 +33,6 @@ def test_build_target_variant_counts_from_explicit_typepair_shard():
     )
 
     assert target_counts["ChemicalEntity|treats|F|Disease"] == 2
-
-
-def test_group_type_pair_uses_explicit_shard_counts_for_precision_pruning():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        results_dir = os.path.join(tmpdir, "results_1hop")
-        output_dir = os.path.join(tmpdir, "grouped")
-        os.makedirs(results_dir)
-        os.makedirs(output_dir)
-
-        result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
-        with open(result_file, "w") as f:
-            f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
-            f.write("SmallMolecule|affects|F|Gene|treats|F|Disease\t500\tSmallMolecule|treats|F|Disease\t1\t1\t100\n")
-
-        explicit_items = [
-            ("SmallMolecule|treats|F|Disease", 1),
-            ("SmallMolecule|affects|F|Gene|treats|F|Disease", 500),
-            ("ChemicalEntity|affects|F|BiologicalEntity|treats|F|Disease", 5000),
-        ]
-
-        type_node_counts = {
-            "ChemicalEntity": 100,
-            "Disease": 10,
-        }
-
-        group_type_pair(
-            type1="ChemicalEntity",
-            type2="Disease",
-            file_list=[result_file],
-            output_dir=output_dir,
-            n_hops=2,
-            explicit_items=explicit_items,
-            type_node_counts=type_node_counts,
-            min_precision=0.001,
-            excluded_types=set(),
-            excluded_predicates=set(),
-        )
-
-        output_path = os.path.join(output_dir, "ChemicalEntity_treats_F_Disease.tsv.zst")
-        with zstandard.open(output_path, "rt") as f:
-            rows = [line.strip() for line in f if line.strip()]
-
-        assert len(rows) >= 2
-        assert any(
-            row.startswith("ChemicalEntity|affects|F|Gene|treats|F|Disease\t500\t")
-            for row in rows[1:]
-        )
-        assert all("\t5000\t" not in row for row in rows[1:])
 
 
 def test_pruned_variant_walk_cuts_off_broader_states():
@@ -150,196 +101,288 @@ def test_typepair_expansion_emits_both_valid_endpoint_assignments():
     assert all(v.endswith("|NamedThing") for v in variants)
 
 
-def test_pruned_states_carry_forward_across_targets_in_descending_target_count_order(monkeypatch):
-    visits = []
-    variant_ids = canonical_variant_state_ids("ChemicalEntity|related_to|A|Disease")
-    predictor_path = "SmallMolecule|treats|F|Disease"
-
-    def fake_traverse(_metapath, _type1, _type2, visit_variant, visit_state=None, **kwargs):
-        should_prune = visit_variant(variant_ids)
-        visits.append(should_prune)
-
-    monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_canonical_variants_for_typepair_pruned",
-        fake_traverse,
+def _save_npz(directory, filename, rows, cols, nrows, ncols):
+    """Save a boolean sparse matrix as NPZ (matching prebuild_matrices format)."""
+    np.savez_compressed(
+        os.path.join(directory, filename),
+        rows=np.array(rows, dtype=np.uint64),
+        cols=np.array(cols, dtype=np.uint64),
+        vals=np.ones(len(rows), dtype=bool),
+        nrows=nrows,
+        ncols=ncols,
+        nvals=len(rows),
     )
 
-    onehop_to_overlaps = {
-        "ChemicalEntity|small_target|A|Disease": {predictor_path: 1},
-        "ChemicalEntity|big_target|A|Disease": {predictor_path: 1},
-    }
-    original_predictor_counts = {predictor_path: 150}
-    target_variant_counts = {
-        "ChemicalEntity|big_target|A|Disease": 100,
-        "ChemicalEntity|small_target|A|Disease": 50,
-    }
-    counters = {}
-    stage_timings = {}
 
-    candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
-        onehop_to_overlaps=onehop_to_overlaps,
-        original_predictor_counts=original_predictor_counts,
+def _build_test_matrices_dir(tmpdir):
+    """Create a temp matrices directory with overlapping predicate matrices.
 
-        target_variant_counts=target_variant_counts,
-        type1="ChemicalEntity",
-        type2="Disease",
-        min_precision=1.0,
-        start_time=time.time(),
-        progress_file=None,
-        counters=counters,
-        stage_timings=stage_timings,
-    )
-
-    assert visits == [True, True]
-    assert counters["targets_sorted_by_target_count"] == 2
-    assert counters["candidate_states_branch_pruned"] == 1
-    assert counters["candidate_state_revisits_pruned"] == 1
-    assert candidate_rows_by_target["ChemicalEntity|big_target|A|Disease"] == {}
-    assert candidate_rows_by_target["ChemicalEntity|small_target|A|Disease"] == {}
-    assert all_candidate_variants == set()
-
-
-def test_pruned_variant_ancestor_closure_reuses_pruning_across_predictors(monkeypatch):
-    specific = canonical_variant_state_ids("ChemicalEntity|affects|F|Gene|treats|F|Disease")
-    ancestor = canonical_variant_state_ids(
-        "ChemicalEntity|related_to_at_instance_level|A|Gene|treats|F|Disease"
-    )
-    predictor_big = "ChemicalEntity|affects|F|Gene|treats|F|Disease"
-    predictor_small = "ChemicalEntity|related_to_at_instance_level|A|Gene|treats|F|Disease"
-
-    def fake_traverse(metapath, _type1, _type2, visit_variant, visit_state=None, **kwargs):
-        if metapath == predictor_big:
-            visit_variant(specific)
-        elif metapath == predictor_small:
-            visit_variant(ancestor)
-
-    monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_canonical_variants_for_typepair_pruned",
-        fake_traverse,
-    )
-
-    onehop_to_overlaps = {
-        "ChemicalEntity|treats|F|Disease": {
-            predictor_big: 1,
-            predictor_small: 1,
-        }
-    }
-    original_predictor_counts = {
-        predictor_big: 150,
-        predictor_small: 1,
-    }
-    target_variant_counts = {
-        "ChemicalEntity|treats|F|Disease": 100,
-    }
-    counters = {}
-    stage_timings = {}
-
-    candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
-        onehop_to_overlaps=onehop_to_overlaps,
-        original_predictor_counts=original_predictor_counts,
-
-        target_variant_counts=target_variant_counts,
-        type1="ChemicalEntity",
-        type2="Disease",
-        min_precision=1.0,
-        start_time=time.time(),
-        progress_file=None,
-        counters=counters,
-        stage_timings=stage_timings,
-    )
-
-    specific_closure = canonical_variant_ancestor_closure_state_ids_for_typepair(
-        specific,
-        type1="ChemicalEntity",
-        type2="Disease",
-    )
-    assert ancestor in specific_closure
-    assert counters["candidate_states_branch_pruned"] == 1
-    assert counters["candidate_state_revisits_pruned"] == 1
-    assert candidate_rows_by_target["ChemicalEntity|treats|F|Disease"] == {}
-    assert all_candidate_variants == set()
-
-
-def test_lower_bound_state_pruning_does_not_overcount_shared_predictor_ids(monkeypatch):
-    """Lower-bound state pruning must not double-count the same predictor_id
-    across rollup groups.
-
-    Setup: predictor P1 (count=80) maps to two rollup keys (A, B) that both
-    visit state S.  Predictor P2 (count=20) maps to rollup key C, also visiting S.
-    Target count=100, min_precision=1.0 → threshold=100.
-
-    Correct behaviour: deduped count = P1(80) + P2(20) = 100 ≤ 100, variant kept.
-    Bug: lower bound counts P1 twice (80+80=160 > 100), prunes S, P2 never visits.
+    Returns (matrices_dir, manifest_matrices) where:
+    - SmallMolecule|treats|Disease: pairs (0,0), (1,1), (2,2) -> 3 pairs
+    - SmallMolecule|ameliorates|Disease: pairs (1,1), (2,2), (3,3) -> 3 pairs
+      (shares pairs (1,1) and (2,2) with treats)
+    - SmallMolecule|affects|Gene: pairs (0,0), (1,1), (2,2), (3,3) -> 4 pairs
+    - Gene|treats|Disease: pairs (0,0), (1,1), (2,2) -> 3 pairs
+    - Gene|ameliorates|Disease: pairs (2,2), (3,3) -> 2 pairs
     """
-    variant_ids = canonical_variant_state_ids("ChemicalEntity|related_to|A|Disease")
+    matrices_dir = os.path.join(tmpdir, "matrices")
+    os.makedirs(matrices_dir)
 
-    predictor_path_1 = "SmallMolecule|treats|F|Disease"
-    predictor_path_2 = "SmallMolecule|affects|F|Gene|treats|F|Disease"
+    _save_npz(matrices_dir, "SmallMolecule__treats__Disease.npz",
+              rows=[0, 1, 2], cols=[0, 1, 2], nrows=10, ncols=5)
+    _save_npz(matrices_dir, "SmallMolecule__ameliorates__Disease.npz",
+              rows=[1, 2, 3], cols=[1, 2, 3], nrows=10, ncols=5)
+    _save_npz(matrices_dir, "SmallMolecule__affects__Gene.npz",
+              rows=[0, 1, 2, 3], cols=[0, 1, 2, 3], nrows=10, ncols=8)
+    _save_npz(matrices_dir, "Gene__treats__Disease.npz",
+              rows=[0, 1, 2], cols=[0, 1, 2], nrows=8, ncols=5)
+    _save_npz(matrices_dir, "Gene__ameliorates__Disease.npz",
+              rows=[2, 3], cols=[2, 3], nrows=8, ncols=5)
 
-    key_a = ("ChemicalEntity|treats|F|Disease", False)
-    key_b = ("ChemicalEntity|treats|R|Disease", False)
-    key_c = ("ChemicalEntity|affects|F|Gene|treats|F|Disease", False)
+    manifest_matrices = [
+        {"src_type": "SmallMolecule", "predicate": "treats", "tgt_type": "Disease",
+         "nrows": 10, "ncols": 5, "nvals": 3, "filename": "SmallMolecule__treats__Disease.npz"},
+        {"src_type": "SmallMolecule", "predicate": "ameliorates", "tgt_type": "Disease",
+         "nrows": 10, "ncols": 5, "nvals": 3, "filename": "SmallMolecule__ameliorates__Disease.npz"},
+        {"src_type": "SmallMolecule", "predicate": "affects", "tgt_type": "Gene",
+         "nrows": 10, "ncols": 8, "nvals": 4, "filename": "SmallMolecule__affects__Gene.npz"},
+        {"src_type": "Gene", "predicate": "treats", "tgt_type": "Disease",
+         "nrows": 8, "ncols": 5, "nvals": 3, "filename": "Gene__treats__Disease.npz"},
+        {"src_type": "Gene", "predicate": "ameliorates", "tgt_type": "Disease",
+         "nrows": 8, "ncols": 5, "nvals": 2, "filename": "Gene__ameliorates__Disease.npz"},
+    ]
 
-    def fake_promote(metapath, type1, type2):
-        if metapath == predictor_path_1:
-            return [key_a, key_b]
-        if metapath == predictor_path_2:
-            return [key_c]
-        return []
+    with open(os.path.join(matrices_dir, "manifest.json"), "w") as f:
+        json.dump({"num_matrices": len(manifest_matrices), "matrices": manifest_matrices}, f)
 
-    def fake_traverse(metapath, _type1, _type2, visit_variant, visit_state=None, **kwargs):
-        state_sig = ("ChemicalEntity", "related_to", "A", "Disease")
-        if visit_state is not None:
-            if visit_state(state_sig):
-                return
-        visit_variant(variant_ids)
+    return matrices_dir, manifest_matrices
 
-    monkeypatch.setattr(
-        "pipeline.workers.run_grouping.promote_metapath_endpoints_to_typepair_rollup_keys",
-        fake_promote,
-    )
-    monkeypatch.setattr(
-        "pipeline.workers.run_grouping.traverse_canonical_variants_for_typepair_pruned",
-        fake_traverse,
-    )
 
-    onehop_to_overlaps = {
-        "ChemicalEntity|treats|F|Disease": {
-            predictor_path_1: 1,
-            predictor_path_2: 1,
+def test_compute_exact_target_pair_counts_less_than_sum():
+    """Exact target counts must be less than summed counts when predicates overlap.
+
+    SmallMolecule|treats|Disease has 3 pairs and SmallMolecule|ameliorates|Disease
+    has 3 pairs, sharing 2 pairs.
+
+    For the ancestor variant SmallMolecule|related_to|A|Disease the sum is 6 but
+    exact union is 4.
+
+    Note: ameliorates is a descendant of treats in Biolink, so the treats target
+    also includes ameliorates pairs.  Sum for treats is 3 (only explicit treats
+    paths counted), but exact union of treats+ameliorates base matrices is 4.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from library.unified_index import load_base_matrices
+
+        matrices_dir, manifest_matrices = _build_test_matrices_dir(tmpdir)
+        _, base_matrices = load_base_matrices(matrices_dir)
+
+        # Sum-based counts as build_target_variant_counts would produce.
+        # Canonical form puts Disease first (alphabetically).
+        target_variant_counts = {
+            "Disease|treats|R|SmallMolecule": 3,
+            "Disease|ameliorates|R|SmallMolecule": 3,
+            "Disease|related_to|A|SmallMolecule": 6,  # sum of treats + ameliorates
         }
-    }
-    original_predictor_counts = {
-        predictor_path_1: 80,
-        predictor_path_2: 20,
-    }
-    target_variant_counts = {
-        "ChemicalEntity|treats|F|Disease": 100,
-    }
-    counters = {}
-    stage_timings = {}
+        counters = {}
+        stage_timings = {}
 
-    candidate_rows_by_target, all_candidate_variants = build_candidate_variants_for_targets(
-        onehop_to_overlaps=onehop_to_overlaps,
-        original_predictor_counts=original_predictor_counts,
-        target_variant_counts=target_variant_counts,
-        type1="ChemicalEntity",
-        type2="Disease",
-        min_precision=1.0,
-        start_time=time.time(),
-        progress_file=None,
-        counters=counters,
-        stage_timings=stage_timings,
-    )
+        exact_counts, target_pair_sets = compute_exact_target_pair_counts(
+            target_variant_counts, base_matrices, manifest_matrices,
+            type1="SmallMolecule", type2="Disease",
+            start_time=time.time(), progress_file=None,
+            counters=counters, stage_timings=stage_timings,
+        )
 
-    variant = canonical_variant_metapath_from_state_ids(variant_ids)
-    target_key = "ChemicalEntity|treats|F|Disease"
-    assert variant in all_candidate_variants, (
-        f"Variant with deduped predictor count 100 was incorrectly pruned; "
-        f"lower-bound over-counted P1 across two rollup groups"
-    )
-    rows = candidate_rows_by_target[target_key]
-    predictor_count, _ = rows[variant]
-    assert predictor_count == 100, (
-        f"Expected predictor count 100 (P1=80 + P2=20), got {predictor_count}"
-    )
+        # treats exact = union of base treats + ameliorates (ameliorates is
+        # descendant of treats), so includes shared pairs -> 4 not 3
+        assert exact_counts["Disease|treats|R|SmallMolecule"] == 4
+        # ameliorates exact = just ameliorates base matrix -> 3
+        assert exact_counts["Disease|ameliorates|R|SmallMolecule"] == 3
+
+        # Ancestor predicate target: exact < sum due to overlapping pairs
+        assert exact_counts["Disease|related_to|A|SmallMolecule"] == 4, (
+            f"Expected 4 (union of 3+3 with 2 shared), "
+            f"got {exact_counts['Disease|related_to|A|SmallMolecule']}"
+        )
+        assert exact_counts["Disease|related_to|A|SmallMolecule"] < target_variant_counts["Disease|related_to|A|SmallMolecule"]
+
+
+def test_compute_direct_metrics_2hop():
+    """Direct metrics for a 2-hop predictor against a 1-hop target."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from library.unified_index import load_base_matrices, build_unified_type_offsets
+
+        matrices_dir, manifest_matrices = _build_test_matrices_dir(tmpdir)
+        _, base_matrices = load_base_matrices(matrices_dir)
+
+        type1, type2 = "SmallMolecule", "Disease"
+
+        # Build target pair sets for the target variant
+        target_variant_counts = {
+            "Disease|treats|R|SmallMolecule": 3,
+        }
+        counters = {}
+        stage_timings = {}
+        exact_target_counts, target_pair_sets = compute_exact_target_pair_counts(
+            target_variant_counts, base_matrices, manifest_matrices,
+            type1=type1, type2=type2,
+            start_time=time.time(), progress_file=None,
+            counters=counters, stage_timings=stage_timings,
+        )
+
+        # Predictor: SM|affects|F|Gene|treats|F|Disease overlaps with target
+        onehop_to_overlaps = {
+            "Disease|treats|R|SmallMolecule": {
+                "SmallMolecule|affects|F|Gene|treats|F|Disease": 3,
+            },
+        }
+
+        results = compute_direct_metrics(
+            onehop_to_overlaps, target_pair_sets, exact_target_counts,
+            base_matrices, manifest_matrices,
+            type1, type2,
+            start_time=time.time(), progress_file=None,
+            counters=counters, stage_timings=stage_timings,
+        )
+
+        target_key = "Disease|treats|R|SmallMolecule"
+        assert target_key in results
+        rows = results[target_key]
+        assert len(rows) >= 1
+
+        # Find the predictor row
+        found = False
+        for nhop_path, predictor_count, overlap in rows:
+            if nhop_path == "SmallMolecule|affects|F|Gene|treats|F|Disease":
+                found = True
+                # SM affects Gene: (0,0),(1,1),(2,2),(3,3) -> Gene treats Disease: (0,0),(1,1),(2,2)
+                # SM->Gene->Disease: SM0->G0->D0, SM1->G1->D1, SM2->G2->D2 = 3 pairs
+                assert predictor_count == 3
+                # Target treats: SM(0,0),(1,1),(2,2) -> exact 4 (includes ameliorates)
+                # But in unified space those are the same 3 SM pairs
+                # Overlap: intersection of predictor pairs with target pairs
+                assert overlap > 0
+                break
+        assert found, f"Expected predictor path not found in results: {rows}"
+
+
+def test_compute_direct_metrics_1hop():
+    """Direct metrics for a 1-hop predictor (same as target)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        from library.unified_index import load_base_matrices
+
+        matrices_dir, manifest_matrices = _build_test_matrices_dir(tmpdir)
+        _, base_matrices = load_base_matrices(matrices_dir)
+
+        type1, type2 = "SmallMolecule", "Disease"
+
+        target_variant_counts = {
+            "Disease|treats|R|SmallMolecule": 3,
+        }
+        counters = {}
+        stage_timings = {}
+        exact_target_counts, target_pair_sets = compute_exact_target_pair_counts(
+            target_variant_counts, base_matrices, manifest_matrices,
+            type1=type1, type2=type2,
+            start_time=time.time(), progress_file=None,
+            counters=counters, stage_timings=stage_timings,
+        )
+
+        # 1-hop predictor overlapping with same 1-hop target
+        onehop_to_overlaps = {
+            "Disease|treats|R|SmallMolecule": {
+                "SmallMolecule|treats|F|Disease": 3,
+            },
+        }
+
+        results = compute_direct_metrics(
+            onehop_to_overlaps, target_pair_sets, exact_target_counts,
+            base_matrices, manifest_matrices,
+            type1, type2,
+            start_time=time.time(), progress_file=None,
+            counters=counters, stage_timings=stage_timings,
+        )
+
+        target_key = "Disease|treats|R|SmallMolecule"
+        assert target_key in results
+        rows = results[target_key]
+        found = False
+        for nhop_path, predictor_count, overlap in rows:
+            if nhop_path == "SmallMolecule|treats|F|Disease":
+                found = True
+                assert predictor_count == 3
+                # Full overlap with itself
+                assert overlap == 3
+                break
+        assert found
+
+
+def test_group_type_pair_with_matrices_dir_produces_explicit_paths():
+    """Integration: group_type_pair with matrices_dir produces explicit predictor paths."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        results_dir = os.path.join(tmpdir, "results_2hop")
+        output_dir = os.path.join(tmpdir, "grouped")
+        os.makedirs(results_dir)
+        os.makedirs(output_dir)
+
+        matrices_dir, _ = _build_test_matrices_dir(tmpdir)
+
+        # Overlap result file: predictor SM|affects|F|Gene|treats|F|Disease
+        # overlapping with target SM|treats|F|Disease.
+        result_file = os.path.join(results_dir, "results_matrix1_000.tsv")
+        with open(result_file, "w") as f:
+            f.write("predictor_metapath\tpredictor_count\tpredicted_metapath\tpredicted_count\toverlap\ttotal_possible\n")
+            f.write("SmallMolecule|affects|F|Gene|treats|F|Disease\t3\tSmallMolecule|treats|F|Disease\t3\t3\t50\n")
+
+        explicit_items = [
+            ("SmallMolecule|treats|F|Disease", 3),
+            ("SmallMolecule|affects|F|Gene|treats|F|Disease", 3),
+        ]
+
+        type_node_counts = {
+            "SmallMolecule": 10,
+            "Disease": 5,
+        }
+
+        group_type_pair(
+            type1="SmallMolecule",
+            type2="Disease",
+            file_list=[result_file],
+            output_dir=output_dir,
+            n_hops=2,
+            explicit_items=explicit_items,
+            type_node_counts=type_node_counts,
+            min_precision=0.001,
+            excluded_types=set(),
+            excluded_predicates=set(),
+            matrices_dir=matrices_dir,
+        )
+
+        # Canonical form puts Disease first (alphabetically), so output file
+        # is Disease_treats_R_SmallMolecule.tsv.zst
+        output_path = os.path.join(output_dir, "Disease_treats_R_SmallMolecule.tsv.zst")
+        assert os.path.exists(output_path), f"Output file not found: {output_path}"
+
+        with zstandard.open(output_path, "rt") as f:
+            rows = [line.strip() for line in f if line.strip()]
+
+        # Should have header + at least one data row
+        assert len(rows) >= 2, f"Expected at least 2 rows (header+data), got {len(rows)}"
+
+        header = rows[0].split("\t")
+        assert "predictor_metapath" in header[0]
+
+        # Output should contain explicit predictor paths (not rolled-up variants)
+        predictor_paths = []
+        for row in rows[1:]:
+            parts = row.split("\t")
+            assert len(parts) == len(header), f"Row has wrong number of fields: {row}"
+            predictor_paths.append(parts[0])
+            predictor_count = int(parts[1])
+            overlap_val = int(parts[2])
+            assert predictor_count > 0
+            assert overlap_val > 0
+
+        # Should have the explicit 2-hop predictor path
+        assert "SmallMolecule|affects|F|Gene|treats|F|Disease" in predictor_paths

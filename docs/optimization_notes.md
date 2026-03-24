@@ -493,8 +493,142 @@ Expected benefit:
   logical hierarchy is large but the actual support is sparse
 
 Open questions:
-- how to track “number of contributing child paths” efficiently during
+- how to track "number of contributing child paths" efficiently during
   aggregation
 - whether this should be applied on the target side, predictor side, or both
 - how to integrate this with precision-based pruning so the two optimizations
   reinforce rather than duplicate each other
+
+## Exact Pair-Set Tracking (Phase A + B)
+
+### What Was Implemented
+
+Two new phases added to the grouping worker, activated by `--matrices-dir`:
+
+**Phase A** — after `build_target_variant_counts` (sum-based), load all base
+matrices from disk and compute exact target pair counts by unioning matching
+base matrices in a unified coordinate space. The unified space concatenates
+per-type dense indices with offsets, so matrices for different subtypes
+(e.g. SmallMolecule + Drug → ChemicalEntity) can be unioned without collision.
+
+**Phase B** — after `build_candidate_variants_for_targets`, for each surviving
+candidate predictor variant, reconstruct the N-hop matrix from base matrices
+(chain of `mxm` operations), remap into the same unified space, union across
+contributing predictor paths, and intersect with the Phase A target pair set.
+Produces exact `predictor_count` and `overlap`.
+
+New files:
+- `src/library/unified_index.py` — offset computation, matrix remapping,
+  target pair set construction, N-hop reconstruction
+- `tests/test_unified_index.py` — 18 unit tests
+- Integration tests in `tests/test_grouping_explicit_shards.py`
+
+### What Phase A Showed
+
+Run on ChemicalEntity × DiseaseOrPhenotypicFeature (SLURM, 64GB):
+
+- Loading 5295 base matrices: **17 seconds**
+- Computing exact counts for 32 target variants: **84 seconds**
+- Total Phase A overhead: ~100 seconds (negligible vs 33 min file scan)
+
+Sum semantics was overcounting by ~2× across the board:
+
+| Target | Summed | Exact | Ratio |
+|--------|--------|-------|-------|
+| related_to\|A | 9,145,079 | 4,159,177 | 0.455 |
+| related_to_at_instance_level\|A | 9,095,655 | 4,150,679 | 0.456 |
+| associated_with\|A | 6,711,945 | 3,315,130 | 0.494 |
+| treats_or_applied\|F | 1,696,872 | 751,216 | 0.443 |
+| studied_to_treat\|F | 716,716 | 358,293 | 0.500 |
+| treats\|F | 705,550 | 351,095 | 0.498 |
+| affects\|F | 316,092 | 155,001 | 0.490 |
+| (24 smaller targets) | <310K | <155K | ~0.500 |
+
+The ~0.500 ratio on most targets means sum-based counts were roughly double
+the true pair count. This is expected: each pair typically appears via two
+predicates that both roll up to the same ancestor (e.g. treats + ameliorates
+→ related_to).
+
+### Orientation Bug Found and Fixed
+
+Canonical variant form puts alphabetically smaller type first:
+`SmallMolecule|treats|F|Disease` → `Disease|treats|R|SmallMolecule`.
+
+The original implementation passed `(type1_offsets, type2_offsets)` directly
+to `build_target_pair_set`, but when a variant has reversed endpoints (e.g.
+Disease first when type1=ChemicalEntity), the offset tables don't contain
+the right types. All exact counts came back as 0.
+
+Fix: `_detect_metapath_orientation(metapath, type1, type2)` detects whether
+a metapath's endpoints are in `(type1, type2)` or `(type2, type1)` order.
+Reversed variants get swapped offsets and a transpose after construction.
+Applied to both `compute_exact_target_pair_counts` and
+`compute_exact_predictor_metrics`.
+
+### What Actually Happened At Runtime
+
+Job 1175761: ChemicalEntity × DiseaseOrPhenotypicFeature, 64GB, min_precision=0.99.
+
+- File scan: 33 min, 52.8M rows, 16.5M matched, 5.6 GB RSS
+- Phase A: ~100 seconds, exact counts computed for 32 targets
+- Candidate build (Pass 3): **OOM killed after 2h24m**
+
+The candidate build for `related_to|A` (4.2M exact pairs) was processing
+530K promoted predictors, each generating ~144 ancestor variants. The pruning
+threshold at 0.99 is `4,159,177 / 0.99 = 4,201,189` — essentially every
+predictor's count is below this, so nothing gets branch-pruned. Accepted
+variants grew at ~400 MB/min, RSS hit 64GB at ~18 GB into the build.
+
+### The Fundamental Problem
+
+Phase A halves the target counts and tightens pruning thresholds, but the
+threshold is still proportional to target size. For the top 3 targets
+(`related_to`, `related_to_at_instance_level`, `associated_with`) with
+3.3M–4.2M exact pairs, the threshold at any precision ≥ 0.01 is far larger
+than any individual 3-hop predictor count. This means:
+
+1. The pruning heuristic (`predictor_count > target_count / min_precision`)
+   does not fire for these targets — the threshold is in the millions while
+   individual predictors have at most hundreds of thousands of pairs
+2. All 530K predictors × ~144 variants survive → millions of accepted variants
+3. Memory grows linearly with accepted variants, eventually OOMing
+
+Phase A helps for medium-sized targets (tens or hundreds of thousands of
+pairs) where halving the count meaningfully tightens the threshold. But for
+the monster targets, the problem is that the threshold is structurally
+irrelevant — it's too high to prune anything.
+
+Phase B was never reached in this run. It would also be expensive for the
+monster targets: reconstructing N-hop matrices for millions of surviving
+candidate variants.
+
+### What Needs To Change
+
+The candidate variant expansion (Pass 3) is the bottleneck, not the
+precision computation. The current architecture generates all variant
+expansions first, then filters by precision during output. For targets with
+millions of pairs, this means the expansion phase generates and stores
+millions of variants that will never meet any useful precision threshold.
+
+The core issue: **precision filtering happens too late.** The overlap data
+needed to compute actual precision already exists in `onehop_to_overlaps`
+(from the file scan), but it's only consulted after variant expansion
+completes. Integrating overlap-aware filtering into the expansion loop —
+or restructuring to avoid the expansion entirely for targets where it's
+guaranteed to blow up — would address the fundamental scaling problem.
+
+Possible directions:
+1. **Skip variant expansion for monster targets entirely** — compute exact
+   metrics directly from base matrices for the explicit predictor paths,
+   without expanding to ancestor variants. This is feasible because the
+   explicit paths already have their overlap data from the overlap phase.
+2. **Cap accepted variants per target** — if a target's expansion exceeds
+   a memory budget, fall back to explicit-path-only output for that target.
+3. **Streaming variant expansion** — process one predictor at a time through
+   expansion → Phase B reconstruction → output, without accumulating all
+   variants in memory. This trades CPU (redundant traversal) for memory.
+4. **Pre-filter predictors by overlap ratio** — before variant expansion,
+   check if the explicit predictor's sum-based overlap / predictor_count
+   could possibly meet the precision threshold. Predictors with no chance
+   of meeting precision at even the most specific level can be skipped
+   entirely, avoiding their variant expansion.

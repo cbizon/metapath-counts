@@ -6,6 +6,7 @@ These fixtures run the full pipeline on the golden test graph.
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import zstandard
 
@@ -22,12 +23,23 @@ from pipeline.workers.run_grouping import (
 from library.aggregation import promote_metapath_endpoints_to_typepair_starts, original_predictor_identity
 
 
-def create_fake_manifest(matrices, output_dir):
-    """Create a minimal manifest.json for prepare_grouping functions."""
+def create_matrices_dir(matrices, output_dir):
+    """Create a matrices directory with manifest.json and .npz files."""
     manifest = {
         "matrices": []
     }
     for (src_type, pred, tgt_type), matrix in matrices.items():
+        filename = f"{src_type}__{pred}__{tgt_type}.npz"
+        rows, cols, vals = matrix.to_coo()
+        np.savez_compressed(
+            str(output_dir / filename),
+            rows=np.array(rows, dtype=np.uint64),
+            cols=np.array(cols, dtype=np.uint64),
+            vals=np.array(vals, dtype=bool),
+            nrows=matrix.nrows,
+            ncols=matrix.ncols,
+            nvals=matrix.nvals,
+        )
         manifest["matrices"].append({
             "src_type": src_type,
             "predicate": pred,
@@ -36,6 +48,7 @@ def create_fake_manifest(matrices, output_dir):
             "nrows": matrix.nrows,
             "ncols": matrix.ncols,
             "nvals": matrix.nvals,
+            "filename": filename,
         })
 
     manifest_path = output_dir / "manifest.json"
@@ -105,7 +118,7 @@ def golden_workspace(tmp_path_factory):
     # Create a fake matrices directory with manifest for prepare_grouping
     matrices_dir = workspace / "matrices"
     matrices_dir.mkdir()
-    create_fake_manifest(matrices, matrices_dir)
+    create_matrices_dir(matrices, matrices_dir)
 
     return {
         "workspace": workspace,
@@ -175,6 +188,7 @@ def pipeline_1hop(golden_workspace):
             min_precision=0.0,
             excluded_types=set(),
             excluded_predicates=set(),
+            matrices_dir=str(matrices_dir),
         )
 
     grouped_results = parse_all_grouped_files(grouped_dir)
@@ -250,6 +264,7 @@ def pipeline_2hop(golden_workspace):
             min_precision=0.0,
             excluded_types=set(),
             excluded_predicates=set(),
+            matrices_dir=str(matrices_dir),
         )
 
     grouped_results = parse_all_grouped_files(grouped_dir)
