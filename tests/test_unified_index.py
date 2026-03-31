@@ -70,6 +70,53 @@ def _small_base_matrices():
     }
 
 
+def _bidirectional_manifest():
+    """Manifest with an asymmetric predicate stored in both directions.
+
+    Gene→affects→SmallMolecule has DIFFERENT edges than SmallMolecule→affects→Gene.
+    This exercises the direction bug: reconstruct_nhop_matrix must respect
+    F vs R to pick the correct base matrix.
+    """
+    return [
+        # Gene affects SmallMolecule: 2 edges (G0→SM0, G1→SM1)
+        {"src_type": "Gene", "predicate": "affects", "tgt_type": "SmallMolecule",
+         "nrows": 8, "ncols": 10, "filename": "Gene__affects__SmallMolecule.npz"},
+        # SmallMolecule affects Gene: 5 edges (SM2→G2, SM3→G3, SM4→G4, SM5→G5, SM6→G6)
+        {"src_type": "SmallMolecule", "predicate": "affects", "tgt_type": "Gene",
+         "nrows": 10, "ncols": 8, "filename": "SmallMolecule__affects__Gene.npz"},
+        # Gene causes Disease (only one direction)
+        {"src_type": "Gene", "predicate": "causes", "tgt_type": "Disease",
+         "nrows": 8, "ncols": 5, "filename": "Gene__causes__Disease.npz"},
+        # Disease causes Gene (different edges, only 1 edge)
+        {"src_type": "Disease", "predicate": "causes", "tgt_type": "Gene",
+         "nrows": 5, "ncols": 8, "filename": "Disease__causes__Gene.npz"},
+    ]
+
+
+def _bidirectional_base_matrices():
+    """Base matrices for the bidirectional manifest.
+
+    Gene→affects→SmallMolecule: G0→SM0, G1→SM1 (2 edges)
+    SmallMolecule→affects→Gene: SM2→G2, SM3→G3, SM4→G4, SM5→G5, SM6→G6 (5 edges)
+    Gene→causes→Disease: G0→D0, G1→D1, G2→D2 (3 edges)
+    Disease→causes→Gene: D3→G7 (1 edge)
+    """
+    return {
+        ("Gene", "affects", "SmallMolecule"): _make_bool_matrix(
+            [0, 1], [0, 1], nrows=8, ncols=10,
+        ),
+        ("SmallMolecule", "affects", "Gene"): _make_bool_matrix(
+            [2, 3, 4, 5, 6], [2, 3, 4, 5, 6], nrows=10, ncols=8,
+        ),
+        ("Gene", "causes", "Disease"): _make_bool_matrix(
+            [0, 1, 2], [0, 1, 2], nrows=8, ncols=5,
+        ),
+        ("Disease", "causes", "Gene"): _make_bool_matrix(
+            [3], [7], nrows=5, ncols=8,
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests: build_unified_type_offsets
 # ---------------------------------------------------------------------------
@@ -308,6 +355,147 @@ class TestReconstructNhopMatrix:
         assert result.nrows == 5   # Disease dimension
         assert result.ncols == 10  # SmallMolecule dimension
 
+    def test_direction_selects_correct_matrix_forward(self):
+        """F direction must use (src, pred, tgt), not (tgt, pred, src).T."""
+        base = _bidirectional_base_matrices()
+        # Gene|affects|F|SmallMolecule: Gene→affects→SmallMolecule = 2 edges
+        result = reconstruct_nhop_matrix(
+            "Gene|affects|F|SmallMolecule", base,
+        )
+        assert result is not None
+        assert result.nvals == 2
+        assert result.nrows == 8   # Gene dimension
+        assert result.ncols == 10  # SmallMolecule dimension
+
+    def test_direction_selects_correct_matrix_reverse(self):
+        """R direction must use (tgt, pred, src).T, not (src, pred, tgt).
+
+        This is the core direction bug: when both (Gene, affects, SmallMolecule)
+        and (SmallMolecule, affects, Gene) exist, direction R on
+        Gene|affects|R|SmallMolecule must use (SmallMolecule, affects, Gene).T
+        (5 edges), NOT (Gene, affects, SmallMolecule) (2 edges).
+        """
+        base = _bidirectional_base_matrices()
+        # Gene|affects|R|SmallMolecule: SmallMolecule→affects→Gene traversed
+        # in reverse = 5 edges
+        result = reconstruct_nhop_matrix(
+            "Gene|affects|R|SmallMolecule", base,
+        )
+        assert result is not None
+        # Must be 5 (from SmallMolecule→Gene), NOT 2 (from Gene→SmallMolecule)
+        assert result.nvals == 5, (
+            f"Expected 5 edges (SmallMolecule→Gene reversed) but got {result.nvals}. "
+            f"Direction R is being ignored — using (Gene, affects, SmallMolecule) "
+            f"instead of (SmallMolecule, affects, Gene).T"
+        )
+        assert result.nrows == 8   # Gene dimension (src in metapath)
+        assert result.ncols == 10  # SmallMolecule dimension (tgt in metapath)
+
+    def test_2hop_direction_bug_changes_result(self):
+        """2-hop path where wrong direction on hop 2 gives wrong pair set.
+
+        Path: Disease|causes|R|Gene|affects|R|SmallMolecule
+          Hop 1: Gene→causes→Disease reversed (3 edges: G0→D0, G1→D1, G2→D2)
+          Hop 2: SmallMolecule→affects→Gene reversed (5 edges: SM2→G2..SM6→G6)
+        Product: Disease×SmallMolecule pairs via Gene.
+        Only G2 appears in both hops, so result should have 1 pair: (D2, SM2).
+        """
+        base = _bidirectional_base_matrices()
+        result = reconstruct_nhop_matrix(
+            "Disease|causes|R|Gene|affects|R|SmallMolecule", base,
+        )
+        assert result is not None
+        assert result.nrows == 5   # Disease dimension
+        assert result.ncols == 10  # SmallMolecule dimension
+        # Hop 1 gives Disease→Gene: D0→G0, D1→G1, D2→G2
+        # Hop 2 (correct R): Gene→SmallMolecule via reverse edges: G2→SM2..G6→SM6
+        # Intersection at Gene: G2 is in both → D2→SM2 = 1 pair
+        assert result.nvals == 1, (
+            f"Expected 1 pair (D2, SM2) but got {result.nvals}. "
+            f"Direction R on hop 2 is likely ignored."
+        )
+        rows, cols, _ = result.to_coo()
+        assert list(rows) == [2]  # D2
+        assert list(cols) == [2]  # SM2
+
+    def test_2hop_direction_forward_forward(self):
+        """2-hop path with all-forward hops should be unaffected by the fix."""
+        base = _bidirectional_base_matrices()
+        # Gene|affects|F|SmallMolecule doesn't chain to anything useful
+        # but Gene|causes|F|Disease is a valid 1-hop
+        # Let's test: Gene|affects|F|SmallMolecule — just the 1-hop part
+        result = reconstruct_nhop_matrix(
+            "Gene|affects|F|SmallMolecule", base,
+        )
+        assert result is not None
+        assert result.nvals == 2  # G0→SM0, G1→SM1
+
+    def test_1hop_reverse_with_both_directions(self):
+        """1-hop R direction with both (A,p,B) and (B,p,A) in base matrices.
+
+        Disease|causes|R|Gene: forward edge is Gene→causes→Disease (3 edges).
+        Must NOT use Disease→causes→Gene (1 edge).
+        """
+        base = _bidirectional_base_matrices()
+        result = reconstruct_nhop_matrix(
+            "Disease|causes|R|Gene", base,
+        )
+        assert result is not None
+        # Gene→causes→Disease has 3 edges, transposed = 3 pairs Disease→Gene
+        assert result.nvals == 3, (
+            f"Expected 3 (Gene→Disease reversed) but got {result.nvals}. "
+            f"Using (Disease, causes, Gene) = 1 edge instead."
+        )
+
+    def test_1hop_forward_with_both_directions(self):
+        """1-hop F direction with both (A,p,B) and (B,p,A) in base matrices.
+
+        Disease|causes|F|Gene: forward edge is Disease→causes→Gene (1 edge).
+        Must NOT use Gene→causes→Disease.T (3 edges).
+        """
+        base = _bidirectional_base_matrices()
+        result = reconstruct_nhop_matrix(
+            "Disease|causes|F|Gene", base,
+        )
+        assert result is not None
+        assert result.nvals == 1, (
+            f"Expected 1 (Disease→Gene forward) but got {result.nvals}."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: reconstruct_prefix_matrix direction handling
+# ---------------------------------------------------------------------------
+
+class TestReconstructPrefixMatrixDirection:
+    def test_prefix_respects_reverse_direction(self):
+        """Prefix of a 2-hop path must respect direction on the prefix hop."""
+        base = _bidirectional_base_matrices()
+        # Disease|causes|R|Gene|affects|R|SmallMolecule — prefix is 1 hop
+        prefix = reconstruct_prefix_matrix(
+            "Disease|causes|R|Gene|affects|R|SmallMolecule",
+            n_prefix_hops=1,
+            base_matrices=base,
+        )
+        assert prefix is not None
+        # Disease|causes|R|Gene = Gene→causes→Disease reversed = 3 edges
+        assert prefix.nvals == 3, (
+            f"Expected 3 (Gene→Disease reversed) but got {prefix.nvals}. "
+            f"Prefix reconstruction ignoring direction."
+        )
+
+    def test_prefix_respects_forward_direction(self):
+        """Prefix with F direction must use forward matrix."""
+        base = _bidirectional_base_matrices()
+        prefix = reconstruct_prefix_matrix(
+            "Disease|causes|F|Gene|affects|R|SmallMolecule",
+            n_prefix_hops=1,
+            base_matrices=base,
+        )
+        assert prefix is not None
+        # Disease|causes|F|Gene = Disease→causes→Gene (1 edge)
+        assert prefix.nvals == 1
+
 
 # ---------------------------------------------------------------------------
 # Tests: remap_nhop_to_unified
@@ -437,3 +625,52 @@ class TestLoadBaseMatrices:
             assert m.nrows == 4
             assert m.ncols == 3
             assert m.nvals == 2
+
+    def test_load_normalizes_flat_predicates(self):
+        """load_base_matrices should normalize flat qualified predicates to compound format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest = {
+                "num_matrices": 1,
+                "matrices": [
+                    {
+                        "src_type": "Gene",
+                        "predicate": "affects_increased_expression",
+                        "tgt_type": "Disease",
+                        "nrows": 3,
+                        "ncols": 2,
+                        "nvals": 1,
+                        "filename": "Gene__affects_increased_expression__Disease.npz",
+                    }
+                ],
+            }
+            with open(os.path.join(tmpdir, "manifest.json"), "w") as f:
+                json.dump(manifest, f)
+
+            np.savez_compressed(
+                os.path.join(tmpdir, "Gene__affects_increased_expression__Disease.npz"),
+                rows=np.array([0], dtype=np.uint64),
+                cols=np.array([0], dtype=np.uint64),
+                vals=np.array([True]),
+                nrows=3,
+                ncols=2,
+                nvals=1,
+            )
+
+            _, loaded_matrices = load_base_matrices(tmpdir)
+            # Key should be normalized to compound format
+            assert ("Gene", "affects--increased--expression", "Disease") in loaded_matrices
+            # Flat key should NOT be present
+            assert ("Gene", "affects_increased_expression", "Disease") not in loaded_matrices
+
+    def test_reconstruct_with_normalized_predicate(self):
+        """reconstruct_nhop_matrix should work with normalized metapath predicates."""
+        # Base matrices with compound keys (as load_base_matrices would produce)
+        base_matrices = {
+            ("Gene", "affects--increased--expression", "Disease"):
+                _make_bool_matrix([0, 1], [0, 1], 3, 2),
+        }
+        # Metapath with normalized predicate
+        nhop = "Gene|affects--increased--expression|F|Disease"
+        result = reconstruct_nhop_matrix(nhop, base_matrices)
+        assert result is not None
+        assert result.nvals == 2

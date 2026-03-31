@@ -197,9 +197,9 @@ class TestAggregated1HopCounts:
 
         When different-type paths (e.g. Disease|affects|R|Gene) expand to same-type
         variants (BiologicalEntity|affects|*|BiologicalEntity), both F and R directions
-        must be generated. The 6 affects edges between BiologicalEntity nodes
-        (Gene→Disease x4, Protein→Disease x1, Gene+Protein→Disease x1) plus
-        pseudo-type expansion to Protein (+1) give 7 total, contributed to both
+        must be generated. The 7 affects edges between BiologicalEntity nodes
+        (Gene→Disease x4, Disease→Gene x1, Protein→Disease x1, Gene+Protein→Disease x1)
+        plus pseudo-type expansion to Protein (+1) give 8 total, contributed to both
         F and R directions. Note: SmallMolecule→Gene affects edges do NOT count
         here because SmallMolecule is ChemicalEntity, not BiologicalEntity.
         """
@@ -210,8 +210,8 @@ class TestAggregated1HopCounts:
         forward_count = nhop_counts.get(forward, 0)
         reverse_count = nhop_counts.get(reverse, 0)
 
-        assert forward_count == 7, f"Expected 7 for {forward}, got {forward_count}"
-        assert reverse_count == 7, f"Expected 7 for {reverse}, got {reverse_count}"
+        assert forward_count == 8, f"Expected 8 for {forward}, got {forward_count}"
+        assert reverse_count == 8, f"Expected 8 for {reverse}, got {reverse_count}"
 
     def test_named_thing_related_to_aggregation(self, pipeline_1hop):
         """NamedThing|related_to|A|NamedThing should aggregate all edges (related_to is symmetric root predicate).
@@ -229,8 +229,8 @@ class TestAggregated1HopCounts:
         canonical = "NamedThing|related_to|A|NamedThing"
 
         count = nhop_counts.get(canonical, 0)
-        # All 15 edges in the graph roll up to this
-        assert count == 15, f"Expected 15 (all edges) for {canonical}, got {count}"
+        # All 16 edges in the graph roll up to this
+        assert count == 16, f"Expected 16 (all edges) for {canonical}, got {count}"
 
     def test_biological_entity_related_to_chemical_entity(self, pipeline_1hop):
         """BiologicalEntity|related_to|A|ChemicalEntity should aggregate treats edges."""
@@ -251,6 +251,66 @@ class TestAggregated1HopCounts:
         assert count == expected_count, (
             f"Expected count={expected_count} for {path}, got {count}. "
             f"Should aggregate treats edges between ChemicalEntity and BiologicalEntity types."
+        )
+
+
+class TestFlatQualifiedPredicateHierarchy:
+    """Test that flat qualified predicates (e.g. affects_increased_activity) are
+    normalized to compound format and participate in predicate hierarchy.
+
+    The golden graph stores SmallMolecule_X→Gene_A with predicate
+    "biolink:affects_increased_activity" (flat format, as real KGs do).
+    normalize_predicate() must decompose this to "affects--increased--activity"
+    so it rolls up to the parent predicate "affects".
+
+    Without normalization these tests FAIL: the flat predicate has no hierarchy
+    so the qualified edge's count never contributes to the plain affects count.
+    """
+
+    def test_qualified_smallmolecule_gene_count(self, pipeline_1hop):
+        """The qualified affects edge should produce its own explicit count."""
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # SmallMolecule_X→Gene_A with affects--increased--activity
+        # Canonical: "Gene" < "SmallMolecule", so reverse direction
+        qualified = "Gene|affects--increased--activity|R|SmallMolecule"
+        count = nhop_counts.get(qualified, 0)
+        assert count == 1, (
+            f"Expected count=1 for {qualified}, got {count}. "
+            f"The flat predicate affects_increased_activity should be normalized "
+            f"to affects--increased--activity."
+        )
+
+    def test_plain_affects_includes_qualified(self, pipeline_1hop):
+        """Plain Gene|affects|R|SmallMolecule should include the qualified edge.
+
+        The golden graph has 2 SmallMolecule→Gene affects edges:
+        - SmallMolecule_Y→Gene_B (plain affects)
+        - SmallMolecule_X→Gene_A (affects_increased_activity, normalized to compound)
+
+        The plain "affects" aggregation should include BOTH because
+        affects--increased--activity rolls up to affects.
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        # Canonical: "Gene" < "SmallMolecule"
+        plain = "Gene|affects|R|SmallMolecule"
+        count = nhop_counts.get(plain, 0)
+        assert count == 2, (
+            f"Expected count=2 for {plain}, got {count}. "
+            f"Plain affects should include both the plain and qualified edges."
+        )
+
+    def test_affects_activity_includes_qualified(self, pipeline_1hop):
+        """affects----activity (aspect only, no direction) should include the qualified edge.
+
+        affects--increased--activity rolls up to affects----activity
+        (drop direction qualifier, keep aspect qualifier).
+        """
+        nhop_counts = pipeline_1hop["aggregated_nhop_counts"]
+        aspect_only = "Gene|affects----activity|R|SmallMolecule"
+        count = nhop_counts.get(aspect_only, 0)
+        assert count == 1, (
+            f"Expected count=1 for {aspect_only}, got {count}. "
+            f"affects----activity should include the affects--increased--activity edge."
         )
 
 
@@ -592,3 +652,20 @@ class TestGroupedOverlapPrecision:
         for row in rows:
             assert row['predictor_count'] > 0
             assert row['overlap'] > 0
+
+
+class TestOrientationColumn:
+    """Test that the orientation column is present and valid in all grouped output."""
+
+    def test_orientation_column_exists(self, pipeline_1hop):
+        """Every row in every grouped output file must have an orientation field."""
+        grouped_results = pipeline_1hop["grouped_results"]
+
+        for filename, rows in grouped_results.items():
+            for row in rows:
+                assert 'orientation' in row, (
+                    f"Missing orientation column in {filename}: {row}"
+                )
+                assert row['orientation'] in ('fwd', 'rev'), (
+                    f"Bad orientation '{row['orientation']}' in {filename}"
+                )

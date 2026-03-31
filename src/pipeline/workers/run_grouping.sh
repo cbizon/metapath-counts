@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=group_typepair
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=1
 
 # Group results for all 1-hop metapaths between a type pair

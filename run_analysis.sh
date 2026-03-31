@@ -5,13 +5,13 @@
 set -e  # Exit on error
 set -o pipefail  # Catch errors in pipes
 
-NODES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Feb_13_filtered_nonredundant/nodes.jsonl"
-EDGES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/Feb_13_filtered_nonredundant/edges.jsonl"
+NODES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/March_19_filtered_nonredundant/nodes.jsonl"
+EDGES="/projects/sequence_analysis/vol3/bizon/sub/translator_kg/March_19_filtered_nonredundant/edges.jsonl"
 MATRICES_DIR="matrices"
 
 # List of N-hop values to analyze
 #NHOP_VALUES=(1 2 3)
-NHOP_VALUES=(3)
+NHOP_VALUES=(1 2)
 
 echo "=========================================="
 echo "N-HOP METAPATH ANALYSIS PIPELINE"

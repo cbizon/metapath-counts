@@ -36,7 +36,10 @@ from .aggregation import (
     calculate_metrics,
     build_compound_predicate,
     parse_compound_predicate,
-    is_compound_predicate
+    is_compound_predicate,
+    is_symmetric_path,
+    normalize_predicate,
+    normalize_metapath
 )
 
 __all__ = [
@@ -59,5 +62,8 @@ __all__ = [
     "calculate_metrics",
     "build_compound_predicate",
     "parse_compound_predicate",
-    "is_compound_predicate"
+    "is_compound_predicate",
+    "is_symmetric_path",
+    "normalize_predicate",
+    "normalize_metapath"
 ]

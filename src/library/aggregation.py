@@ -119,6 +119,133 @@ def is_compound_predicate(predicate: str) -> bool:
     return '--' in predicate
 
 
+@lru_cache(maxsize=1)
+def _get_known_qualifiers():
+    """Return (direction_qualifiers, aspect_qualifiers) sets from biolink enums."""
+    from .hierarchy import _get_toolkit
+
+    toolkit = _get_toolkit()
+    direction_qualifiers = set()
+    aspect_qualifiers = set()
+
+    for enum_name, target_set in [
+        ('DirectionQualifierEnum', direction_qualifiers),
+        ('GeneOrGeneProductOrChemicalEntityAspectEnum', aspect_qualifiers),
+    ]:
+        try:
+            enum_def = toolkit.get_element(enum_name)
+            if enum_def and hasattr(enum_def, 'permissible_values'):
+                for value in enum_def.permissible_values:
+                    target_set.add(value)
+        except Exception:
+            pass
+
+    return frozenset(direction_qualifiers), frozenset(aspect_qualifiers)
+
+
+@lru_cache(maxsize=1024)
+def _is_known_predicate(predicate: str) -> bool:
+    """Check if a predicate is recognized by the biolink toolkit."""
+    from .hierarchy import _get_toolkit
+
+    toolkit = _get_toolkit()
+    pred_name = predicate.replace('_', ' ')
+    try:
+        element = toolkit.get_element(pred_name)
+        if element is not None and hasattr(element, 'name') and element.name is not None:
+            return True
+    except Exception:
+        pass
+    # Fallback: check if get_ancestors returns anything
+    try:
+        ancestors = toolkit.get_ancestors(pred_name)
+        if ancestors:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+@lru_cache(maxsize=1024)
+def normalize_predicate(predicate: str) -> str:
+    """Normalize a flat qualified predicate to compound format.
+
+    Knowledge graphs may store qualified predicates as flat underscore-separated
+    strings (e.g., ``affects_increased_expression``) instead of the compound
+    format (``affects--increased--expression``).  This function detects such
+    flat predicates and converts them so that hierarchy expansion works.
+
+    Args:
+        predicate: Predicate string (plain, flat-qualified, or already compound)
+
+    Returns:
+        Compound predicate if qualifiers were detected, otherwise unchanged.
+
+    Examples:
+        >>> normalize_predicate("affects_increased_expression")
+        'affects--increased--expression'
+        >>> normalize_predicate("affects_expression")
+        'affects----expression'
+        >>> normalize_predicate("treats")
+        'treats'
+        >>> normalize_predicate("affects--increased--expression")
+        'affects--increased--expression'
+    """
+    if is_compound_predicate(predicate):
+        return predicate
+
+    if _is_known_predicate(predicate):
+        return predicate
+
+    direction_quals, aspect_quals = _get_known_qualifiers()
+    parts = predicate.split('_')
+
+    # Try each prefix length as a candidate base predicate (shortest first).
+    for prefix_len in range(1, len(parts)):
+        base_candidate = '_'.join(parts[:prefix_len])
+        if not _is_known_predicate(base_candidate):
+            continue
+
+        remaining = parts[prefix_len:]
+        # Try all splits of remaining into [direction] [aspect].
+        # split_point=0 means no direction (aspect only);
+        # split_point=len(remaining) means direction only (no aspect).
+        for split_point in range(len(remaining) + 1):
+            dir_parts = remaining[:split_point]
+            asp_parts = remaining[split_point:]
+
+            direction = '_'.join(dir_parts) if dir_parts else None
+            aspect = '_'.join(asp_parts) if asp_parts else None
+
+            if direction is None and aspect is None:
+                continue  # No qualifier found at this split
+
+            dir_ok = direction is None or direction in direction_quals
+            asp_ok = aspect is None or aspect in aspect_quals
+
+            if dir_ok and asp_ok:
+                return build_compound_predicate(base_candidate, direction, aspect)
+
+    # Could not decompose — return as-is.
+    return predicate
+
+
+def normalize_metapath(metapath: str) -> str:
+    """Normalize all predicates in a metapath string to compound format.
+
+    Args:
+        metapath: Pipe-separated metapath string
+
+    Returns:
+        Metapath with all predicates normalized via ``normalize_predicate``.
+    """
+    parts = metapath.split('|')
+    # Predicate positions: 1, 4, 7, ... (every 3rd starting at 1)
+    for i in range(1, len(parts), 3):
+        parts[i] = normalize_predicate(parts[i])
+    return '|'.join(parts)
+
+
 def parse_metapath(metapath: str) -> Tuple[List[str], List[str], List[str]]:
     """
     Parse a metapath into node types, predicates, and directions.
@@ -198,6 +325,19 @@ def reverse_metapath(metapath: str) -> str:
         else:
             reversed_directions.append('A')
     return build_metapath(reversed_nodes, reversed_predicates, reversed_directions)
+
+
+def is_symmetric_path(metapath: str) -> bool:
+    """Check if reversing this path gives the same canonical form.
+
+    A path is symmetric when its pair set is identical regardless of
+    endpoint-to-target mapping.  Examples:
+      A|p|A|A                    -> symmetric (symmetric pred, same endpoints)
+      A|p|F|B|p|R|A             -> symmetric (palindromic structure)
+      A|p|F|A                    -> NOT symmetric (F!=R after reversal)
+      A|p1|F|B|p2|R|A           -> NOT symmetric (p1!=p2 after reversal)
+    """
+    return reverse_metapath(metapath) == metapath
 
 
 def original_predictor_identity(metapath: str) -> str:

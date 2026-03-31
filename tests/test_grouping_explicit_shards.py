@@ -253,7 +253,7 @@ def test_compute_direct_metrics_2hop():
 
         # Find the predictor row
         found = False
-        for nhop_path, predictor_count, overlap in rows:
+        for nhop_path, predictor_count, overlap, orientation_tag in rows:
             if nhop_path == "SmallMolecule|affects|F|Gene|treats|F|Disease":
                 found = True
                 # SM affects Gene: (0,0),(1,1),(2,2),(3,3) -> Gene treats Disease: (0,0),(1,1),(2,2)
@@ -263,6 +263,7 @@ def test_compute_direct_metrics_2hop():
                 # But in unified space those are the same 3 SM pairs
                 # Overlap: intersection of predictor pairs with target pairs
                 assert overlap > 0
+                assert orientation_tag in ('fwd', 'rev')
                 break
         assert found, f"Expected predictor path not found in results: {rows}"
 
@@ -308,12 +309,13 @@ def test_compute_direct_metrics_1hop():
         assert target_key in results
         rows = results[target_key]
         found = False
-        for nhop_path, predictor_count, overlap in rows:
+        for nhop_path, predictor_count, overlap, orientation_tag in rows:
             if nhop_path == "SmallMolecule|treats|F|Disease":
                 found = True
                 assert predictor_count == 3
                 # Full overlap with itself
                 assert overlap == 3
+                assert orientation_tag in ('fwd', 'rev')
                 break
         assert found
 
@@ -371,7 +373,8 @@ def test_group_type_pair_with_matrices_dir_produces_explicit_paths():
         assert len(rows) >= 2, f"Expected at least 2 rows (header+data), got {len(rows)}"
 
         header = rows[0].split("\t")
-        assert "predictor_metapath" in header[0]
+        assert header[0] == "predictor_metapath"
+        assert header[1] == "orientation"
 
         # Output should contain explicit predictor paths (not rolled-up variants)
         predictor_paths = []
@@ -379,8 +382,9 @@ def test_group_type_pair_with_matrices_dir_produces_explicit_paths():
             parts = row.split("\t")
             assert len(parts) == len(header), f"Row has wrong number of fields: {row}"
             predictor_paths.append(parts[0])
-            predictor_count = int(parts[1])
-            overlap_val = int(parts[2])
+            assert parts[1] in ('fwd', 'rev'), f"Bad orientation: {parts[1]}"
+            predictor_count = int(parts[2])
+            overlap_val = int(parts[3])
             assert predictor_count > 0
             assert overlap_val > 0
 

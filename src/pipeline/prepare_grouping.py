@@ -81,7 +81,8 @@ def create_grouping_manifest(type_pairs, results_dir, n_hops):
             "status": "pending",
             "job_id": None,
             "attempts": 0,
-            "memory_tier": 32,
+            "memory_tier": 64,
+            "cpu_tier": 1,
             "last_update": None,
             "error_type": None
         }

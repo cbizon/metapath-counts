@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--passa-max-concurrent", type=int, default=100, help="Max concurrent Pass A array tasks")
     parser.add_argument("--mem-passa", type=int, default=64, help="Memory (GB) for Pass A tasks")
     parser.add_argument("--mem-reducea", type=int, default=128, help="Memory (GB) for Reduce A")
+    parser.add_argument("--time-reducea", type=str, default="10:00:00", help="Time limit for Reduce A (HH:MM:SS, default: 10:00:00)")
     return parser.parse_args()
 
 
@@ -88,6 +89,7 @@ def main():
         "sbatch",
         f"--partition={args.partition}",
         f"--mem={args.mem_reducea}G",
+        f"--time={args.time_reducea}",
         f"--dependency=afterok:{job_a}",
         "--job-name=prepA_reduce",
         f"--output={logs_dir}/prepA_reduce.out",

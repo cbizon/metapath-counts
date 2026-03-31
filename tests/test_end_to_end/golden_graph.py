@@ -22,15 +22,16 @@ Nodes (9 total):
   Protein_M       - pure Protein
   Protein_N       - pure Protein
 
-Edges (15 total):
-  affects (8 edges):
+Edges (16 total):
+  affects (9 edges):
     Gene_A         --affects--> Disease_P
     Gene_A         --affects--> Disease_Q
     Gene_B         --affects--> Disease_P
     Gene_B         --affects--> Disease_Q   # Creates triangle with SmallMolecule_Y
+    Disease_P      --affects--> Gene_B      # REVERSE direction; creates (Disease, affects, Gene) matrix
     Protein_M      --affects--> Disease_P
     GeneProtein_Z  --affects--> Disease_Q   # Pseudo-type!
-    SmallMolecule_X --affects[increased/activity]--> Gene_A  # qualified; Creates SmallMolecule→Gene→Disease triangle
+    SmallMolecule_X --affects_increased_activity--> Gene_A   # FLAT qualified predicate (as real KGs store them); Creates SmallMolecule→Gene→Disease triangle
     SmallMolecule_Y --affects--> Gene_B     # Creates SmallMolecule→Gene→Disease triangle
 
   treats (2 edges):
@@ -110,13 +111,19 @@ EDGES = [
     {"subject": "TEST:Gene_A", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
     {"subject": "TEST:Gene_B", "predicate": "biolink:affects", "object": "TEST:Disease_P"},
     {"subject": "TEST:Gene_B", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
+    # Reverse-direction affects edge: creates a separate (Disease, affects, Gene)
+    # base matrix alongside the (Gene, affects, Disease) one.  This exercises
+    # _lookup_hop_matrix direction logic — R direction must pick the
+    # (Disease, affects, Gene).T matrix, not the (Gene, affects, Disease) one.
+    {"subject": "TEST:Disease_P", "predicate": "biolink:affects", "object": "TEST:Gene_B"},
     {"subject": "TEST:Protein_M", "predicate": "biolink:affects", "object": "TEST:Disease_P"},
     {"subject": "TEST:GeneProtein_Z", "predicate": "biolink:affects", "object": "TEST:Disease_Q"},
+    # Flat qualified predicate: the real KG embeds qualifiers in the predicate
+    # name rather than in separate fields.  normalize_predicate() must
+    # decompose this to "affects--increased--activity" for hierarchy expansion.
     {
         "subject": "TEST:SmallMolecule_X",
-        "predicate": "biolink:affects",
-        "object_direction_qualifier": "increased",
-        "object_aspect_qualifier": "activity",
+        "predicate": "biolink:affects_increased_activity",
         "object": "TEST:Gene_A",
     },
     {"subject": "TEST:SmallMolecule_Y", "predicate": "biolink:affects", "object": "TEST:Gene_B"},
@@ -160,11 +167,11 @@ def write_golden_graph(workspace_path: Path):
 # Summary statistics for verification
 GRAPH_STATS = {
     "num_nodes": len(NODES),
-    "num_edges": len(EDGES),
+    "num_edges": 16,
     "num_pseudo_type_nodes": 1,  # GeneProtein_Z
     "edges_by_predicate": {
-        "affects": 7,  # 6 plain affects + 1 qualified (SmallMolecule_X→Gene_A uses affects--increased--activity_or_abundance)
-        "affects--increased--activity": 1,
+        "affects": 8,  # 7 plain affects (incl Disease_P→Gene_B reverse) + 1 flat-qualified (SmallMolecule_X→Gene_A)
+        "affects--increased--activity": 1,  # normalized from flat "affects_increased_activity"
         "treats": 2,
         "interacts_with": 3,
         "regulates": 1,

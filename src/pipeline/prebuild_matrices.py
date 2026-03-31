@@ -26,7 +26,7 @@ from pathlib import Path
 from collections import defaultdict
 import numpy as np
 import graphblas as gb
-from library import assign_node_type, get_symmetric_predicates, is_pseudo_type, build_compound_predicate
+from library import assign_node_type, get_symmetric_predicates, is_pseudo_type, build_compound_predicate, normalize_predicate
 
 
 def load_node_types(nodes_file: str, config: dict = None) -> dict:
@@ -134,6 +134,11 @@ def build_matrices(edges_file: str, node_types: dict):
                 direction_qualifier if direction_qualifier else None,
                 aspect_qualifier if aspect_qualifier else None
             )
+
+            # Normalize flat qualified predicates (e.g. affects_increased_expression
+            # -> affects--increased--expression) for when qualifiers are embedded
+            # in the predicate name rather than in separate edge fields.
+            pred = normalize_predicate(pred)
 
             # For symmetric predicates, add edge in both directions
             # Symmetry is determined by the base predicate

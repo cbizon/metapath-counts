@@ -16,7 +16,10 @@ from library import (
     calculate_metrics,
     build_compound_predicate,
     parse_compound_predicate,
-    is_compound_predicate
+    is_compound_predicate,
+    is_symmetric_path,
+    normalize_predicate,
+    normalize_metapath,
 )
 
 
@@ -473,3 +476,108 @@ class TestExpandMetapathToVariantsCompound:
         variants = expand_metapath_to_variants(metapath)
         # Should have a variant with plain "causes"
         assert any("|causes|" in v for v in variants)
+
+
+class TestNormalizePredicate:
+    """Tests for normalize_predicate and normalize_metapath."""
+
+    def test_already_compound_unchanged(self):
+        assert normalize_predicate("affects--increased--expression") == "affects--increased--expression"
+
+    def test_known_predicate_unchanged(self):
+        assert normalize_predicate("treats") == "treats"
+        assert normalize_predicate("affects") == "affects"
+        assert normalize_predicate("causes") == "causes"
+        assert normalize_predicate("interacts_with") == "interacts_with"
+        assert normalize_predicate("related_to") == "related_to"
+
+    def test_direction_and_aspect(self):
+        assert normalize_predicate("affects_increased_expression") == "affects--increased--expression"
+        assert normalize_predicate("causes_decreased_activity") == "causes--decreased--activity"
+        assert normalize_predicate("regulates_upregulated_activity_or_abundance") == "regulates--upregulated--activity_or_abundance"
+
+    def test_aspect_only(self):
+        assert normalize_predicate("affects_expression") == "affects----expression"
+        assert normalize_predicate("affects_abundance") == "affects----abundance"
+        assert normalize_predicate("causes_activity") == "causes----activity"
+
+    def test_direction_only(self):
+        assert normalize_predicate("affects_decreased") == "affects--decreased--"
+        assert normalize_predicate("affects_increased") == "affects--increased--"
+
+    def test_special_characters_in_aspect(self):
+        """ADP-ribosylation contains a hyphen."""
+        assert normalize_predicate("affects_decreased_ADP-ribosylation") == "affects--decreased--ADP-ribosylation"
+
+    def test_normalize_metapath_single_hop(self):
+        result = normalize_metapath("Gene|affects_increased_expression|F|Disease")
+        assert result == "Gene|affects--increased--expression|F|Disease"
+
+    def test_normalize_metapath_multi_hop(self):
+        result = normalize_metapath("Gene|affects_expression|F|SmallMolecule|treats|F|Disease")
+        assert result == "Gene|affects----expression|F|SmallMolecule|treats|F|Disease"
+
+    def test_normalize_metapath_already_clean(self):
+        mp = "Gene|affects|F|Disease"
+        assert normalize_metapath(mp) == mp
+
+    def test_hierarchy_after_normalization(self):
+        """Normalized predicates should have proper hierarchy via get_predicate_variants."""
+        v_specific = set(get_predicate_variants(normalize_predicate("affects_increased_expression")))
+        v_mid = set(get_predicate_variants(normalize_predicate("affects_expression")))
+        v_general = set(get_predicate_variants(normalize_predicate("affects")))
+
+        # affects----expression should be a variant of affects--increased--expression
+        assert "affects----expression" in v_specific
+        # affects should be a variant of both
+        assert "affects" in v_specific
+        assert "affects" in v_mid
+        # All variants of affects should be variants of affects----expression
+        assert v_general.issubset(v_mid)
+
+    def test_idempotent(self):
+        """Normalizing an already-normalized predicate should be a no-op."""
+        preds = [
+            "affects_increased_expression",
+            "treats",
+            "affects--decreased--activity",
+            "regulates_downregulated_stability",
+        ]
+        for p in preds:
+            once = normalize_predicate(p)
+            twice = normalize_predicate(once)
+            assert once == twice, f"normalize_predicate is not idempotent for {p}"
+
+
+class TestIsSymmetricPath:
+    """Test is_symmetric_path: reversing must give the same canonical form."""
+
+    def test_symmetric_predicate_same_type(self):
+        assert is_symmetric_path("A|p|A|A") is True
+
+    def test_palindromic_fwd_rev(self):
+        """A|p|F|B|p|R|A is symmetric even though p is not symmetric."""
+        assert is_symmetric_path("A|p|F|B|p|R|A") is True
+
+    def test_directed_same_endpoints(self):
+        """A|p|F|A reversed gives A|p|R|A — different."""
+        assert is_symmetric_path("A|p|F|A") is False
+
+    def test_different_endpoints(self):
+        assert is_symmetric_path("A|p|F|B") is False
+
+    def test_different_predicates(self):
+        assert is_symmetric_path("A|p1|F|B|p2|R|A") is False
+
+    def test_3hop_palindrome(self):
+        assert is_symmetric_path("A|p|A|B|p|A|A") is True
+
+    def test_3hop_not_palindrome(self):
+        assert is_symmetric_path("A|p|F|B|q|F|C|p|R|A") is False
+
+    def test_2hop_all_symmetric_same_endpoints(self):
+        assert is_symmetric_path("A|p|A|B|q|A|A") is False  # p != q
+
+    def test_fwd_fwd_same_endpoints(self):
+        """A|p|F|B|p|F|A reversed gives A|p|R|B|p|R|A — different."""
+        assert is_symmetric_path("A|p|F|B|p|F|A") is False

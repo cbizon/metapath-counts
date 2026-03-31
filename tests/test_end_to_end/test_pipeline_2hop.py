@@ -245,16 +245,22 @@ class TestRawResult2HopOverlaps:
              predicted_count=4  (pseudo-type GeneProtein_Z not included in raw result)
         Overlap = 2  (Gene_A reaches both Disease_P and Disease_Q via the 2-hop)
 
-        Note: The path may be canonicalized (reversed) in the output.
+        Note: The golden graph has a bidirectional affects edge between Disease
+        and Gene (Disease_P→Gene_B in addition to Gene→Disease). This creates
+        a separate (Disease, affects, Gene) base matrix and additional paths like
+        Disease|affects|F|Gene|regulates|R|Gene. We filter to predicted_path ==
+        Gene|affects|F|Disease to test only the original path.
+
+        If the _lookup_hop_matrix direction fix regresses, this test may fail
+        intermittently depending on dict ordering of base matrices.
         """
         raw_results = pipeline_2hop["raw_results"]
 
         matches = [
             r for r in raw_results
             if 'regulates' in r['predictor_path']
-            and 'affects' in r['predictor_path']
-            and 'Disease' in r['predictor_path']
-            and 'affects' in r['predicted_path']
+            and r['predictor_path'].endswith('|Disease')
+            and r['predicted_path'] == 'Gene|affects|F|Disease'
         ]
 
         assert len(matches) >= 1, (
@@ -283,6 +289,14 @@ class TestRawResult2HopOverlaps:
 
         Target: Gene|regulates|F|Gene = {(Gene_A, Gene_B)}
         Overlap = 1 (the single remaining pair matches)
+
+        Note: The bidirectional Disease→Gene affects edge also creates a second
+        path Gene|affects|R|Disease|affects|R|Gene (using Disease_P→Gene_B as
+        the first hop in reverse), which matches Gene|regulates|R|Gene as target.
+        Both paths have predictor_count=1 after triu dedup.
+
+        If the _lookup_hop_matrix direction fix regresses, these tests may fail
+        intermittently depending on dict ordering of base matrices.
         """
         raw_results = pipeline_2hop["raw_results"]
 
@@ -292,18 +306,18 @@ class TestRawResult2HopOverlaps:
             and 'regulates' in r['predicted_path']
         ]
 
-        assert len(matches) == 1, (
-            "Expected exactly one Gene→Disease→Gene (affects×2) vs Gene→Gene (regulates)"
+        assert len(matches) >= 1, (
+            "Expected at least one Gene→Disease→Gene (affects×2) vs Gene→Gene (regulates)"
         )
 
-        match = matches[0]
-        assert match['predictor_count'] == 1, (
-            f"Expected predictor_count=1 after palindromic dedup (triu), "
-            f"got {match['predictor_count']}"
-        )
-        assert match['overlap'] == 1, (
-            f"Expected overlap=1, got {match['overlap']}"
-        )
+        for match in matches:
+            assert match['predictor_count'] == 1, (
+                f"Expected predictor_count=1 after palindromic dedup (triu), "
+                f"got {match['predictor_count']} for {match['predictor_path']}"
+            )
+            assert match['overlap'] == 1, (
+                f"Expected overlap=1, got {match['overlap']} for {match['predictor_path']}"
+            )
 
     def test_gene_affects_disease_affects_protein_overlap(self, pipeline_2hop):
         """Gene→Disease→Protein via affects should overlap with Gene→Protein interacts_with.
@@ -338,12 +352,11 @@ class TestRawResult2HopOverlaps:
     def test_total_raw_result_count(self, pipeline_2hop):
         """Verify exact number of raw result rows as regression guard.
 
-        The golden graph produces exactly 18 raw 2-hop result rows (with overlap > 0).
+        The golden graph produces exactly 21 raw 2-hop result rows (with overlap > 0).
 
-        The count is 18 rather than 15 (pre-qualifier) because SmallMolecule_X's
-        qualified edge (affects--increased--activity) creates a
-        separate matrix from SmallMolecule_Y's plain affects edge.  This has
-        three effects (+1 each):
+        The count is 21 rather than 15 (pre-qualifier, pre-bidirectional) because:
+
+        Qualified predicate effects (+3):
         1. Predictor split: SmallMolecule|affects|F|Gene|affects|F|Disease
            splits into two rows (plain affects and qualified affects).
         2. Direction flip: Disease|treats|R|SmallMolecule|affects|F|Gene (1 row)
@@ -351,10 +364,17 @@ class TestRawResult2HopOverlaps:
            matrices flip should_process_path's direction decision.
         3. Extra 1-hop target: SmallMolecule|treats|F|Disease|affects|R|Gene
            now matches two 1-hop SM→Gene matrices instead of one.
+
+        Bidirectional affects edge effects (+3):
+        The Disease_P→Gene_B reverse affects edge creates a separate
+        (Disease, affects, Gene) base matrix, producing 3 new paths:
+        4. Disease|affects|F|Gene|regulates|R|Gene vs Disease|affects|R|Gene
+        5. Gene|affects|R|Disease|affects|R|Gene vs Gene|regulates|R|Gene
+        6. Gene|regulates|R|Gene|affects|F|Disease vs Gene|affects|R|Disease
         """
         raw_results = pipeline_2hop["raw_results"]
-        assert len(raw_results) == 18, (
-            f"Expected 18 raw result rows, got {len(raw_results)}. "
+        assert len(raw_results) == 21, (
+            f"Expected 21 raw result rows, got {len(raw_results)}. "
             f"Paths: {[r['predictor_path'] for r in raw_results]}"
         )
 
@@ -419,6 +439,13 @@ class TestRawResult2HopOverlaps:
 
         vs Gene|affects|F|Disease: 4 pairs
         Overlap: both (Gene_B, Disease_P) and (Gene_B, Disease_Q) are in affects → overlap=2
+
+        Note: The bidirectional Disease→Gene affects edge creates a new 1-hop
+        target Gene|affects|R|Disease (reverse of the Disease→Gene matrix),
+        so this predictor now matches 2 targets instead of 1.
+
+        If the _lookup_hop_matrix direction fix regresses, this test may fail
+        intermittently depending on dict ordering of base matrices.
         """
         raw_results = pipeline_2hop["raw_results"]
 
@@ -427,12 +454,24 @@ class TestRawResult2HopOverlaps:
             if r['predictor_path'] == 'Gene|regulates|R|Gene|affects|F|Disease'
         ]
 
-        assert len(matches) == 1, (
-            f"Expected Gene|regulates|R|Gene|affects|F|Disease"
+        assert len(matches) == 2, (
+            f"Expected Gene|regulates|R|Gene|affects|F|Disease to match 2 targets, "
+            f"got {len(matches)}: {[(m['predicted_path'], m['overlap']) for m in matches]}"
         )
-        assert matches[0]['predictor_count'] == 2
-        assert matches[0]['predicted_count'] == 4
-        assert matches[0]['overlap'] == 2
+
+        # Match against the forward Gene→Disease affects target (4 pairs)
+        fwd_matches = [m for m in matches if m['predicted_path'] == 'Gene|affects|F|Disease']
+        assert len(fwd_matches) == 1
+        assert fwd_matches[0]['predictor_count'] == 2
+        assert fwd_matches[0]['predicted_count'] == 4
+        assert fwd_matches[0]['overlap'] == 2
+
+        # Match against the reverse Disease→Gene affects target (1 pair from new edge)
+        rev_matches = [m for m in matches if m['predicted_path'] == 'Gene|affects|R|Disease']
+        assert len(rev_matches) == 1
+        assert rev_matches[0]['predictor_count'] == 2
+        assert rev_matches[0]['predicted_count'] == 1
+        assert rev_matches[0]['overlap'] == 1
 
     def test_pseudo_type_source_gene_protein_affects_disease_affects_gene(self, pipeline_2hop):
         """Gene+Protein|affects|F|Disease|affects|R|Gene: pseudo-type as source.
@@ -652,3 +691,20 @@ class TestGrouped2HopSpecificPaths:
         )
         plain_row = all_predictors[plain_path]
         assert plain_row["predictor_count"] == 2, f"Expected predictor_count=2, got {plain_row['predictor_count']}"
+
+
+class TestOrientationColumn2Hop:
+    """Test that the orientation column is present and valid in 2-hop grouped output."""
+
+    def test_orientation_column_exists(self, pipeline_2hop):
+        """Every row in every grouped output file must have an orientation field."""
+        grouped_results = pipeline_2hop["grouped_results"]
+
+        for filename, rows in grouped_results.items():
+            for row in rows:
+                assert 'orientation' in row, (
+                    f"Missing orientation column in {filename}: {row}"
+                )
+                assert row['orientation'] in ('fwd', 'rev'), (
+                    f"Bad orientation '{row['orientation']}' in {filename}"
+                )

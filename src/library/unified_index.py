@@ -20,6 +20,7 @@ import numpy as np
 
 from .aggregation import (
     get_predicate_variants,
+    normalize_predicate,
     parse_compound_predicate,
     parse_metapath,
 )
@@ -149,7 +150,7 @@ def load_base_matrices(matrices_dir):
             dtype=gb.dtypes.BOOL,
             dup_op=gb.binary.any,
         )
-        base_matrices[(src_type, pred, tgt_type)] = matrix
+        base_matrices[(src_type, normalize_predicate(pred), tgt_type)] = matrix
 
     return manifest_matrices, base_matrices
 
@@ -188,7 +189,7 @@ def build_target_pair_set(target_variant, base_matrices, manifest_matrices,
 
     ancestor_src = nodes[0]
     ancestor_tgt = nodes[1]
-    target_pred = predicates[0]
+    target_pred = normalize_predicate(predicates[0])
     direction = directions[0]
 
     union_matrix = gb.Matrix(gb.dtypes.BOOL, nrows=unified_nrows, ncols=unified_ncols)
@@ -239,6 +240,42 @@ def build_target_pair_set(target_variant, base_matrices, manifest_matrices,
     return union_matrix
 
 
+def _lookup_hop_matrix(src, pred, tgt, direction, base_matrices):
+    """Look up the base matrix for a single hop, respecting direction.
+
+    For direction F or A, the edge goes src→tgt, so we prefer (src, pred, tgt).
+    For direction R, the edge goes tgt→src (reverse traversal), so we prefer
+    (tgt, pred, src).T to get a matrix with rows=src, cols=tgt.
+
+    Falls back to the other key for symmetric predicates where only one
+    direction may be stored.
+
+    Returns:
+        GraphBLAS matrix with rows=src, cols=tgt, or None if not found.
+    """
+    pred = normalize_predicate(pred)
+    if direction == 'R':
+        # Reverse: real edge is tgt→src, need (tgt, pred, src).T
+        reverse_key = (tgt, pred, src)
+        if reverse_key in base_matrices:
+            return base_matrices[reverse_key].T
+        # Fallback for symmetric predicates stored in canonical direction only
+        key = (src, pred, tgt)
+        if key in base_matrices:
+            return base_matrices[key]
+        return None
+    else:
+        # Forward (F) or Any (A): real edge is src→tgt
+        key = (src, pred, tgt)
+        if key in base_matrices:
+            return base_matrices[key]
+        # Fallback for symmetric predicates stored in canonical direction only
+        reverse_key = (tgt, pred, src)
+        if reverse_key in base_matrices:
+            return base_matrices[reverse_key].T
+        return None
+
+
 def reconstruct_nhop_matrix(nhop_metapath, base_matrices):
     """Multiply base matrices along an N-hop path to reconstruct the N-hop pair set.
 
@@ -259,30 +296,16 @@ def reconstruct_nhop_matrix(nhop_metapath, base_matrices):
     accumulated = None
 
     for i in range(len(predicates)):
-        src = nodes[i]
-        tgt = nodes[i + 1]
-        pred = predicates[i]
-        direction = directions[i]
-
-        # Look up the base matrix for this hop.
-        # Direction F or A: matrix stored as (src, pred, tgt).
-        # Direction R: forward edge is tgt→src, stored as (tgt, pred, src), transpose it.
-        key = (src, pred, tgt)
-        if key in base_matrices:
-            hop_matrix = base_matrices[key]
-        else:
-            # Try reverse key for R direction or symmetric fallback
-            reverse_key = (tgt, pred, src)
-            if reverse_key in base_matrices:
-                hop_matrix = base_matrices[reverse_key].T
-            else:
-                return None
+        hop_matrix = _lookup_hop_matrix(
+            nodes[i], predicates[i], nodes[i + 1], directions[i], base_matrices,
+        )
+        if hop_matrix is None:
+            return None
 
         if accumulated is None:
             accumulated = hop_matrix.dup(dtype=gb.dtypes.BOOL)
         else:
-            result = accumulated.mxm(hop_matrix, gb.semiring.any_pair).new()
-            accumulated = result
+            accumulated = accumulated.mxm(hop_matrix, gb.semiring.any_pair).new()
 
     return accumulated
 
@@ -313,19 +336,11 @@ def reconstruct_prefix_matrix(nhop_metapath, n_prefix_hops, base_matrices):
     accumulated = None
 
     for i in range(n_prefix_hops):
-        src = nodes[i]
-        tgt = nodes[i + 1]
-        pred = predicates[i]
-
-        key = (src, pred, tgt)
-        if key in base_matrices:
-            hop_matrix = base_matrices[key]
-        else:
-            reverse_key = (tgt, pred, src)
-            if reverse_key in base_matrices:
-                hop_matrix = base_matrices[reverse_key].T
-            else:
-                return None
+        hop_matrix = _lookup_hop_matrix(
+            nodes[i], predicates[i], nodes[i + 1], directions[i], base_matrices,
+        )
+        if hop_matrix is None:
+            return None
 
         if accumulated is None:
             accumulated = hop_matrix.dup(dtype=gb.dtypes.BOOL)

@@ -24,11 +24,14 @@ from library.aggregation import (
     expand_metapath_to_typepair_variants,
     get_type_variants,
     calculate_metrics,
+    is_symmetric_path,
+    normalize_metapath,
     parse_compound_predicate,
     parse_metapath,
     original_predictor_identity,
 )
 from library.unified_index import (
+    _lookup_hop_matrix,
     build_target_pair_set,
     build_unified_type_offsets,
     load_base_matrices,
@@ -259,15 +262,21 @@ def _detect_metapath_orientation(metapath, type1, type2):
     Returns:
         'forward' if metapath src is under type1 and tgt is under type2.
         'reversed' if metapath src is under type2 and tgt is under type1.
+        'both' if both orientations match (ambiguous case).
         None if neither orientation matches.
     """
     nodes, _, _ = parse_metapath(metapath)
     src_ancestors = get_type_ancestors(nodes[0])
     tgt_ancestors = get_type_ancestors(nodes[-1])
 
-    if type1 in src_ancestors and type2 in tgt_ancestors:
+    fwd = type1 in src_ancestors and type2 in tgt_ancestors
+    rev = type2 in src_ancestors and type1 in tgt_ancestors
+
+    if fwd and rev:
+        return 'both'
+    if fwd:
         return 'forward'
-    if type2 in src_ancestors and type1 in tgt_ancestors:
+    if rev:
         return 'reversed'
     return None
 
@@ -286,6 +295,43 @@ def _get_final_hop_key(nhop_path, n_hops):
     nodes, predicates, directions = parse_metapath(nhop_path)
     i = n_hops - 1
     return nodes[i], predicates[i], nodes[i + 1], directions[i]
+
+
+def _orientation_tags(orientation, nhop_path):
+    """Return the list of orientation tags to evaluate for a given detection result."""
+    if orientation == 'forward':
+        return ['fwd']
+    elif orientation == 'reversed':
+        return ['rev']
+    elif orientation == 'both':
+        return ['fwd'] if is_symmetric_path(nhop_path) else ['fwd', 'rev']
+    return []
+
+
+def _remap_to_unified(matrix, nhop_path, orientation_tag,
+                       type1_offsets, type2_offsets,
+                       type1_total, type2_total):
+    """Remap a path matrix to unified (type1, type2) coordinate space.
+
+    Args:
+        orientation_tag: 'fwd' maps src->type1 rows, tgt->type2 cols.
+                         'rev' maps src->type2, tgt->type1, then transposes.
+    """
+    if orientation_tag == 'fwd':
+        remapped = remap_nhop_to_unified(
+            matrix, nhop_path,
+            type1_offsets, type2_offsets,
+            type1_total, type2_total,
+        )
+    else:  # 'rev'
+        remapped = remap_nhop_to_unified(
+            matrix, nhop_path,
+            type2_offsets, type1_offsets,
+            type2_total, type1_total,
+        )
+        if remapped is not None and remapped.nvals > 0:
+            remapped = remapped.T.new()
+    return remapped
 
 
 def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pair_counts,
@@ -311,7 +357,8 @@ def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pa
         stage_timings: Stage timings dict
 
     Returns:
-        {target_variant: [(nhop_path, predictor_count, overlap)]}
+        {target_variant: [(nhop_path, predictor_count, overlap, orientation_tag)]}
+        orientation_tag is 'fwd' or 'rev'.
     """
     t0 = time.time()
 
@@ -345,7 +392,7 @@ def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pa
     type2_offsets, type2_total = build_unified_type_offsets(type2, manifest_matrices)
 
     # Step 4: Process each prefix group
-    results = defaultdict(list)  # target_variant -> [(nhop_path, predictor_count, overlap)]
+    results = defaultdict(list)  # target_variant -> [(nhop_path, predictor_count, overlap, orientation_tag)]
     total_paths_processed = 0
     total_reconstructions = 0
     total_reconstruction_failures = 0
@@ -363,36 +410,28 @@ def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pa
                     continue
 
                 orientation = _detect_metapath_orientation(nhop_path, type1, type2)
-                if orientation == 'forward':
-                    remapped = remap_nhop_to_unified(
-                        nhop_matrix, nhop_path,
-                        type1_offsets, type2_offsets,
-                        type1_total, type2_total,
-                    )
-                elif orientation == 'reversed':
-                    remapped = remap_nhop_to_unified(
-                        nhop_matrix, nhop_path,
-                        type2_offsets, type1_offsets,
-                        type2_total, type1_total,
-                    )
-                    if remapped is not None and remapped.nvals > 0:
-                        remapped = remapped.T.new()
-                else:
-                    remapped = None
-
-                if remapped is None or remapped.nvals == 0:
+                tags = _orientation_tags(orientation, nhop_path)
+                if not tags:
                     total_paths_processed += 1
                     continue
 
-                predictor_count = remapped.nvals
-                for target_variant in path_to_targets[nhop_path]:
-                    target_ps = target_pair_sets.get(target_variant)
-                    if target_ps is None:
+                for tag in tags:
+                    remapped = _remap_to_unified(
+                        nhop_matrix, nhop_path, tag,
+                        type1_offsets, type2_offsets,
+                        type1_total, type2_total,
+                    )
+                    if remapped is None or remapped.nvals == 0:
                         continue
-                    intersection = remapped.ewise_mult(target_ps, gb.binary.pair).new()
-                    exact_overlap = intersection.nvals
-                    if exact_overlap > 0:
-                        results[target_variant].append((nhop_path, predictor_count, exact_overlap))
+                    predictor_count = remapped.nvals
+                    for target_variant in path_to_targets[nhop_path]:
+                        target_ps = target_pair_sets.get(target_variant)
+                        if target_ps is None:
+                            continue
+                        intersection = remapped.ewise_mult(target_ps, gb.binary.pair).new()
+                        exact_overlap = intersection.nvals
+                        if exact_overlap > 0:
+                            results[target_variant].append((nhop_path, predictor_count, exact_overlap, tag))
 
                 total_paths_processed += 1
         else:
@@ -414,17 +453,13 @@ def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pa
                 # Get final hop matrix
                 final_src, final_pred, final_tgt, final_dir = _get_final_hop_key(nhop_path, n_hops)
 
-                key = (final_src, final_pred, final_tgt)
-                if key in base_matrices:
-                    final_hop = base_matrices[key]
-                else:
-                    reverse_key = (final_tgt, final_pred, final_src)
-                    if reverse_key in base_matrices:
-                        final_hop = base_matrices[reverse_key].T
-                    else:
-                        total_reconstruction_failures += 1
-                        total_paths_processed += 1
-                        continue
+                final_hop = _lookup_hop_matrix(
+                    final_src, final_pred, final_tgt, final_dir, base_matrices,
+                )
+                if final_hop is None:
+                    total_reconstruction_failures += 1
+                    total_paths_processed += 1
+                    continue
 
                 # Full N-hop matrix = prefix × final_hop
                 full_matrix = prefix_matrix.mxm(final_hop, gb.semiring.any_pair).new()
@@ -435,37 +470,28 @@ def compute_direct_metrics(onehop_to_overlaps, target_pair_sets, exact_target_pa
 
                 # Remap to unified coords
                 orientation = _detect_metapath_orientation(nhop_path, type1, type2)
-                if orientation == 'forward':
-                    remapped = remap_nhop_to_unified(
-                        full_matrix, nhop_path,
-                        type1_offsets, type2_offsets,
-                        type1_total, type2_total,
-                    )
-                elif orientation == 'reversed':
-                    remapped = remap_nhop_to_unified(
-                        full_matrix, nhop_path,
-                        type2_offsets, type1_offsets,
-                        type2_total, type1_total,
-                    )
-                    if remapped is not None and remapped.nvals > 0:
-                        remapped = remapped.T.new()
-                else:
-                    remapped = None
-
-                if remapped is None or remapped.nvals == 0:
+                tags = _orientation_tags(orientation, nhop_path)
+                if not tags:
                     total_paths_processed += 1
                     continue
 
-                predictor_count = remapped.nvals
-
-                for target_variant in path_to_targets[nhop_path]:
-                    target_ps = target_pair_sets.get(target_variant)
-                    if target_ps is None:
+                for tag in tags:
+                    remapped = _remap_to_unified(
+                        full_matrix, nhop_path, tag,
+                        type1_offsets, type2_offsets,
+                        type1_total, type2_total,
+                    )
+                    if remapped is None or remapped.nvals == 0:
                         continue
-                    intersection = remapped.ewise_mult(target_ps, gb.binary.pair).new()
-                    exact_overlap = intersection.nvals
-                    if exact_overlap > 0:
-                        results[target_variant].append((nhop_path, predictor_count, exact_overlap))
+                    predictor_count = remapped.nvals
+                    for target_variant in path_to_targets[nhop_path]:
+                        target_ps = target_pair_sets.get(target_variant)
+                        if target_ps is None:
+                            continue
+                        intersection = remapped.ewise_mult(target_ps, gb.binary.pair).new()
+                        exact_overlap = intersection.nvals
+                        if exact_overlap > 0:
+                            results[target_variant].append((nhop_path, predictor_count, exact_overlap, tag))
 
                 total_paths_processed += 1
 
@@ -545,7 +571,7 @@ def compute_exact_target_pair_counts(target_variant_counts, base_matrices, manif
     for idx, variant in enumerate(target_variant_counts, start=1):
         orientation = _detect_metapath_orientation(variant, type1, type2)
 
-        if orientation == 'forward':
+        if orientation in ('forward', 'both'):
             # Variant src matches type1, tgt matches type2
             pair_set = build_target_pair_set(
                 variant, base_matrices, manifest_matrices,
@@ -656,9 +682,9 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
                 if len(parts) != 6:
                     continue
 
-                nhop_path = parts[0]
+                nhop_path = normalize_metapath(parts[0])
                 nhop_count = int(parts[1])
-                onehop_path = parts[2]
+                onehop_path = normalize_metapath(parts[2])
                 onehop_count = int(parts[3])
                 overlap = int(parts[4])
 
@@ -856,12 +882,12 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
         t_write = time.time()
 
         with zstandard.open(output_file, 'wt') as out:
-            out.write("predictor_metapath\tpredictor_count\toverlap\ttotal_possible\t")
+            out.write("predictor_metapath\torientation\tpredictor_count\toverlap\ttotal_possible\t")
             out.write("precision\trecall\tf1\tmcc\tspecificity\tnpv\n")
 
             # Sort by overlap descending
             sorted_rows = sorted(target_rows, key=lambda x: x[2], reverse=True)
-            for nhop_path, predictor_count, overlap in sorted_rows:
+            for nhop_path, predictor_count, overlap, orientation_tag in sorted_rows:
                 if should_exclude_metapath(nhop_path, excluded_types, excluded_predicates):
                     rows_filtered_excluded += 1
                     continue
@@ -878,7 +904,7 @@ def group_type_pair(type1, type2, file_list, output_dir, n_hops, explicit_items,
                     rows_filtered_precision += 1
                     continue
 
-                out.write(f"{nhop_path}\t{predictor_count}\t{overlap}\t{total_possible_for_pair}\t")
+                out.write(f"{nhop_path}\t{orientation_tag}\t{predictor_count}\t{overlap}\t{total_possible_for_pair}\t")
                 out.write(f"{metrics['precision']:.6f}\t{metrics['recall']:.6f}\t")
                 out.write(f"{metrics['f1']:.6f}\t{metrics['mcc']:.6f}\t")
                 out.write(f"{metrics['specificity']:.6f}\t{metrics['npv']:.6f}\n")

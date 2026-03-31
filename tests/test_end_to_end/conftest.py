@@ -297,7 +297,7 @@ def parse_all_grouped_files(grouped_dir):
 def parse_grouped_output(output_file):
     """Parse a grouped output TSV file into a list of dicts.
 
-    Columns: predictor_metapath, predictor_count, overlap, total_possible,
+    Columns: predictor_metapath, orientation, predictor_count, overlap, total_possible,
              precision, recall, f1, mcc, specificity, npv
     """
     rows = []

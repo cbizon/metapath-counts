@@ -21,8 +21,11 @@ from library.slurm import (
     get_pending_slurm_jobs,
     get_completed_jobs_since,
     increment_memory_tier,
+    increment_cpu_tier,
+    check_error_log_for_failure_type,
     submit_slurm_job,
     GROUPING_MEMORY_TIERS,
+    GROUPING_CPU_TIERS,
 )
 
 # Configuration
@@ -108,7 +111,8 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
                         exclude_predicates="related_to,related_to_at_instance_level,related_to_at_concept_level,associated_with",
                         partition='lowpri',
                         output_dir=None,
-                        matrices_dir=None):
+                        matrices_dir=None,
+                        cpus=1):
     """Submit a SLURM job for one type pair.
 
     Args:
@@ -124,6 +128,7 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         exclude_predicates: Comma-separated predicates to exclude
         partition: SLURM partition to submit to (default: lowpri)
         matrices_dir: Matrices directory for exact pair-set tracking
+        cpus: Number of CPUs to allocate (default: 1)
 
     Returns:
         Job ID string or None if submission failed
@@ -142,9 +147,10 @@ def submit_grouping_job(type1, type2, file_list, memory_gb, n_hops, job_index,
         "sbatch",
         f"--partition={partition}",
         f"--mem={memory_gb}G",
+        f"--cpus-per-task={cpus}",
         f"--job-name={job_name}",
-        f"--output={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.out",
-        f"--error={log_dir}/typepair_{job_index:04d}_mem{memory_gb}.err",
+        f"--output={log_dir}/typepair_{job_index:04d}_mem{memory_gb}_cpu{cpus}.out",
+        f"--error={log_dir}/typepair_{job_index:04d}_mem{memory_gb}_cpu{cpus}.err",
         WORKER_SCRIPT,
         type1,
         type2,
@@ -225,12 +231,113 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
     # Track submitted jobs
     submitted_jobs = {}  # job_id -> job_key
 
-    # Load existing running jobs from manifest
+    # Load existing running jobs from manifest and verify they're still in SLURM
+    running_slurm = set(get_running_slurm_jobs(include_names=False))
+    pending_slurm = set(get_pending_slurm_jobs())
+    active_slurm = running_slurm | pending_slurm
+
     for job_key, data in manifest.items():
         if job_key == "_metadata":
             continue
         if data["status"] == "running" and data["job_id"]:
-            submitted_jobs[data["job_id"]] = job_key
+            if data["job_id"] in active_slurm:
+                submitted_jobs[data["job_id"]] = job_key
+            else:
+                # Job is marked running but not in SLURM - it was lost
+                print(f"Stale running job {job_key} (SLURM {data['job_id']}) - resetting to pending")
+                update_job_status(
+                    manifest, job_key, manifest_path,
+                    status="pending",
+                    job_id=None
+                )
+
+    # Retry failed jobs with appropriate tier escalation
+    log_dir = f"logs_grouping_{n_hops}hop"
+    failed_jobs = get_jobs_by_status(manifest, "failed")
+    if failed_jobs:
+        print(f"\nFound {len(failed_jobs)} failed jobs - checking for retryable errors...")
+        retried = 0
+        permanent = 0
+        for job_key, data in failed_jobs:
+            job_index = data["index"]
+            current_memory = data["memory_tier"]
+            current_cpus = data.get("cpu_tier", 1)
+
+            # Check error logs across all memory tiers and naming conventions
+            # (logs at the current tier may have been overwritten by cancelled reruns)
+            error_type = None
+            all_tiers = sorted(set([current_memory] + GROUPING_MEMORY_TIERS), reverse=True)
+            for mem in all_tiers:
+                for suffix in [f"_cpu{current_cpus}", ""]:
+                    err_file = f"{log_dir}/typepair_{job_index:04d}_mem{mem}{suffix}.err"
+                    error_type = check_error_log_for_failure_type(err_file)
+                    if error_type:
+                        break
+                if error_type:
+                    break
+
+            # Also treat SLURM OUT_OF_MEMORY state as memory error
+            if not error_type and data.get("error_type") in ("OUT_OF_MEMORY", "OOM_MAX_MEMORY"):
+                error_type = "MEMORY"
+
+            if error_type == "MEMORY":
+                next_memory = increment_memory_tier(current_memory, GROUPING_MEMORY_TIERS)
+                if next_memory:
+                    print(f"  ⚠ {job_key} memory error at {current_memory}GB → retrying at {next_memory}GB")
+                    update_job_status(
+                        manifest, job_key, manifest_path,
+                        status="pending",
+                        memory_tier=next_memory,
+                        job_id=None
+                    )
+                    retried += 1
+                else:
+                    print(f"  ✗ {job_key} memory error at {current_memory}GB (max reached)")
+                    permanent += 1
+
+            elif error_type == "THREAD":
+                next_cpus = increment_cpu_tier(current_cpus, GROUPING_CPU_TIERS)
+                if next_cpus:
+                    print(f"  ⚠ {job_key} thread error with {current_cpus} CPUs → retrying with {next_cpus} CPUs")
+                    update_job_status(
+                        manifest, job_key, manifest_path,
+                        status="pending",
+                        cpu_tier=next_cpus,
+                        job_id=None
+                    )
+                    retried += 1
+                else:
+                    print(f"  ✗ {job_key} thread error with {current_cpus} CPUs (max reached)")
+                    permanent += 1
+
+            elif error_type == "TIMEOUT":
+                print(f"  ✗ {job_key} timed out (not retrying)")
+                permanent += 1
+
+            else:
+                # Unknown error - escalate memory since most failures are memory-related
+                next_memory = increment_memory_tier(current_memory, GROUPING_MEMORY_TIERS)
+                if next_memory:
+                    print(f"  ? {job_key} unknown error at {current_memory}GB → retrying at {next_memory}GB")
+                    update_job_status(
+                        manifest, job_key, manifest_path,
+                        status="pending",
+                        memory_tier=next_memory,
+                        job_id=None
+                    )
+                    retried += 1
+                else:
+                    # At max memory, retry at same tier one more time
+                    print(f"  ? {job_key} unknown error at {current_memory}GB (max) → retrying once more")
+                    update_job_status(
+                        manifest, job_key, manifest_path,
+                        status="pending",
+                        job_id=None
+                    )
+                    retried += 1
+
+        print(f"  Retrying: {retried}, Permanent failures: {permanent}")
+        manifest = load_manifest(manifest_path)
 
     start_time = datetime.now()
 
@@ -257,6 +364,8 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
 
                 job_key = submitted_jobs[job_id]
                 current_memory = manifest[job_key]["memory_tier"]
+                current_cpus = manifest[job_key].get("cpu_tier", 1)
+                job_index = manifest[job_key]["index"]
 
                 print(f"Job {job_id} ({job_key}) completed: State={state}, ExitCode={exit_code}")
 
@@ -290,13 +399,71 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
                     del submitted_jobs[job_id]
 
                 else:
-                    # Other failure
-                    print(f"  ✗ {job_key} failed: {state}")
-                    update_job_status(
-                        manifest, job_key, manifest_path,
-                        status="failed",
-                        error_type=state
-                    )
+                    # Check error log for detailed failure type
+                    log_dir = f"logs_grouping_{n_hops}hop"
+                    err_file = f"{log_dir}/typepair_{job_index:04d}_mem{current_memory}_cpu{current_cpus}.err"
+                    error_type = check_error_log_for_failure_type(err_file)
+
+                    if error_type == 'MEMORY':
+                        # Memory error (NumPy allocation, etc.) - retry with more memory
+                        next_memory = increment_memory_tier(current_memory, GROUPING_MEMORY_TIERS)
+
+                        if next_memory:
+                            print(f"  ⚠ {job_key} memory error at {current_memory}GB, retrying at {next_memory}GB")
+                            update_job_status(
+                                manifest, job_key, manifest_path,
+                                status="pending",
+                                memory_tier=next_memory,
+                                attempts=manifest[job_key]["attempts"] + 1,
+                                job_id=None
+                            )
+                        else:
+                            print(f"  ✗ {job_key} failed memory error at {current_memory}GB (max memory reached)")
+                            update_job_status(
+                                manifest, job_key, manifest_path,
+                                status="failed",
+                                error_type="MEMORY_MAX_REACHED"
+                            )
+
+                    elif error_type == 'THREAD':
+                        # Thread creation failure - retry with more CPUs
+                        next_cpus = increment_cpu_tier(current_cpus, GROUPING_CPU_TIERS)
+
+                        if next_cpus:
+                            print(f"  ⚠ {job_key} thread error with {current_cpus} CPUs, retrying with {next_cpus} CPUs")
+                            update_job_status(
+                                manifest, job_key, manifest_path,
+                                status="pending",
+                                cpu_tier=next_cpus,
+                                attempts=manifest[job_key]["attempts"] + 1,
+                                job_id=None
+                            )
+                        else:
+                            print(f"  ✗ {job_key} failed thread error with {current_cpus} CPUs (max CPUs reached)")
+                            update_job_status(
+                                manifest, job_key, manifest_path,
+                                status="failed",
+                                error_type="THREAD_MAX_REACHED"
+                            )
+
+                    elif error_type == 'TIMEOUT':
+                        # Timeout - mark as failed (already at 48 hours)
+                        print(f"  ✗ {job_key} timed out after 48 hours")
+                        update_job_status(
+                            manifest, job_key, manifest_path,
+                            status="failed",
+                            error_type="TIMEOUT"
+                        )
+
+                    else:
+                        # Other failure - mark as failed
+                        print(f"  ✗ {job_key} failed: {state}")
+                        update_job_status(
+                            manifest, job_key, manifest_path,
+                            status="failed",
+                            error_type=state
+                        )
+
                     del submitted_jobs[job_id]
 
         # Reload manifest after updates
@@ -319,18 +486,20 @@ def orchestrate(n_hops, min_count=10, min_precision=0.001,
                 type2 = data["type2"]
                 job_index = data["index"]
                 memory_tier = data["memory_tier"]
+                cpu_tier = data.get("cpu_tier", 1)
 
                 # Get pre-computed file list
                 typepair_key = (type1, type2)
                 file_list = typepair_to_files.get(typepair_key, [])
 
-                print(f"Submitting {job_key} ({type1}, {type2}) with {memory_tier}GB ({len(file_list)} files, attempt {data['attempts'] + 1})...")
+                print(f"Submitting {job_key} ({type1}, {type2}) with {memory_tier}GB, {cpu_tier} CPUs ({len(file_list)} files, attempt {data['attempts'] + 1})...")
                 job_id = submit_grouping_job(
                     type1, type2, file_list, memory_tier, n_hops, job_index,
                     min_count=min_count, min_precision=min_precision,
                     exclude_types=exclude_types, exclude_predicates=exclude_predicates,
                     partition=partition, output_dir=output_dir,
                     matrices_dir=matrices_dir,
+                    cpus=cpu_tier,
                 )
 
                 if job_id:

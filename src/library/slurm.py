@@ -15,7 +15,10 @@ from datetime import datetime
 
 # Default memory tiers for different job types
 HOP_ANALYSIS_MEMORY_TIERS = [180, 250, 500, 1000, 1400]
-GROUPING_MEMORY_TIERS = [64, 128, 250, 500]
+GROUPING_MEMORY_TIERS = [64, 128, 250, 500, 1000]
+
+# CPU tiers for thread creation failures
+GROUPING_CPU_TIERS = [1, 4, 8, 16]
 
 
 def load_manifest(manifest_path):
@@ -224,6 +227,69 @@ def increment_memory_tier(current_memory, memory_tiers=None):
             return tier
 
     return None  # Already at max
+
+
+def increment_cpu_tier(current_cpus, cpu_tiers=None):
+    """Increment CPU tier for retry.
+
+    Args:
+        current_cpus: Current number of CPUs
+        cpu_tiers: List of CPU tiers in ascending order.
+                  Defaults to GROUPING_CPU_TIERS.
+
+    Returns:
+        Next CPU tier or None if at max
+    """
+    if cpu_tiers is None:
+        cpu_tiers = GROUPING_CPU_TIERS
+
+    for tier in cpu_tiers:
+        if current_cpus < tier:
+            return tier
+
+    return None  # Already at max
+
+
+def check_error_log_for_failure_type(log_file_path):
+    """Check error log file to determine failure type.
+
+    Args:
+        log_file_path: Path to SLURM .err file
+
+    Returns:
+        String indicating error type: 'MEMORY', 'THREAD', 'TIMEOUT', or None
+    """
+    if not os.path.exists(log_file_path):
+        return None
+
+    try:
+        with open(log_file_path, 'r') as f:
+            content = f.read()
+
+        # Check for various memory-related errors
+        if any(indicator in content for indicator in [
+            'oom_kill',
+            'OOM',
+            'ArrayMemoryError',
+            'Unable to allocate',
+            'MemoryError',
+            'out of memory'
+        ]):
+            return 'MEMORY'
+
+        # Check for thread creation failures
+        if 'Thread creation failed' in content or 'Resource temporarily unavailable' in content:
+            return 'THREAD'
+
+        # Check for timeout
+        if 'TIME LIMIT' in content or 'DUE TO TIME LIMIT' in content:
+            return 'TIMEOUT'
+
+        return None
+
+    except Exception as e:
+        print(f"Warning: Failed to read log file {log_file_path}: {e}")
+        return None
 
 
 def submit_slurm_job(cmd, job_name=None):
